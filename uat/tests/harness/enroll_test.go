@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nkeys"
 
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -29,6 +31,9 @@ func TestEnrollAgainstFake(t *testing.T) {
 	res, err := f.Enroll.Enroll(c, s, key.RegistrationKey)
 	if err != nil || !res.OK() || res.SproutID != "uat-synth-unit" || res.TenantID != f.TenantID(1) || res.HasGatewayJWT || !res.HasBinding {
 		t.Fatalf("first: %+v %v", res, err)
+	}
+	if fp, err := jointoken.FingerprintB64(res.TenantX25519Pub); err != nil || fp != key.TenantKeyFingerprint || !strings.HasSuffix(key.RegistrationKey, "."+fp) {
+		t.Fatalf("tenant key fingerprint %s (%v); the key says %s", fp, err, key.TenantKeyFingerprint)
 	}
 	s2, _ := NewSyntheticSprout("uat-synth-unit2")
 	res, err = f.Enroll.Enroll(c, s2, key.RegistrationKey)

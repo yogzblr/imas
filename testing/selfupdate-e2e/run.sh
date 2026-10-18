@@ -52,7 +52,9 @@ declare -A sprout_image=(
 	[rocky]="${ROCKY_IMAGE:-mirror.gcr.io/dokken/rockylinux-9:latest}"
 )
 nfpm="github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0"
-join_token="e2ekey.e2esecret"
+# The stub farmer accepts this credential and writes the full join token,
+# with its tenant key's fingerprint (L24), to state/join-token.
+join_credential="e2ekey.e2esecret"
 # The private repository's read token: the password of a read-only Nexus
 # user named "buildkite", the user the sprout (and the Ansible role) sends.
 repo_token="e2e-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -103,10 +105,11 @@ docker run -d --name e2e-nexus --network "$net" -p "127.0.0.1:$nexus_port:8081" 
 docker run -d --name e2e-farmer --network "$net" --network-alias farmer --network-alias repo \
 	-p "127.0.0.1:$farmer_port:5405" -v "$work:/work" "$helper_image" \
 	/work/bin/stubfarmer -addr :5405 -nats-port 5406 -hosts farmer -nats-urls tls://farmer:5406 \
-	-join-token "$join_token" -state-dir /work/state \
+	-join-token "$join_credential" -state-dir /work/state \
 	-repo-proxy-to http://e2e-nexus:8081 -repo-proxy-addr :8443 -repo-hosts repo >/dev/null
-for _ in $(seq 1 30); do [[ -s "$work/state/fleet-signing-keys.asc" && -s "$work/state/repo-ca.pem" ]] && break; sleep 1; done
-[[ -s "$work/state/fleet-signing-keys.asc" ]] || { docker logs e2e-farmer; die "the stub farmer did not start"; }
+for _ in $(seq 1 30); do [[ -s "$work/state/fleet-signing-keys.asc" && -s "$work/state/repo-ca.pem" && -s "$work/state/join-token" ]] && break; sleep 1; done
+[[ -s "$work/state/fleet-signing-keys.asc" && -s "$work/state/join-token" ]] || { docker logs e2e-farmer; die "the stub farmer did not start"; }
+join_token="$(cat "$work/state/join-token")"
 
 farmer() { # farmer METHOD PATH [JSON]
 	curl -sS --noproxy '*' --fail-with-body --cacert "$work/state/ca.pem" --resolve "farmer:$farmer_port:127.0.0.1" \

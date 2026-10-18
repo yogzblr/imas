@@ -252,12 +252,14 @@ func (c *Client) WaitTenantStatus(ctx context.Context, token, tenantID string, t
 }
 
 // EnrollmentKey is the body of POST .../enrollment-keys. RegistrationKey
-// is a secret: never print it.
+// is a secret: never print it. TenantKeyFingerprint, the fingerprint the
+// token ends with (internal/jointoken), is not.
 type EnrollmentKey struct {
-	KeyID           string    `json:"key_id"`
-	RegistrationKey string    `json:"registration_key"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	MaxUses         int       `json:"max_uses"`
+	KeyID                string    `json:"key_id"`
+	RegistrationKey      string    `json:"registration_key"`
+	TenantKeyFingerprint string    `json:"tenant_key_fingerprint"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	MaxUses              int       `json:"max_uses"`
 }
 
 // KeyInfo is one entry of GET .../enrollment-keys.

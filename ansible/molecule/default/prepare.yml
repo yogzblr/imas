@@ -8,7 +8,7 @@
     imas_work: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/imas"
     imas_pkg_version: 0.0.1
     imas_nfpm: github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
-    imas_join_token: "{{ hostvars[groups['sprouts'][0]]['imas_join_token'] }}"
+    imas_join_credential: "{{ hostvars[groups['sprouts'][0]]['imas_molecule_join_credential'] }}"
   tasks:
     - name: Create the work directories
       ansible.builtin.file:
@@ -73,14 +73,15 @@
           -v {{ imas_work }}/state:/state debian:12 /work/bin/stubfarmer
           -addr :5405 -nats-port 5406 -hosts imas-farmer
           -nats-urls tls://imas-farmer:5406
-          -join-token {{ imas_join_token }} -max-uses {{ groups['sprouts'] | length }}
+          -join-token {{ imas_join_credential }} -max-uses {{ groups['sprouts'] | length }}
           -state-dir /state -static-dir /work/repo -static-addr :8080
       changed_when: true
 
-    - name: Wait for the stub farmer's CA
+    - name: Wait for the stub farmer's CA and join token
       ansible.builtin.wait_for:
-        path: "{{ imas_work }}/state/ca.pem"
+        path: "{{ imas_work }}/state/{{ item }}"
         timeout: 30
+      loop: [ca.pem, join-token]
 
 # Hermetic: the sprouts install only from the test repositories above, so a
 # distro mirror being slow or unreachable can't fail the test. imas-sprout

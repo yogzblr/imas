@@ -8,7 +8,12 @@
 // root CA, the DMZ way):
 //
 //   - POST /v1/enroll: checks proof of possession the way farmer does
-//     (pki.EnrollSigningPayload, signed by nkey_pub), then the join token.
+//     (pki.EnrollSigningPayload, signed by nkey_pub), then the join token:
+//     the -join-token credential ({key_id}.{secret}), and, if the token
+//     carries one, the tenant key fingerprint (internal/jointoken). The
+//     full token, with the fingerprint of the tenant key it generates at
+//     startup, is written to -state-dir/join-token for the tests to hand
+//     to the sprout, as the SaaS API's registration_key.
 //     A request from an already-enrolled nkey_pub is answered from the
 //     replay path without spending a use, like farmer's step 1. As
 //     farmer (SEC.7b), the identity-issuing response carries an
@@ -68,6 +73,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -207,6 +213,19 @@ func newFarmer(joinToken string, maxUses int, natsURLs []string) (*farmer, error
 	}, nil
 }
 
+// tenantKeyFingerprint is the fingerprint of the stub's tenant key.
+func (f *farmer) tenantKeyFingerprint() string {
+	fp, err := jointoken.FingerprintB64(f.tenantBoxPK)
+	if err != nil {
+		panic(err)
+	}
+	return fp
+}
+
+// fullJoinToken is the token the SaaS API would mint for the stub's
+// credential: with its tenant key's fingerprint.
+func (f *farmer) fullJoinToken() string { return f.joinToken + "." + f.tenantKeyFingerprint() }
+
 func (f *farmer) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enroll", f.enroll)
@@ -279,8 +298,13 @@ func (f *farmer) enroll(w http.ResponseWriter, r *http.Request) {
 	sproutID, enrolled := f.sprouts[req.NKeyPub]
 	var binding json.RawMessage
 	if !enrolled {
-		if subtle.ConstantTimeCompare([]byte(req.JoinToken), []byte(f.joinToken)) != 1 {
+		tok, err := jointoken.Parse(req.JoinToken)
+		if err != nil || subtle.ConstantTimeCompare([]byte(tok.Credential()), []byte(f.joinToken)) != 1 {
 			enrollmentFailed(w, "wrong join token")
+			return
+		}
+		if tok.Fingerprint != "" && tok.Fingerprint != f.tenantKeyFingerprint() {
+			enrollmentFailed(w, "join token names another tenant key")
 			return
 		}
 		if f.redemptions >= f.maxUses {
@@ -596,7 +620,7 @@ func main() {
 	natsPort := flag.Int("nats-port", 5406, "bus listen port")
 	hosts := flag.String("hosts", "localhost", "comma-separated names/IPs the TLS certificate covers")
 	busURLs := flag.String("nats-urls", "", "comma-separated nats_urls returned at enrollment (empty: none)")
-	joinToken := flag.String("join-token", "", "the one join token this farmer accepts, {key_id}.{secret}")
+	joinToken := flag.String("join-token", "", "the credential of the one join token this farmer accepts, {key_id}.{secret}; the full token, with the tenant key fingerprint, is written to -state-dir/join-token")
 	maxUses := flag.Int("max-uses", 10, "how many first-time enrollments the join token allows")
 	stateDir := flag.String("state-dir", ".", "where ca.pem is written")
 	staticDir := flag.String("static-dir", "", "directory to serve over plain HTTP (empty: none)")
@@ -605,8 +629,8 @@ func main() {
 	repoProxyAddr := flag.String("repo-proxy-addr", ":8443", "HTTPS listen address for -repo-proxy-to")
 	repoHosts := flag.String("repo-hosts", "localhost", "comma-separated names/IPs the repository proxy's certificate covers")
 	flag.Parse()
-	if *joinToken == "" {
-		log.Fatal("-join-token is required")
+	if tok, err := jointoken.Parse(*joinToken); err != nil || tok.Fingerprint != "" || strings.Contains(tok.Secret, ".") {
+		log.Fatal("-join-token is required: {key_id}.{secret}, without a fingerprint")
 	}
 	var urls []string
 	if *busURLs != "" {
@@ -627,6 +651,11 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(*stateDir, "ca.pem"), tm.caPEM, 0o644); err != nil {
+		log.Fatal(err)
+	}
+	// Readable by the test runner that hands it to the sprout: a test
+	// token for a test farmer.
+	if err := os.WriteFile(filepath.Join(*stateDir, "join-token"), []byte(f.fullJoinToken()), 0o644); err != nil {
 		log.Fatal(err)
 	}
 	bus, err := startBus(f, *natsHost, *natsPort, tm)

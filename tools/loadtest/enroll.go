@@ -246,6 +246,10 @@ func enrollReason(err error) string {
 		return "farmer busy (lease held) at every try"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "run cut short"
+	case errors.Is(err, pki.ErrTenantKeyFingerprintMismatch):
+		return "tenant key does not match the join token's fingerprint"
+	case errors.Is(err, pki.ErrJoinTokenNoFingerprint):
+		return "join token carries no tenant key fingerprint"
 	}
 	msg := err.Error()
 	for _, code := range []string{"401", "403", "429", "502", "504"} {

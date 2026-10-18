@@ -24,6 +24,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/curve25519"
 
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -42,6 +43,8 @@ type fakeSaaSAPI struct {
 	keys     map[string]*fakeKey
 	nextID   int
 	requests []string
+	// fingerprint is the tenant key fingerprint every token carries.
+	fingerprint string
 }
 
 type fakeKey struct {
@@ -51,8 +54,14 @@ type fakeKey struct {
 	revoked bool
 }
 
-func newFakeSaaSAPI() *fakeSaaSAPI {
-	return &fakeSaaSAPI{status: "active", keys: map[string]*fakeKey{}}
+// newFakeSaaSAPI mints tokens carrying tenantPub's fingerprint, as the
+// SaaS API mints them with farmer's tenant key (internal/jointoken).
+func newFakeSaaSAPI(tenantPub string) *fakeSaaSAPI {
+	fp, err := jointoken.FingerprintB64(tenantPub)
+	if err != nil {
+		panic(err)
+	}
+	return &fakeSaaSAPI{status: "active", keys: map[string]*fakeKey{}, fingerprint: fp}
 }
 
 func (f *fakeSaaSAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +96,7 @@ func (f *fakeSaaSAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := fmt.Sprintf("ek_%d", f.nextID)
 		k := &fakeKey{secret: id + ".s" + randomHex(4), maxUses: body.Uses}
 		f.keys[id] = k
-		_ = json.NewEncoder(w).Encode(map[string]any{"key_id": id, "registration_key": k.secret, "max_uses": body.Uses})
+		_ = json.NewEncoder(w).Encode(map[string]any{"key_id": id, "registration_key": k.secret + "." + f.fingerprint, "max_uses": body.Uses})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, base+"/enrollment-keys/"):
 		k, ok := f.keys[strings.TrimPrefix(r.URL.Path, base+"/enrollment-keys/")]
 		if !ok {
@@ -101,13 +110,17 @@ func (f *fakeSaaSAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// redeem spends one use of the key whose secret is token, as farmer's
-// redemption does; false if there is none left.
+// redeem spends one use of the key whose {key_id}.{secret} token
+// carries, as farmer's redemption does; false if there is none left.
 func (f *fakeSaaSAPI) redeem(token string) bool {
+	tok, err := jointoken.Parse(token)
+	if err != nil {
+		return false
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, k := range f.keys {
-		if k.secret == token && !k.revoked && k.used < k.maxUses {
+		if k.secret == tok.Credential() && !k.revoked && k.used < k.maxUses {
 			k.used++
 			return true
 		}
@@ -265,7 +278,8 @@ func TestRunExternalEndToEnd(t *testing.T) {
 		t.Skip("starts a bus process")
 	}
 	bus, _, _, tf := startTestBus(t)
-	api := newFakeSaaSAPI()
+	tenantPub := newTenantBoxPub(t)
+	api := newFakeSaaSAPI(tenantPub)
 	api.limited = 1
 	apiSrv := httptest.NewTLSServer(api)
 	t.Cleanup(apiSrv.Close)
@@ -273,7 +287,7 @@ func TestRunExternalEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	farmer := &fakeFarmer{api: api, tf: tf, tenantPub: newTenantBoxPub(t), natsURL: bus.URL(), gwKey: gwKey,
+	farmer := &fakeFarmer{api: api, tf: tf, tenantPub: tenantPub, natsURL: bus.URL(), gwKey: gwKey,
 		enrolled: map[string]string{}, busy: 1}
 	farmerSrv := httptest.NewTLSServer(farmer)
 	t.Cleanup(farmerSrv.Close)
@@ -336,13 +350,14 @@ func TestRunExternalEnrolmentFailureFailsTheRun(t *testing.T) {
 		t.Skip("starts a bus process")
 	}
 	bus, _, _, tf := startTestBus(t)
-	api := newFakeSaaSAPI()
+	tenantPub := newTenantBoxPub(t)
+	api := newFakeSaaSAPI(tenantPub)
 	apiSrv := httptest.NewTLSServer(api)
 	t.Cleanup(apiSrv.Close)
 	_, gwKey, _ := ed25519.GenerateKey(rand.Reader)
 	// Farmer redeems against a key store that holds none of the keys the
 	// SaaS API mints, so it refuses every one.
-	farmer := &fakeFarmer{api: newFakeSaaSAPI(), tf: tf, tenantPub: newTenantBoxPub(t), natsURL: bus.URL(), gwKey: gwKey, enrolled: map[string]string{}}
+	farmer := &fakeFarmer{api: newFakeSaaSAPI(tenantPub), tf: tf, tenantPub: tenantPub, natsURL: bus.URL(), gwKey: gwKey, enrolled: map[string]string{}}
 	farmerSrv := httptest.NewTLSServer(farmer)
 	t.Cleanup(farmerSrv.Close)
 	o, err := parseOptions([]string{
@@ -366,8 +381,44 @@ func TestRunExternalEnrolmentFailureFailsTheRun(t *testing.T) {
 	}
 }
 
+// A farmer (or an Envoy in front of it) that names another tenant key than
+// the one the SaaS API fingerprinted into the token fails every sprout,
+// under that reason (L24).
+func TestRunExternalSubstitutedTenantKeyFailsTheRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a bus process")
+	}
+	bus, _, _, tf := startTestBus(t)
+	api := newFakeSaaSAPI(newTenantBoxPub(t))
+	apiSrv := httptest.NewTLSServer(api)
+	t.Cleanup(apiSrv.Close)
+	_, gwKey, _ := ed25519.GenerateKey(rand.Reader)
+	farmer := &fakeFarmer{api: api, tf: tf, tenantPub: newTenantBoxPub(t), natsURL: bus.URL(), gwKey: gwKey, enrolled: map[string]string{}}
+	farmerSrv := httptest.NewTLSServer(farmer)
+	t.Cleanup(farmerSrv.Close)
+	o, err := parseOptions([]string{
+		"-servers", bus.URL(), "-ca", filepath.Join(bus.dir, "ca.pem"), "-tenant", testTenantID,
+		"-saasapi-url", apiSrv.URL, "-saasapi-ca", writeServerCA(t, apiSrv),
+		"-internal-auth-file", writeLine(t, testSecret), "-token-file", writeLine(t, testToken),
+		"-farmer-url", farmerSrv.URL, "-farmer-ca", writeServerCA(t, farmerSrv),
+		"-enroll-retries", "0", "-sprouts", "3", "-hold", "300ms", "-ping-rate", "20", "-after", "0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := run(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.passed() || res.Enroll.Failed != 3 || res.Connect.Reasons["not enrolled: tenant key does not match the join token's fingerprint"] != 3 {
+		var sb strings.Builder
+		res.writeText(&sb)
+		t.Fatalf("want a failed run with 3 sprouts refusing the substituted key:\n%s", sb.String())
+	}
+}
+
 func TestExternalRefusesAnInactiveTenant(t *testing.T) {
-	api := newFakeSaaSAPI()
+	api := newFakeSaaSAPI(newTenantBoxPub(t))
 	api.status = "offboarded"
 	apiSrv := httptest.NewTLSServer(api)
 	t.Cleanup(apiSrv.Close)
@@ -383,7 +434,7 @@ func TestExternalRefusesAnInactiveTenant(t *testing.T) {
 }
 
 func TestSaaSClientCredentialsAndRateLimit(t *testing.T) {
-	api := newFakeSaaSAPI()
+	api := newFakeSaaSAPI(newTenantBoxPub(t))
 	api.limited = 3
 	apiSrv := httptest.NewTLSServer(api)
 	t.Cleanup(apiSrv.Close)
@@ -410,7 +461,7 @@ func TestSaaSClientCredentialsAndRateLimit(t *testing.T) {
 }
 
 func TestKeyPoolMintsPerUses(t *testing.T) {
-	api := newFakeSaaSAPI()
+	api := newFakeSaaSAPI(newTenantBoxPub(t))
 	apiSrv := httptest.NewTLSServer(api)
 	t.Cleanup(apiSrv.Close)
 	c := &saasClient{http: apiSrv.Client(), base: apiSrv.URL, tenant: testTenantID,

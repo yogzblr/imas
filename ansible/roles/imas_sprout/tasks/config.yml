@@ -11,10 +11,13 @@
   ansible.builtin.assert:
     that:
       - imas_join_token is defined
-      - imas_join_token is match('^[^.\s]+\.\S+$')
+      - imas_join_token is match('^[^.\s]+\.[^.\s]+\.[0-9a-f]{64}$')
+        or (not imas_sprout_enroll_pin_required | bool and imas_join_token is match('^[^.\s]+\.\S+$'))
     fail_msg: >-
       {{ inventory_hostname }} isn't enrolled yet, and imas_join_token is not
-      set or isn't a {key_id}.{secret} enrollment key. Create one with
+      set or isn't a {key_id}.{secret}.{tenant_key_fingerprint} enrollment key
+      (a {key_id}.{secret} key without the tenant key fingerprint needs
+      imas_sprout_enroll_pin_required false). Create one with
       POST /tenants/{tenant_id}/enrollment-keys and supply it through
       ansible-vault (see ansible/README.md).
     quiet: true
@@ -25,7 +28,8 @@
     _imas_sprout_managed: >-
       {{
         {'farmerinterface': imas_farmer_host, 'farmerapiport': imas_farmer_api_port | string,
-         'disableshell': imas_sprout_disable_shell | bool}
+         'disableshell': imas_sprout_disable_shell | bool,
+         'enrollpinrequired': imas_sprout_enroll_pin_required | bool}
         | combine({'busurls': imas_farmer_bus_urls} if imas_farmer_bus_urls | length > 0 else {})
         | combine({'sproutrootcatofu': false} if imas_sprout_root_ca | length > 0 else {})
         | combine({'busproxyurl': imas_sprout_bus_proxy_url} if imas_sprout_bus_proxy_url | length > 0 else {})
@@ -62,6 +66,9 @@
     # sprout has no default for it, so it is always written (true or
     # false) and the sprout only ever writes back the value it read. A
     # boolean compares equal as a string either way ("False" == "False").
+    # imas_sprout_enroll_pin_required ("enrollpinrequired") is always
+    # written too: the sprout's own default (true) is only ever written
+    # back as the boolean the file already holds, so it never drifts.
     _imas_sprout_unmanaged: >-
       {{
         (['busurls'] if imas_farmer_bus_urls | length == 0 else [])

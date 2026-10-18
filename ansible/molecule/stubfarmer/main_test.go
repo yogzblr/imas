@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -284,5 +286,40 @@ func TestRefreshNamesTheTenant(t *testing.T) {
 	}
 	if resp.TenantID != stubTenantID {
 		t.Errorf("tenant_id = %q, want %q", resp.TenantID, stubTenantID)
+	}
+}
+
+// The token the tests hand the sprout carries the stub's tenant key
+// fingerprint (L24), and the stub, like farmer, refuses one naming another
+// tenant key without spending a use; the bare credential still enrolls.
+func TestEnrollChecksTheTenantKeyFingerprint(t *testing.T) {
+	f, h := newTestFarmer(t, 2)
+	full := f.fullJoinToken()
+	tok, err := jointoken.Parse(full)
+	if err != nil || tok.Credential() != testToken || tok.Fingerprint == "" {
+		t.Fatalf("full token %+v, %v", tok, err)
+	}
+	now := time.Now().Unix()
+	other := testToken + "." + strings.Repeat("ab", 32)
+	if rec := newTestSprout(t).enroll(t, h, other, "web-01", now); rec.Code != http.StatusForbidden {
+		t.Fatalf("another tenant key's fingerprint: %d %s", rec.Code, rec.Body)
+	}
+	if st := state(t, h); st.Redemptions != 0 {
+		t.Fatalf("a refused token was spent: %+v", st)
+	}
+	s := newTestSprout(t)
+	rec := s.enroll(t, h, full, "web-01", now)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full token: %d %s", rec.Code, rec.Body)
+	}
+	var resp pki.EnrollResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if fp, _ := jointoken.FingerprintB64(resp.TenantX25519Pub); fp != tok.Fingerprint {
+		t.Errorf("the response's tenant key has fingerprint %s, the token %s", fp, tok.Fingerprint)
+	}
+	if rec := newTestSprout(t).enroll(t, h, testToken, "web-02", now); rec.Code != http.StatusOK {
+		t.Fatalf("bare credential: %d %s", rec.Code, rec.Body)
 	}
 }

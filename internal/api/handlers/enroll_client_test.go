@@ -28,6 +28,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -129,7 +130,16 @@ func enrollAgainstHandlers(t *testing.T) *handlerSprout {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := pki.EnrollSprout(t.Context(), handlerJoinToken, "web-01", sproutPub)
+	// With the tenant key's fingerprint, as the SaaS API mints it (L24).
+	tenantPub, err := pki.GetTenantX25519PublicKey(pki.CurrentTenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := jointoken.FingerprintB64(tenantPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := pki.EnrollSprout(t.Context(), handlerJoinToken+"."+fp, "web-01", sproutPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout against the real handler: %v", err)
 	}

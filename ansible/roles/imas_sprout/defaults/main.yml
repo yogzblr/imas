@@ -4,12 +4,21 @@
 
 # --- Enrollment: where the sprout enrolls, and with what ---------------------
 
-# The "{key_id}.{secret}" one-time enrollment key from
-# POST /tenants/{tenant_id}/enrollment-keys. A secret: supply it from
-# ansible-vault or your runner's secret store, never a committed file.
-# Only written to a host that isn't enrolled yet; the sprout deletes it from
-# its config file itself once it has enrolled.
+# The "{key_id}.{secret}.{tenant_key_fingerprint}" one-time enrollment key
+# (registration_key) from POST /tenants/{tenant_id}/enrollment-keys. A
+# secret: supply it from ansible-vault or your runner's secret store, never
+# a committed file. Only written to a host that isn't enrolled yet; the
+# sprout deletes it from its config file itself once it has enrolled.
 imas_join_token: ""
+
+# Whether the sprout refuses a join token without the tenant key fingerprint
+# (config key "enrollpinrequired"; security review 2026-10, L24). The sprout
+# checks the tenant key farmer's enrollment response names against the
+# fingerprint before pinning it, so a DMZ Envoy that substitutes its own key
+# is refused. false accepts an old {key_id}.{secret} token and trusts the
+# tenant key on first use, with a warning in the sprout's log at every
+# enrollment. Always written, as true or false.
+imas_sprout_enroll_pin_required: true
 
 # Host the sprout enrolls with (config key "farmerinterface"): it calls
 # https://<imas_farmer_host>:<imas_farmer_api_port>/v1/enroll.

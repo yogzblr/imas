@@ -40,6 +40,7 @@
           - _config.jointoken | default('') == ''
           - _config.farmerinterface == 'imas-farmer'
           - _config.sproutrootcatofu == false
+          - _config.enrollpinrequired == true
           - (_config.busurls | default([])) == (imas_farmer_bus_urls | default([]))
           - _root_ca.content | b64decode | trim == imas_sprout_root_ca | trim
           - _service.status.ActiveState == 'active'

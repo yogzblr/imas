@@ -82,7 +82,7 @@ var (
 
 func main() {
 	joinToken := flag.String("join-token", "",
-		"join token for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
+		"join token ({key_id}.{secret}.{tenant_key_fingerprint}) for first-time enrollment; overrides "+config.EnvJoinToken+" and the config file's jointoken. "+
 			"Visible to other local users in the process list, so prefer the environment variable or config file")
 	flag.Usage = usage
 	flag.Parse()
