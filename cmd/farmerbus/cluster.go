@@ -30,6 +30,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -59,7 +60,13 @@ type clusterConfig struct {
 	// Routes lists every node of the cluster, normally including this one
 	// (nats-server ignores the route to itself). Its length is the cluster
 	// size the fence's quorum check uses.
-	Routes   []*url.URL
+	Routes []*url.URL
+	// Members are the server names of the nodes Routes lists: the first
+	// DNS label of each route host (in the chart, the pod name of
+	// <pod>.<headless>.<ns>.svc...), one per route, ServerName among
+	// them. The fence counts only routed peers whose server name is a
+	// member (fence.go, security review 2026-10 L15).
+	Members  []string
 	User     string
 	Password string
 	// Advertise is the host:port this node announces to peers for
@@ -126,6 +133,9 @@ func clusterConfigFromEnv(getenv func(string) string, readFile func(string) ([]b
 	if len(c.Routes) == 0 {
 		return nil, fmt.Errorf("%s has no routes", envClusterRoutes)
 	}
+	if c.Members, err = routeMembers(c.Routes); err != nil {
+		return nil, err
+	}
 	if c.User == "" {
 		c.User = defaultRouteUser
 	}
@@ -150,7 +160,34 @@ func clusterConfigFromEnv(getenv func(string) string, readFile func(string) ([]b
 			c.ServerName = h // the StatefulSet pod name
 		}
 	}
+	if !slices.Contains(c.Members, c.ServerName) {
+		return nil, fmt.Errorf("%s %q is not the first label of any host in %s (%s): each node must be one of the routes it lists",
+			envServerName, c.ServerName, envClusterRoutes, strings.Join(c.Members, ", "))
+	}
 	return c, nil
+}
+
+// routeMembers returns the server name each route names, the first label
+// of its host. A route host must be a DNS name (the fence identifies a
+// routed peer by the server name it announces, so a bare IP names no one)
+// and no two may share a first label.
+func routeMembers(routes []*url.URL) ([]string, error) {
+	out := make([]string, 0, len(routes))
+	for _, r := range routes {
+		host := r.Hostname()
+		if net.ParseIP(host) != nil {
+			return nil, fmt.Errorf("%s: route host %s is an IP address; use each node's DNS name, whose first label is its server name (%s)", envClusterRoutes, host, envServerName)
+		}
+		name, _, _ := strings.Cut(host, ".")
+		if name == "" {
+			return nil, fmt.Errorf("%s: route host %q has no first label", envClusterRoutes, host)
+		}
+		if slices.Contains(out, name) {
+			return nil, fmt.Errorf("%s: two route hosts start with %q; each node's first label must be its own server name", envClusterRoutes, name)
+		}
+		out = append(out, name)
+	}
+	return out, nil
 }
 
 // parseRouteURL accepts tls://, nats:// and nats-route:// host:port URLs.

@@ -466,11 +466,13 @@ func TestOpenBaoFarmerPolicyKeySet(t *testing.T) {
 }
 
 // TestOpenBaoFarmerTenantBoxPolicy: the rendered imas-farmer-tenantbox
-// policy, on a fresh KV v2 mount, lets farmer create a tenant's keypair
-// and, at a purge (S6), delete it whole through internal/pki's own client
-// (every version and the metadata); it refuses a metadata read or list,
-// a soft delete or destroy of single versions, and any delete outside
-// <kvPath>/tenants/.
+// policy, on a fresh KV v2 mount, lets farmer create a tenant's keypair,
+// rotate it with sever and record the sever boundary in the secret's
+// custom_metadata (L22) and, at a purge (S6), delete it whole through
+// internal/pki's own client (every version and the metadata); it refuses
+// a metadata read or list, a metadata write for a tenant with no keypair
+// or outside <kvPath>/tenants/, a soft delete or destroy of single
+// versions, and any delete outside <kvPath>/tenants/.
 func TestOpenBaoFarmerTenantBoxPolicy(t *testing.T) {
 	addr, rootToken := os.Getenv("IMAS_TEST_OPENBAO_ADDR"), os.Getenv("IMAS_TEST_OPENBAO_TOKEN")
 	if addr == "" || rootToken == "" {
@@ -514,9 +516,29 @@ func TestOpenBaoFarmerTenantBoxPolicy(t *testing.T) {
 			t.Fatalf("farmer creating %s's keypair: %v", tenant, err)
 		}
 	}
+	// A severing rotation records its boundary in custom_metadata too,
+	// and the secret's other settings stay as they were.
+	admin.Must(http.MethodPost, mount+"/metadata/"+base+"/tenants/acme2", map[string]any{"max_versions": 7})
+	if _, err := pki.RotateTenantX25519Keypair("acme2", true); err != nil {
+		t.Fatalf("farmer rotating acme2's keypair with sever: %v", err)
+	}
+	var md struct {
+		Data struct {
+			MaxVersions    int               `json:"max_versions"`
+			CustomMetadata map[string]string `json:"custom_metadata"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(admin.Must(http.MethodGet, mount+"/metadata/"+base+"/tenants/acme2", nil), &md); err != nil {
+		t.Fatal(err)
+	}
+	if md.Data.CustomMetadata["imas_sever_floor"] != "2" || md.Data.MaxVersions != 7 {
+		t.Errorf("acme2's metadata after a severing rotation: custom_metadata %v, max_versions %d; want imas_sever_floor 2 and max_versions 7",
+			md.Data.CustomMetadata, md.Data.MaxVersions)
+	}
 	// A second version, as a rotation leaves it.
 	admin.Must(http.MethodPost, mount+"/data/"+base+"/tenants/acme", map[string]any{"data": map[string]string{"pub": "x", "priv": "y"}})
 	admin.Must(http.MethodPost, mount+"/data/"+base+"/platform", map[string]any{"data": map[string]string{"pub": "p", "priv": "q"}})
+	sever := map[string]any{"custom_metadata": map[string]string{"imas_sever_floor": "1"}}
 
 	for _, c := range []refusedCall{
 		{http.MethodGet, "/metadata/" + base + "/tenants/acme", nil},
@@ -527,6 +549,9 @@ func TestOpenBaoFarmerTenantBoxPolicy(t *testing.T) {
 		{http.MethodDelete, "/metadata/" + base + "/platform", nil},
 		{http.MethodDelete, "/metadata/" + base + "/tenants/acme/deeper", nil},
 		{http.MethodDelete, "/metadata/" + base, nil},
+		{http.MethodPost, "/metadata/" + base + "/tenants/never-written", sever},
+		{http.MethodPost, "/metadata/" + base + "/platform", sever},
+		{http.MethodPost, "/metadata/" + base + "/tenants/acme/deeper", sever},
 	} {
 		if status, body := admin.Call(token, c.method, mount+c.path, c.body); status != http.StatusForbidden {
 			t.Errorf("farmer %s %s: status %d (%s), want 403", c.method, c.path, status, strings.TrimSpace(string(body)))

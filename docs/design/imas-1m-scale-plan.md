@@ -13,9 +13,11 @@
 > and only bus pods can reach the route port. Account JWTs keep the "full"
 > resolver: core's push reaches the node it lands on and that node's direct
 > peers; NATS routes do not forward further. So `cmd/farmerbus/fence.go`
-> keeps a node from serving any client unless it routes to a majority, no
-> peer sees a node it doesn't, and it has pulled every peer's Account JWTs
-> since it last fenced. A tenant locked out while a node is down or cut
+> keeps a node from serving any client unless it routes to a majority of
+> the nodes its own routes name, every peer has the same number of routes
+> configured, no peer sees a node it doesn't, and it has pulled every
+> peer's Account JWTs since it last fenced (so a resize changes every
+> node in one rollout; the chart README's "Resizing the cluster"). A tenant locked out while a node is down or cut
 > off is therefore never live on that node. The chart README's
 > "Clustering" section lists what is left open. No connection count or
 > throughput figure has been measured.

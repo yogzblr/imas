@@ -682,6 +682,14 @@ Day to day:
 - A lost or stolen key: an admin runs `imas users reset-key <pubkey> --boxpub
   <new key>`, which retires every key you held. `imas users remove` retires
   them with the user.
+- Removing an admin from farmer's config (`users.admin`, or the legacy
+  `pubkeys.admin`) revokes them at the next Account rebuild (farmer's
+  start, a SIGHUP, any sprout accept or deny), once
+  their NKey is no user at all (not under another role, not registered with
+  `imas users add`): the tenant Account is re-signed with their NKey
+  revoked, every CLI box key they held is retired, and the NKey stays
+  revoked even if it is put back, so give a returning admin a new key.
+  A config that can't be read revokes nothing.
 - After a tenant key rotation (`imas keys rotate-tenant-key`), update
   `tenantboxpub` within the grace window. Until then requests are refused
   with `open-failed`.

@@ -338,6 +338,10 @@ type testCluster struct {
 	// blackhole is advertised by every node: it refuses connections, so
 	// implicit routes never form and only the proxied explicit ones do.
 	blackhole string
+	// extra[i] is how many more nodes, bus-n onwards, node i's
+	// configuration lists than the cluster runs: routes to addresses
+	// nothing listens on, as on a node whose configuration a resize grew.
+	extra map[int]int
 }
 
 func newTestCluster(t *testing.T, tr *trust, n int) *testCluster {
@@ -348,7 +352,7 @@ func newTestCluster(t *testing.T, tr *trust, n int) *testCluster {
 	}
 	bh := ln.Addr().String()
 	ln.Close()
-	c := &testCluster{t: t, tr: tr, n: n, nodes: make([]*busNode, n), blackhole: bh}
+	c := &testCluster{t: t, tr: tr, n: n, nodes: make([]*busNode, n), blackhole: bh, extra: map[int]int{}}
 	for a := 0; a < n; a++ {
 		c.pkiDirs = append(c.pkiDirs, filepath.Join(t.TempDir(), fmt.Sprintf("pki-%d", a))+"/")
 		row := make([]*proxy, n)
@@ -383,9 +387,12 @@ func (c *testCluster) start(i int) {
 		Name: "imas-bus", Port: -1, User: defaultRouteUser, Password: testRoutePassword,
 		ServerName: fmt.Sprintf("bus-%d", i), Advertise: c.blackhole,
 	}
-	for b := 0; b < c.n; b++ {
+	for b := 0; b < c.n+c.extra[i]; b++ {
 		host := "127.0.0.1:1" // this node's own entry; never dialled successfully
-		if b != i {
+		switch {
+		case b >= c.n:
+			host = deadAddr(c.t)
+		case b != i:
 			host = c.links[i][b].addr()
 		}
 		u, err := parseRouteURL("tls://" + host)
@@ -393,6 +400,10 @@ func (c *testCluster) start(i int) {
 			c.t.Fatal(err)
 		}
 		cl.Routes = append(cl.Routes, u)
+		// The test's routes are proxies on 127.0.0.1, so the members are
+		// named here, as clusterConfigFromEnv derives them from the
+		// chart's per-pod DNS names.
+		cl.Members = append(cl.Members, fmt.Sprintf("bus-%d", b))
 	}
 	nd, err := startBus(opts, busSetup{SysUser: sysUser, Cluster: cl, Timing: testTiming})
 	if err != nil {
@@ -405,6 +416,18 @@ func (c *testCluster) start(i int) {
 			c.links[a][i].setTarget(addr)
 		}
 	}
+}
+
+// deadAddr is a loopback address nothing listens on.
+func deadAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := ln.Addr().String()
+	ln.Close()
+	return a
 }
 
 func (c *testCluster) stop(i int) {
@@ -828,4 +851,100 @@ func TestClusterFenceSizeFollowsFile(t *testing.T) {
 	// A count below the routes cannot lower it below 2: 2 of 2 is a majority.
 	writeSize(t, dir, "1")
 	c.waitReady(0, 1)
+}
+
+// TestClusterScaleUpPartitionFences (security review 2026-10, L15): a 3 to
+// 5 scale-up is rolling out. Old node bus-0 (configured for bus-0..2) is
+// cut off from bus-1 and bus-2 and routed only to new node bus-3
+// (configured for bus-0..4), which dialled it. Counting every routed
+// peer, bus-0 used to see 2 of 3 and serve. Neither may serve: bus-3 is
+// not one of bus-0's members, and each sees a peer on another cluster
+// size.
+func TestClusterScaleUpPartitionFences(t *testing.T) {
+	newTrust(t)
+	start := func(name string, members []string, routes []string) *busNode {
+		t.Helper()
+		config.FarmerPKI = filepath.Join(t.TempDir(), "pki") + "/"
+		opts, sysUser := pki.ConfigureBusNats()
+		opts.LogFile, opts.Trace, opts.Debug = "", false, false
+		opts.NoLog = true
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		bh := ln.Addr().String()
+		ln.Close()
+		cl := &clusterConfig{Name: "imas-bus", Port: -1, User: defaultRouteUser, Password: testRoutePassword,
+			ServerName: name, Advertise: bh, Members: members}
+		for _, h := range routes {
+			u, err := parseRouteURL("tls://" + h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cl.Routes = append(cl.Routes, u)
+		}
+		nd, err := startBus(opts, busSetup{SysUser: sysUser, Cluster: cl, Timing: testTiming})
+		if err != nil {
+			t.Fatalf("starting %s: %v", name, err)
+		}
+		t.Cleanup(nd.Shutdown)
+		return nd
+	}
+	old := start("bus-0", []string{"bus-0", "bus-1", "bus-2"}, []string{"127.0.0.1:1", deadAddr(t), deadAddr(t)})
+	newer := start("bus-3", []string{"bus-0", "bus-1", "bus-2", "bus-3", "bus-4"},
+		[]string{old.srv.ClusterAddr().String(), deadAddr(t), deadAddr(t), "127.0.0.1:1", deadAddr(t)})
+
+	waitFor(t, "bus-3's route to bus-0", 10*time.Second, func() bool {
+		rz, err := old.srv.Routez(&nats_server.RoutezOptions{})
+		if err != nil {
+			return false
+		}
+		for _, r := range rz.Routes {
+			if r.RemoteName == "bus-3" {
+				return true
+			}
+		}
+		return false
+	})
+	deadline := time.Now().Add(30 * testTiming.Interval)
+	for time.Now().Before(deadline) {
+		if old.Ready() {
+			t.Fatal("old bus-0, partitioned with only new bus-3, serves")
+		}
+		if newer.Ready() {
+			t.Fatal("new bus-3, routed only to old bus-0, serves")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestClusterMixedSizeFences: one node of a healthy three comes back
+// configured for four nodes. It still routes to a majority of its four,
+// but every node sees a peer on another cluster size, so all three fence;
+// once the other two are restarted with the same four-node configuration
+// (the resize in one rollout), the three serve again.
+func TestClusterMixedSizeFences(t *testing.T) {
+	tr := newTrust(t)
+	c := newTestCluster(t, tr, 3)
+	c.waitReady(0, 1, 2)
+
+	c.stop(2)
+	c.extra[2] = 1
+	c.start(2)
+	waitFor(t, "every node to fence on a mixed cluster size", 5*time.Second, func() bool {
+		return !c.nodes[0].Ready() && !c.nodes[1].Ready() && !c.nodes[2].Ready()
+	})
+	time.Sleep(5 * testTiming.Interval)
+	for i := range 3 {
+		if c.nodes[i].Ready() {
+			t.Fatalf("node %d serves on a mixed cluster size", i)
+		}
+	}
+
+	for _, i := range []int{0, 1} {
+		c.stop(i)
+		c.extra[i] = 1
+		c.start(i)
+	}
+	c.waitReady(0, 1, 2)
 }

@@ -523,7 +523,9 @@ later, by a purge:
   every tenant route but `GET` answers 404 or 409 for it.
 - **Grants.** farmer's object store user has delete on the sprout JWT
   bucket (Versity plan, UAT RustFS policy); farmer's tenantbox policy
-  has `delete` on `<kvPath>/tenants/+` metadata, nothing else there;
+  has `delete` on `<kvPath>/tenants/+` metadata (and `update`, which
+  records a severing rotation's boundary in `custom_metadata`), nothing
+  else there;
   farmer's Transit policy allows the key destruction above. A purge
   cannot be undone: an OpenBao snapshot taken before it is the only way
   back for the keys
@@ -666,7 +668,7 @@ Each OpenBao client runs under its own role and gets exactly one policy.
 | farmer, API certificate (`tls.mode=openbao`) | `IMAS_CERTS_OPENBAO_*` | `imas-farmer-certs` (`tls.openbao.k8sRole`) | `imas-farmer-certs`: `pki/issue/imas-farmer` |
 | farmer, gateway JWT signer | `IMAS_GATEWAY_OPENBAO_*` | `imas-farmer-gateway` | `imas-farmer-gateway`: sign and read on `transit/*/imas-gateway-jwt` only |
 | farmer, NATS signer (P21 slice 1) | `IMAS_NATSSIGN_OPENBAO_*` | `imas-farmer-natssign` (`farmer.openbao.natsSign.k8sRole`) | `imas-farmer-natssign` (file): read the three platform keys, sign with `nats-operator-signing` and `nats-sys-account`, never `nats-operator`; create and read keys on `transit/keys/+` (one path segment, so never `rotate`), soft-delete on `transit/keys/+/soft-delete` except the platform and gateway keys, destroy (config `deletion_allowed="true"` only, then delete) one-segment keys except the platform and gateway keys (the purge, S6), sign with `nats-tsign-*` only |
-| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), delete only on `secret/metadata/imas/tenant-x25519/tenants/+` (a tenant purge, S6), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
+| farmer, tenant box keypairs | `IMAS_TENANTBOX_OPENBAO_*` | `imas-farmer-tenantbox` | `imas-farmer-tenantbox`: KV v2 read/write on `secret/data/imas/tenant-x25519/tenants/+` (one secret per tenant), delete and update only on `secret/metadata/imas/tenant-x25519/tenants/+` (a tenant purge, S6; the sever boundary in `custom_metadata`, L22), and read only on `.../platform` and `.../controlplane-pub` (J.1), nothing else |
 | the publish Job | `IMAS_SAASAPI_CRED_OPENBAO_*` | `imas-saasapi-cred-publisher` | `imas-saasapi-cred-publisher` (reviewed copy) |
 | the publish Job, NATS signer | `IMAS_NATSSIGN_OPENBAO_*` | `imas-natssign-publisher` (`credentialPublisher.natsSign.k8sRole`) | `imas-nats-sys-signer` (file): read the three platform keys, sign with `nats-sys-account` only |
 | the bootstrap Job's `nats-trust` | `IMAS_NATSBOOT_OPENBAO_*` | none: a 10-minute handoff token | `imas-nats-bootstrap` (file, ephemeral): create and read the three platform keys (exact paths), sign with all three, revoke itself; deleted by the Job |

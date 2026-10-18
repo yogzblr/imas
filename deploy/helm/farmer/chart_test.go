@@ -1087,8 +1087,8 @@ func TestFarmerPoliciesAreExact(t *testing.T) {
 		if name == "imas-farmer-tenantbox.hcl" {
 			stmts = strings.Replace(stmts, `imas/tenant-x25519/tenants/+"`, `imas/tenant-x25519/tenants/TENANT"`, 2)
 			blocks := policyBlocks(body)
-			if c := blocks[`"secret/metadata/imas/tenant-x25519/tenants/+"`]; c != `capabilities = ["delete"]` {
-				t.Errorf("tenantbox metadata path: %q, want delete only", c)
+			if c := blocks[`"secret/metadata/imas/tenant-x25519/tenants/+"`]; c != `capabilities = ["delete", "update"]` {
+				t.Errorf("tenantbox metadata path: %q, want delete and update only", c)
 			}
 		}
 		if name == "imas-farmer-natssign.hcl" {

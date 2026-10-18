@@ -21,12 +21,24 @@ package main
 // window: a node serves clients only while
 //
 //  1. it has direct routes to a strict majority of the configured cluster
-//     (counting itself), and
-//  2. no peer it is routed to reports a route to a server it is not itself
+//     (counting itself), counting only peers that are in its own
+//     configured routes (their server name is a configured member), and
+//  2. every peer it is routed to reports the same number of configured
+//     routes as its own (a peer that doesn't is on another cluster size:
+//     a resize rolling out), and
+//  3. no peer it is routed to reports a route to a server it is not itself
 //     routed to (a non-transitive partition: it could miss pushes that
 //     land on that server), sustained for longer than fenceGrace, and
-//  3. after it was last fenced, it has pulled every Account JWT from every
+//  4. after it was last fenced, it has pulled every Account JWT from every
 //     directly-routed peer and merged the newer ones into its resolver.
+//
+// Conditions 1 and 2 are security review 2026-10, L15: during a 3-to-5
+// scale-up an old node partitioned with one new node used to count that
+// node towards its 3-node majority (2 of 3) and keep serving. Now the new
+// node isn't one of the old node's members, so it counts 1 of 3, and both
+// see a peer on another cluster size. A mixed set of sizes fences by
+// design: a resize changes the configuration on every node in one
+// rollout (deploy/helm/nats README, "Resizing the cluster").
 //
 // While fenced the node refuses every TLS handshake on the client and
 // websocket ports (so core's SYS push cannot land on it either, and
@@ -34,7 +46,7 @@ package main
 // client it still holds. Routes stay up so it can resynchronise.
 //
 // Two healthy nodes are always directly routed to each other: they share
-// a member of their majorities, and condition 2 forbids that member seeing
+// a member of their majorities, and condition 3 forbids that member seeing
 // a server either of them doesn't. So a push accepted by a healthy node
 // reaches every other healthy node directly. What remains is the
 // detection window: a partition that forms within one tick plus the grace
@@ -68,11 +80,12 @@ import (
 
 const (
 	routezPingSubj   = "$SYS.REQ.SERVER.PING.ROUTEZ"
+	varzPingSubj     = "$SYS.REQ.SERVER.PING.VARZ"
 	claimsListSubj   = "$SYS.REQ.CLAIMS.LIST"
 	claimsLookupSubj = "$SYS.REQ.ACCOUNT.%s.CLAIMS.LOOKUP"
 )
 
-var errFenced = errors.New("farmerbus: node is fenced (no quorum, partial mesh, or resolver not yet synced); try another node")
+var errFenced = errors.New("farmerbus: node is fenced (no quorum, partial mesh, a peer on another cluster size, or resolver not yet synced); try another node")
 
 // fenceTiming is overridable by tests.
 type fenceTiming struct {
@@ -83,10 +96,28 @@ type fenceTiming struct {
 
 var defaultFenceTiming = fenceTiming{Interval: time.Second, Grace: 3 * time.Second, ReqTimeout: 2 * time.Second}
 
+// fenceMembers is the configured cluster as this node knows it: the
+// server names of its configured routes (this node's own among them) and
+// how many routes it has configured, the number its peers must report
+// too.
+type fenceMembers struct {
+	names  map[string]bool
+	routes int
+}
+
+func newFenceMembers(names []string, routes int) fenceMembers {
+	m := fenceMembers{names: map[string]bool{}, routes: routes}
+	for _, n := range names {
+		m.names[n] = true
+	}
+	return m
+}
+
 type fence struct {
 	// size is the configured cluster size, read on every tick
 	// (clusterSize.get in production).
 	size     func() int
+	members  fenceMembers
 	timing   fenceTiming
 	fenced   atomic.Bool
 	srv      *nats_server.Server
@@ -106,10 +137,11 @@ type fence struct {
 	doneCh   chan struct{}
 }
 
-// newFence returns a fence for a cluster whose size size reports; it is
-// called on every evaluation. It starts fenced.
-func newFence(size func() int, timing fenceTiming) *fence {
-	f := &fence{size: size, timing: timing, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+// newFence returns a fence for a cluster whose size size reports (it is
+// called on every evaluation) and whose configured members are members.
+// It starts fenced.
+func newFence(size func() int, members fenceMembers, timing fenceTiming) *fence {
+	f := &fence{size: size, members: members, timing: timing, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 	f.fenced.Store(true)
 	return f
 }
@@ -210,42 +242,67 @@ func (f *fence) loop() {
 	}
 }
 
-// directPeers is the set of server IDs this node has a live route to.
-func (f *fence) directPeers() (map[string]bool, error) {
+// directPeers is the set of server IDs this node has a live route to,
+// and the server name each one announced.
+func (f *fence) directPeers() (map[string]bool, map[string]string, error) {
 	rz, err := f.srv.Routez(&nats_server.RoutezOptions{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	peers := map[string]bool{}
+	peers, names := map[string]bool{}, map[string]string{}
 	for _, r := range rz.Routes {
 		if r.RemoteID != "" && r.RemoteID != f.srv.ID() {
 			peers[r.RemoteID] = true
+			names[r.RemoteID] = r.RemoteName
 		}
 	}
-	return peers, nil
+	return peers, names, nil
+}
+
+// memberPeers counts the direct peers that are configured members of
+// this node's cluster (L15): a routed server this node's routes don't
+// name (a new node of a resize, or a stray) doesn't make a majority.
+func (f *fence) memberPeers(names map[string]string) int {
+	n := 0
+	for _, name := range names {
+		if name != "" && name != f.srv.Name() && f.members.names[name] {
+			n++
+		}
+	}
+	return n
 }
 
 func (f *fence) evaluate() {
 	if f.srv == nil || !f.srv.Running() {
 		return
 	}
-	peers, err := f.directPeers()
+	peers, names, err := f.directPeers()
 	if err != nil {
 		f.fence("cannot read routes: " + err.Error())
 		return
 	}
 	size := f.size()
-	if (len(peers)+1)*2 <= size {
-		f.fence(fmt.Sprintf("routed to %d of %d nodes (incl. itself), no majority", len(peers)+1, size))
+	members := f.memberPeers(names)
+	if (members+1)*2 <= size {
+		f.fence(fmt.Sprintf("routed to %d of %d configured nodes (incl. itself), no majority", members+1, size))
 		return
 	}
 	views, complete := f.peerViews(peers)
+	routeCounts, countsComplete := f.peerRouteCounts(peers)
+	complete = complete && countsComplete
+	for _, p := range slices.Sorted(maps.Keys(routeCounts)) {
+		if n := routeCounts[p]; n != f.members.routes {
+			f.fence(fmt.Sprintf("peer %s has %d routes configured, this node %d: a mixed cluster size (resize the configuration on every node in one rollout)",
+				names[p], n, f.members.routes))
+			return
+		}
+	}
 	// More servers in sight than configured (a scale-up not yet in the
 	// file, or a stray node): the majority is of what is really there.
 	if n := observedServers(f.srv.ID(), peers, views); n > size {
 		size = n
-		if (len(peers)+1)*2 <= size {
-			f.fence(fmt.Sprintf("routed to %d of %d nodes seen (incl. itself), no majority", len(peers)+1, size))
+		if (members+1)*2 <= size {
+			f.fence(fmt.Sprintf("routed to %d of %d nodes seen (incl. itself), no majority", members+1, size))
 			return
 		}
 	}
@@ -298,7 +355,7 @@ func (f *fence) evaluate() {
 		log.Warnf("farmerbus fence: resolver pull before unfencing failed, staying fenced: %v", err)
 		return
 	}
-	after, err := f.directPeers()
+	after, _, err := f.directPeers()
 	if err != nil || !maps.Equal(after, peers) {
 		return // mesh changed during the pull; re-evaluate next tick
 	}
@@ -307,7 +364,7 @@ func (f *fence) evaluate() {
 	f.lastWhy = ""
 	f.mu.Unlock()
 	f.fenced.Store(false)
-	log.Infof("farmerbus fence: lifted; routed to %d of %d nodes and resolver synced from every peer", len(peers)+1, size)
+	log.Infof("farmerbus fence: lifted; routed to %d of %d configured nodes and resolver synced from every peer", members+1, size)
 }
 
 func (f *fence) setSynced(peers map[string]bool) {
@@ -497,6 +554,37 @@ func (f *fence) peerViews(peers map[string]bool) (map[string]map[string]bool, bo
 		}
 	}
 	return views, true
+}
+
+type varzReply struct {
+	Server struct {
+		ID string `json:"id"`
+	} `json:"server"`
+	Data struct {
+		Cluster struct {
+			URLs []string `json:"urls"`
+		} `json:"cluster"`
+	} `json:"data"`
+}
+
+// peerRouteCounts asks this node and its peers for their configured
+// routes (VARZ: every nats-server answers it, whatever farmerbus build it
+// runs) and returns each direct peer's count. complete is true when
+// every direct peer answered.
+func (f *fence) peerRouteCounts(peers map[string]bool) (map[string]int, bool) {
+	counts := map[string]int{}
+	replies, err := f.gather(varzPingSubj, len(peers)+1)
+	if err != nil {
+		return counts, false
+	}
+	for _, b := range replies {
+		var r varzReply
+		if json.Unmarshal(b, &r) != nil || !peers[r.Server.ID] {
+			continue
+		}
+		counts[r.Server.ID] = len(r.Data.Cluster.URLs)
+	}
+	return counts, len(counts) == len(peers)
 }
 
 type listReply struct {

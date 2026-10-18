@@ -87,6 +87,9 @@ var saasFS embed.FS
 // enrollment of an NKey the tenant already holds under another sprout ID:
 // that enrollment fails, which is the fail-closed outcome the index is
 // there for, and the binary runs on otherwise.
+//
+// farmer 00007 (U1) leaves the farmer floor at 2: it only adds a table
+// (pki_cli_admin_keys) that an older farmer never reads or writes.
 const (
 	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1

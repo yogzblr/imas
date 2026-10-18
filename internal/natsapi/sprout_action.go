@@ -508,15 +508,18 @@ func runSproutCmd(req controlplane.SproutActionRequest, reply controlplane.Sprou
 		reply.ErrorCode = controlplane.ErrorInvalidRequest
 		return reply, fmt.Errorf("%w: cmd.run timeout %s outside [0, %s]", errSproutActionInvalid, in.Timeout, maxSproutActionCmdTimeout)
 	}
-	// Input fields only: output fields in the request are dropped.
+	// Input fields only: output fields in the request are dropped. The
+	// SaaS API reads only the exit code, so the sprout is asked to leave
+	// stdout and stderr out of its reply (L9).
 	action := apitypes.CmdRun{
-		Command: in.Command,
-		Args:    in.Args,
-		Path:    in.Path,
-		CWD:     in.CWD,
-		RunAs:   in.RunAs,
-		Env:     in.Env,
-		Timeout: in.Timeout,
+		Command:  in.Command,
+		Args:     in.Args,
+		Path:     in.Path,
+		CWD:      in.CWD,
+		RunAs:    in.RunAs,
+		Env:      in.Env,
+		Timeout:  in.Timeout,
+		NoOutput: true,
 	}
 
 	res, err := dispatchCmdRun(req.TenantID, singleTargetParams(req.SproutID, action))
@@ -540,9 +543,9 @@ func runSproutCmd(req controlplane.SproutActionRequest, reply controlplane.Sprou
 	}
 
 	reply.Status = controlplane.StatusCompleted
+	// Never the output, even from a sprout too old to honour NoOutput:
+	// CmdRunResult has no field for it.
 	reply.Result = &controlplane.CmdRunResult{
-		Stdout:   out.Stdout,
-		Stderr:   out.Stderr,
 		ExitCode: out.ErrCode,
 		Duration: out.Duration,
 	}

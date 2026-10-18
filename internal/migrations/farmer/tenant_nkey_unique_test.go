@@ -125,7 +125,8 @@ func TestMySQLTenantNKeyUnique(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err = migrations.Up(ctx, db, migrations.Farmer, t.Logf)
-	if err != nil || len(res.Applied) != 1 || res.Applied[0] != 6 {
+	// 6, then any later migration.
+	if err != nil || len(res.Applied) == 0 || res.Applied[0] != 6 {
 		t.Fatalf("up: %+v, %v", res, err)
 	}
 	check := func(when string) {

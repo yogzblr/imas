@@ -293,10 +293,10 @@ func TestSproutActionBatch_CmdRunEndToEnd(t *testing.T) {
 		switch req.SproutID {
 		case "web-01":
 			reply.Status = controlplane.StatusCompleted
-			reply.Result = &controlplane.CmdRunResult{Stdout: "ok", ExitCode: 0}
+			reply.Result = &controlplane.CmdRunResult{ExitCode: 0}
 		case "web-02":
 			reply.Status = controlplane.StatusCompleted
-			reply.Result = &controlplane.CmdRunResult{Stderr: "secret detail", ExitCode: 3}
+			reply.Result = &controlplane.CmdRunResult{ExitCode: 3}
 		default:
 			reply.Status = controlplane.StatusFailed
 			reply.ErrorCode = controlplane.ErrorSproutUnreachable
@@ -375,8 +375,8 @@ func TestSproutActionBatch_CmdRunEndToEnd(t *testing.T) {
 	if strings.Replace(string(a), "a-never", "X", 1) != strings.Replace(string(b), "a-other-tenant", "X", 1) {
 		t.Errorf("unresolved items differ: %s vs %s", a, b)
 	}
-	if body, _ := json.Marshal(got); strings.Contains(string(body), "secret detail") || strings.Contains(string(body), "systemctl") {
-		t.Errorf("GET leaks command output or params: %s", body)
+	if body, _ := json.Marshal(got); strings.Contains(string(body), "systemctl") {
+		t.Errorf("GET leaks command params: %s", body)
 	}
 
 	// The other tenant can't see this batch, and gets the same 404 as for

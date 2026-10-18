@@ -277,7 +277,10 @@ to that request is believed: any other answer fails the item with
 `GET .../sprouts/actions/{batch_id}`: the batch is `in_progress` until every
 item reaches `unresolved`, `succeeded`, `failed` or
 `unresponsive_after_update`. Failed items carry a fixed `error` code and
-message, never raw error text. See [item error codes](#item-error-codes)
+message, never raw error text. A `cmd.run` item reports its `exit_code`
+only: its stdout and stderr never leave the sprout on this path (farmer
+asks the sprout to leave them out), so output of any size doesn't affect
+the item. See [item error codes](#item-error-codes)
 for the full list, and which of them mean the action never ran.
 
 Dispatch runs in the process that accepted the POST. If that pod dies, or

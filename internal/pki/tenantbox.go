@@ -25,17 +25,31 @@
 // private key OpenBao's PKI engine issues.
 //
 // Layout. Each tenant's keypair is one KV v2 secret,
-// <mount>/data/<base>/tenants/<tenant_id> (fields pub, priv, origin and,
-// on a severing rotation, severed), where <base> is
-// IMAS_TENANTBOX_OPENBAO_KV_PATH. A rotation writes a new KV v2 version
-// of the same secret (check-and-set on the current version), so the
-// secret's version history *is* the tenant's key history: the current
-// version seals new traffic; the version before it keeps sealing and
-// opening for a grace window (tenantBoxGrace) while sprouts re-pin; and
-// every retained earlier version back to the last severing rotation
-// signs a continuity proof (TenantKeyContinuity) that lets a sprout
-// pinned to it move to the current key. tenant_id is validated
-// (IsValidTenantID: [0-9A-Za-z_-]) before it is ever used in a path.
+// <mount>/data/<base>/tenants/<tenant_id> (fields pub, priv, origin,
+// sever_floor once any rotation severed and, on a severing rotation,
+// severed), where <base> is IMAS_TENANTBOX_OPENBAO_KV_PATH. A rotation
+// writes a new KV v2 version of the same secret (check-and-set on the
+// current version), so the secret's version history *is* the tenant's
+// key history: the current version seals new traffic; the version before
+// it keeps sealing and opening for a grace window (tenantBoxGrace) while
+// sprouts re-pin; and every retained earlier version back to the last
+// severing rotation signs a continuity proof (TenantKeyContinuity) that
+// lets a sprout pinned to it move to the current key. tenant_id is
+// validated (IsValidTenantID: [0-9A-Za-z_-]) before it is ever used in a
+// path.
+//
+// The sever boundary (security review 2026-10, L22; FLAG FOR SECURITY
+// REVIEW). The walk back from the current version stops at the last
+// severing rotation's version, and that boundary is recorded where
+// deleting an older version can't erase it: in the current version's own
+// data (sever_floor, the severing version's number, which every later
+// rotation carries forward) and in the secret's KV custom_metadata
+// (imas_sever_floor), which no version delete or destroy touches and
+// which survives a version written by hand without the field. The higher
+// of the two counts. The walk also stops at the first version it can't
+// read (deleted, destroyed or pruned): a gap fails closed, so deleting a
+// version cuts continuity from it and from every version before it, and
+// can never join the current key to versions a sever cut off.
 //
 // Every tenant gets its own freshly generated keypair the first time its
 // secret is needed (ensureTenantKeySet). There is no shared keypair: the
@@ -135,6 +149,13 @@ const (
 	tenantBoxOriginRotated   = "rotated"
 )
 
+// Where a severing rotation's boundary is recorded (see the file comment):
+// a version's data field, and the secret's custom_metadata key.
+const (
+	tenantBoxSeverFloorField = "sever_floor"
+	tenantBoxSeverFloorMeta  = "imas_sever_floor"
+)
+
 // maxTenantBoxPredecessors bounds how many earlier versions of a tenant's
 // secret are read (and sign continuity proofs): OpenBao's KV v2 keeps 10
 // versions by default, and a sprout pinned further back than this has
@@ -205,15 +226,41 @@ type tenantBoxKey struct {
 	// continuity proof, and no grace, reaches back past it.
 	severed bool
 	origin  string
+	// severFloor is the version of the last severing rotation this
+	// version's data records (sever_floor), its own if severed; metaFloor
+	// is the secret's custom_metadata copy (imas_sever_floor) as this
+	// read returned it, and customMeta all of that read's
+	// custom_metadata. 0 when none is recorded.
+	severFloor, metaFloor int
+	customMeta            map[string]string
 }
+
+// floor is the version no continuity walk from k goes back past: the
+// higher of the two recorded sever boundaries.
+func (k *tenantBoxKey) floor() int { return max(k.severFloor, k.metaFloor) }
 
 // kvV2GetData is the data of a KV v2 read.
 type kvV2GetData struct {
 	Data     map[string]string `json:"data"`
 	Metadata struct {
-		Version     int    `json:"version"`
-		CreatedTime string `json:"created_time"`
+		Version        int               `json:"version"`
+		CreatedTime    string            `json:"created_time"`
+		CustomMetadata map[string]string `json:"custom_metadata"`
 	} `json:"metadata"`
+}
+
+// parseSeverFloor reads a recorded sever boundary: empty is none (0),
+// anything but a positive version number is a read failure, so a damaged
+// boundary fails closed rather than reading as "never severed".
+func parseSeverFloor(where, v string) (int, error) {
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%w: %s holds %q, not a version number", ErrTenantBoxReadFailed, where, v)
+	}
+	return n, nil
 }
 
 // readKeypair reads one version of the keypair at path from OpenBao's KV
@@ -262,12 +309,22 @@ func (c *obKVClient) readKeypair(ctx context.Context, path string, version int) 
 	}
 	key = &tenantBoxKey{
 		pub: pub, priv: priv,
-		version: gr.Metadata.Version,
-		severed: gr.Data["severed"] == "true",
-		origin:  gr.Data["origin"],
+		version:    gr.Metadata.Version,
+		severed:    gr.Data["severed"] == "true",
+		origin:     gr.Data["origin"],
+		customMeta: gr.Metadata.CustomMetadata,
 	}
 	if version > 0 && key.version == 0 {
 		key.version = version
+	}
+	if key.severFloor, err = parseSeverFloor(tenantBoxSeverFloorField, gr.Data[tenantBoxSeverFloorField]); err != nil {
+		return nil, false, err
+	}
+	if key.metaFloor, err = parseSeverFloor("custom_metadata "+tenantBoxSeverFloorMeta, gr.Metadata.CustomMetadata[tenantBoxSeverFloorMeta]); err != nil {
+		return nil, false, err
+	}
+	if key.severed {
+		key.severFloor = max(key.severFloor, key.version)
 	}
 	if t, err := time.Parse(time.RFC3339Nano, gr.Metadata.CreatedTime); err == nil {
 		key.created = t
@@ -309,6 +366,23 @@ func (c *obKVClient) writeKeypair(ctx context.Context, path string, pub, priv *[
 	}
 }
 
+// writeSeverFloorMeta records floor as the secret's custom_metadata
+// imas_sever_floor, keeping its other custom_metadata keys (existing, as
+// the last data read returned them: a metadata write replaces the whole
+// map). It needs update on <mount>/metadata/<path>; nothing else in the
+// metadata (max_versions and the like) changes.
+func (c *obKVClient) writeSeverFloorMeta(ctx context.Context, path string, floor int, existing map[string]string) error {
+	meta := make(map[string]string, len(existing)+1)
+	for k, v := range existing {
+		meta[k] = v
+	}
+	meta[tenantBoxSeverFloorMeta] = strconv.Itoa(floor)
+	if _, err := c.ob.Post(ctx, c.mount+"/metadata/"+path, map[string]any{"custom_metadata": meta}); err != nil {
+		return fmt.Errorf("%w: recording the sever boundary in custom_metadata: %w", ErrTenantBoxWriteFailed, err)
+	}
+	return nil
+}
+
 func decodeBoxKeyHalf(b64 string) (*[32]byte, error) {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -326,9 +400,9 @@ func decodeBoxKeyHalf(b64 string) (*[32]byte, error) {
 type tenantBoxKeySet struct {
 	current tenantBoxKey
 	// previous holds the retained earlier versions the current one
-	// continues from, newest first. It skips deleted or destroyed
-	// versions, stops at (after including) the last severing rotation's
-	// version, and holds at most maxTenantBoxPredecessors.
+	// continues from, newest first. It stops at (after including) the
+	// last severing rotation's version, at the first version that can't
+	// be read (a gap), and holds at most maxTenantBoxPredecessors.
 	previous []tenantBoxKey
 	loaded   time.Time
 }
@@ -375,18 +449,20 @@ func (c *obKVClient) readKeySet(ctx context.Context, path string) (set *tenantBo
 		return nil, false, err
 	}
 	set = &tenantBoxKeySet{current: *current, loaded: time.Now()}
-	if current.severed {
-		return set, true, nil
-	}
-	for v := current.version - 1; v >= 1 && v >= current.version-maxTenantBoxPredecessors; v-- {
+	// The walk never goes below the recorded sever boundary, wherever it
+	// is recorded (current's data or the secret's custom_metadata).
+	floor := max(1, current.floor(), current.version-maxTenantBoxPredecessors)
+	for v := current.version - 1; v >= floor; v-- {
 		prev, found, err := c.readKeypair(ctx, path, v)
 		if err != nil {
 			return nil, false, err
 		}
 		if !found {
-			// Deleted or destroyed (or pruned past max_versions): an
-			// operator's way of retiring one version. Keep walking.
-			continue
+			// Deleted or destroyed (or pruned past max_versions): a gap.
+			// Fail closed: nothing before it is continued from, so
+			// deleting a severing version can't re-join the chain to
+			// the versions it cut off (L22).
+			break
 		}
 		if *prev.pub != *current.pub {
 			set.previous = append(set.previous, *prev)
@@ -535,8 +611,9 @@ type tenantKeyContinuityBody struct {
 // Continuity reaches back through every retained version up to the last
 // severing rotation, not just the grace window: a sprout that was off
 // for a month re-pins on its first refresh. To cut a compromised version
-// off, rotate with sever (or delete that version in OpenBao); its
-// sprouts then fail their pin check and must be re-enrolled.
+// off, rotate with sever (or delete that version in OpenBao, which also
+// cuts every version before it); its sprouts then fail their pin check
+// and must be re-enrolled.
 func TenantKeyContinuity(tenantID, sproutID, sproutPub string) (json.RawMessage, error) {
 	set, err := loadTenantKeySet(tenantID)
 	if err != nil {
@@ -608,11 +685,20 @@ func RotateTenantX25519Keypair(tenantID string, sever bool) (*TenantKeyRotation,
 	if err != nil {
 		return nil, err
 	}
+	next := set.current.version + 1
+	// The sever boundary goes into the new version's data either way, so
+	// a later delete of the severing version can't erase it (L22).
+	floor := set.current.floor()
 	fields := map[string]string{"origin": tenantBoxOriginRotated}
 	if sever {
 		fields["severed"] = "true"
+		floor = next
 	}
-	written, err := client.writeKeypair(ctx, client.tenantPath(tenantID), pub, priv, set.current.version, fields)
+	if floor > 0 {
+		fields[tenantBoxSeverFloorField] = strconv.Itoa(floor)
+	}
+	path := client.tenantPath(tenantID)
+	written, err := client.writeKeypair(ctx, path, pub, priv, set.current.version, fields)
 	if err != nil {
 		return nil, err
 	}
@@ -621,11 +707,19 @@ func RotateTenantX25519Keypair(tenantID string, sever bool) (*TenantKeyRotation,
 	if !written {
 		return nil, ErrTenantBoxRotationConflict
 	}
+	if floor > set.current.metaFloor {
+		// And the secret's custom_metadata copy, which outlives every
+		// version. Any later rotation writes it again if this fails;
+		// meanwhile the new version's own data holds the boundary.
+		if err := client.writeSeverFloorMeta(ctx, path, floor, set.current.customMeta); err != nil {
+			log.Errorf("tenantbox: tenant %s rotated to version %d, but its sever boundary (version %d) is only in that version's data: %v", tenantID, next, floor, err)
+		}
+	}
 	log.Noticef("tenantbox: rotated tenant %s X25519 keypair from version %d (severed=%t)", tenantID, set.current.version, sever)
 	return &TenantKeyRotation{
 		TenantID:        tenantID,
 		PreviousVersion: set.current.version,
-		Version:         set.current.version + 1,
+		Version:         next,
 		Pub:             base64.StdEncoding.EncodeToString(pub[:]),
 		Severed:         sever,
 	}, nil

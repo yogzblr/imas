@@ -13,6 +13,7 @@ var FarmerTables = []string{
 	"props",
 	"pki_nkeys",
 	"pki_revoked_nkeys",
+	"pki_cli_admin_keys",
 	"pki_sprout_box_keys",
 	"sprout_user_jwt",
 	"auth_users",

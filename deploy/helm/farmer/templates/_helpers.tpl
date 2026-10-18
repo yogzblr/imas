@@ -816,11 +816,15 @@ path "{{ $t.kvMount }}/data/{{ $t.kvPath }}/tenants/+" {
 
 # Erasing an offboarded tenant (S6, internal/pki tenantpurge.go
 # PurgeTenantBoxKeys): delete on a tenant's metadata removes its keypair,
-# every version and the metadata, for good. Only that: no metadata read
-# or list, no soft delete or destroy of single versions, and nothing
-# outside <kvPath>/tenants/ (never the platform keypair).
+# every version and the metadata, for good. Update on it records a
+# severing rotation's boundary in the secret's custom_metadata
+# (imas_sever_floor, tenantbox.go, security review 2026-10 L22), where no
+# version delete can erase it; update can't create metadata for a tenant
+# with no keypair. Only that: no metadata read or list, no soft delete or
+# destroy of single versions, and nothing outside <kvPath>/tenants/
+# (never the platform keypair).
 path "{{ $t.kvMount }}/metadata/{{ $t.kvPath }}/tenants/+" {
-  capabilities = ["delete"]
+  capabilities = ["delete", "update"]
 }
 
 # The platform keypair and the control-plane public keys (internal/pki

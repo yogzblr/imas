@@ -164,6 +164,7 @@ func (e *purgeEnv) seed(t *testing.T, tenant string) {
 		{"props", map[string]any{"tenant_id": tenant, "sprout_id": "web-01", "name": "secret-prop-name", "value": "secret-prop-value", "static": true, "expiry": now}},
 		{"pki_nkeys", map[string]any{"tenant_id": tenant, "sprout_id": "web-01", "nkey": "U" + tenant, "state": "accepted"}},
 		{"pki_revoked_nkeys", map[string]any{"tenant_id": tenant, "nkey": "UOLD", "sprout_id": "web-01", "revoked_at": 1}},
+		{"pki_cli_admin_keys", map[string]any{"tenant_id": tenant, "nkey": "UADMIN", "granted_at": 1}},
 		{"pki_sprout_box_keys", map[string]any{"tenant_id": tenant, "sprout_id": "web-01", "pub": "box-" + tenant, "state": "revoked"}},
 		{"sprout_user_jwt", map[string]any{"tenant_id": tenant, "sprout_id": "web-01", "updated_at": now}},
 		{"auth_users", map[string]any{"tenant_id": tenant, "user_id": "UADMIN", "role_name": "admin", "created_at": now}},

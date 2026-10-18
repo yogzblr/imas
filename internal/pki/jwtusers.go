@@ -39,7 +39,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/lease"
 	log "github.com/yogzblr/imas/internal/log"
@@ -270,24 +269,28 @@ func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
 		changed = true
 	}
 
-	imasKeys, err := auth.GetPubkeysByRole("admin")
-	if err != nil {
-		log.Errorf("Could not load the imas cli's NKey(s), please edit the config")
-	} else {
-		log.Tracef("Loaded imas cli's public key(s): %v", imasKeys)
-	}
-	for _, key := range imasKeys {
-		if ensureUserGranted(ac, key) {
-			changed = true
-		}
-	}
-
 	// Read before anything is granted: if it can't be read, a revoked
 	// NKey that is somehow still accepted must not be granted (fail
 	// closed).
 	revoked, err := revokedNKeys(currentTenantID())
 	if err != nil {
 		return false, err
+	}
+
+	// The CLI admin keys in farmer's config, minus any revoked, recorded
+	// as granted; a recorded one the config dropped is revoked here and
+	// lands in revoked, which applyRevokedNKeys below puts on the
+	// Account (I6, cliadminkeys.go).
+	imasKeys, authoritative := configuredCLIAdminKeys()
+	log.Tracef("Loaded imas cli's public key(s): %v", imasKeys)
+	grantKeys, _, err := syncCLIAdminKeys(currentTenantID(), imasKeys, authoritative, revoked)
+	if err != nil {
+		return false, err
+	}
+	for _, key := range grantKeys {
+		if ensureUserGranted(ac, key) {
+			changed = true
+		}
 	}
 
 	accepted := map[string]string{}

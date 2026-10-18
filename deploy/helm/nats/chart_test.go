@@ -408,6 +408,15 @@ func TestClustered(t *testing.T) {
 	if len(routes) != 3 || routes[2] != "tls://t-nats-bus-2.t-nats-bus-headless.imas-dmz.svc.cluster.local:6222" {
 		t.Errorf("IMAS_BUS_CLUSTER_ROUTES = %v", routes)
 	}
+	// The fence counts a routed peer only when its server name (the pod
+	// name, IMAS_BUS_SERVER_NAME below) is the first label of one of the
+	// routes (cmd/farmerbus routeMembers, L15): pod i of the StatefulSet.
+	for i, r := range routes {
+		host := strings.TrimPrefix(r, "tls://")
+		if label, _, _ := strings.Cut(host, "."); label != fmt.Sprintf("%s-%d", get(sts, "metadata", "name"), i) {
+			t.Errorf("route %d's first label %q is not pod %d's name", i, label, i)
+		}
+	}
 	for k, want := range map[string]string{
 		"IMAS_BUS_CLUSTER_NAME":                "imas-bus",
 		"IMAS_BUS_CLUSTER_PORT":                "6222",
@@ -454,6 +463,24 @@ func TestClustered(t *testing.T) {
 	}
 	if !has(docs, "PodDisruptionBudget", "-bus") {
 		t.Error("no bus PDB for a 3-node cluster")
+	}
+}
+
+// The resize in one rollout (README "Resizing the cluster"): the
+// documented upgrade renders every route of the new size, the OnDelete
+// update strategy and the topology ConfigMap's new count.
+func TestClusteredResizeValues(t *testing.T) {
+	args := append(append([]string{}, clusteredArgs...), "--set", "bus.replicaCount=5", "--set", "bus.updateStrategy.type=OnDelete")
+	docs := mustRender(t, args...)
+	sts := find(t, docs, "StatefulSet", "-bus")
+	if get(sts, "spec", "replicas") != 5 || get(sts, "spec", "updateStrategy", "type") != "OnDelete" {
+		t.Errorf("statefulset replicas %v, updateStrategy %v; want 5 and OnDelete", get(sts, "spec", "replicas"), get(sts, "spec", "updateStrategy"))
+	}
+	if routes := strings.Split(envMap(container(t, sts))["IMAS_BUS_CLUSTER_ROUTES"], ","); len(routes) != 5 {
+		t.Errorf("IMAS_BUS_CLUSTER_ROUTES has %d routes, want 5", len(routes))
+	}
+	if got := get(find(t, docs, "ConfigMap", "-bus-topology"), "data", "replicas"); got != "5" {
+		t.Errorf("topology replicas = %v, want 5", got)
 	}
 }
 

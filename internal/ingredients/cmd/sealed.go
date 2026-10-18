@@ -31,6 +31,10 @@ package cmd
 //     refuses every cmd.run, plaintext or sealed, with no-keys, and runs
 //     nothing. A sprout with keys refuses a plaintext one with
 //     encryption-required. Either way a bus can't inject a command.
+//   - A request with CmdRun.NoOutput gets a reply without stdout and
+//     stderr: the exit code and duration only. Farmer sets it for the
+//     SaaS API's internal.sprout.action, which reads nothing else
+//     (security review 2026-10, L9); the CLI's cmd.run gets the output.
 //   - Live output streaming (CmdRun.StreamTopic) is dropped from sealed
 //     requests: it publishes output as it's produced, in plaintext, to a
 //     subject the imas CLI reads directly (it holds no tenant key), which
@@ -139,6 +143,11 @@ func RespondCmdRun(sproutID string, m *nats.Msg) *nats.Msg {
 		// Not the error itself: the sprout's log is shipped over the
 		// bus in plaintext, and exec errors name the command.
 		log.Errorf("cmd: sealed cmd.run finished with an error (exit code %d)", results.ErrCode)
+	}
+	if cmdRun.NoOutput {
+		// The caller wants the exit code only (farmer's
+		// internal.sprout.action): the output never leaves this host.
+		results.Stdout, results.Stderr = "", ""
 	}
 	data, err := pki.SproutSealForFarmer(sproutID, payloadbox.PurposeCmdRunResponse, msg.ID, results)
 	if err != nil {
