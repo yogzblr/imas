@@ -1806,6 +1806,126 @@ func TestLoadConfig_FarmerValkeyRefusesStartup(t *testing.T) {
 	}
 }
 
+// TestSproutUpdateLimits: the self_update bounds (security review I4)
+// come from the sprout config file, within their limits; unset or invalid
+// is the default, and an unset key is not written back, so a sprout
+// follows a later default.
+func TestSproutUpdateLimits(t *testing.T) {
+	t.Run("from the config file", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		content := "sproutupdatemaxindexbytes: 1048576\nsproutupdatemaxpackagebytes: \"104857600\"\nsproutupdaterequesttimeout: 30s\nsproutupdatebudget: 20m\n"
+		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+		resetForBinaryTest(t, tmpRoot)
+		jety.SetConfigType("yaml")
+		jety.SetConfigFile(cfgFile)
+		_ = jety.ReadInConfig()
+
+		LoadConfig("sprout")
+
+		if SproutUpdateMaxIndexBytes != 1<<20 || SproutUpdateMaxPackageBytes != 100<<20 ||
+			SproutUpdateRequestTimeout != 30*time.Second || SproutUpdateBudget != 20*time.Minute {
+			t.Errorf("got %d, %d, %v, %v; want 1 MiB, 100 MiB, 30s, 20m",
+				SproutUpdateMaxIndexBytes, SproutUpdateMaxPackageBytes, SproutUpdateRequestTimeout, SproutUpdateBudget)
+		}
+	})
+	t.Run("out of range is the default", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		content := "sproutupdatemaxindexbytes: 1073741824\nsproutupdatemaxpackagebytes: 1073741824\nsproutupdaterequesttimeout: 1s\nsproutupdatebudget: 5h\n"
+		cfgFile := writeTempConfig(t, tmpRoot, "sprout", content)
+		resetForBinaryTest(t, tmpRoot)
+		jety.SetConfigType("yaml")
+		jety.SetConfigFile(cfgFile)
+		_ = jety.ReadInConfig()
+
+		LoadConfig("sprout")
+
+		if SproutUpdateMaxIndexBytes != DefaultSproutUpdateMaxIndexBytes || SproutUpdateMaxPackageBytes != DefaultSproutUpdateMaxPackageBytes ||
+			SproutUpdateRequestTimeout != DefaultSproutUpdateRequestTimeout || SproutUpdateBudget != DefaultSproutUpdateBudget {
+			t.Errorf("got %d, %d, %v, %v; want the defaults",
+				SproutUpdateMaxIndexBytes, SproutUpdateMaxPackageBytes, SproutUpdateRequestTimeout, SproutUpdateBudget)
+		}
+	})
+	t.Run("defaults, not written back", func(t *testing.T) {
+		tmpRoot := t.TempDir()
+		resetForBinaryTest(t, tmpRoot)
+
+		LoadConfig("sprout")
+
+		if SproutUpdateMaxIndexBytes != 16<<20 || SproutUpdateMaxPackageBytes != 512<<20 ||
+			SproutUpdateRequestTimeout != 2*time.Minute || SproutUpdateBudget != 10*time.Minute {
+			t.Errorf("got %d, %d, %v, %v; want 16 MiB, 512 MiB, 2m, 10m",
+				SproutUpdateMaxIndexBytes, SproutUpdateMaxPackageBytes, SproutUpdateRequestTimeout, SproutUpdateBudget)
+		}
+		b, err := os.ReadFile(filepath.Join(tmpRoot, "sprout"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "sproutupdatemax") || strings.Contains(string(b), "sproutupdatebudget") ||
+			strings.Contains(string(b), "sproutupdaterequesttimeout") {
+			t.Errorf("the defaults were written into the config file:\n%s", b)
+		}
+	})
+}
+
+func TestBoundedBytesFrom(t *testing.T) {
+	const def, lo, hi = 16, 4, 64
+	for name, tc := range map[string]struct {
+		in      any
+		want    int64
+		wantErr bool
+	}{
+		"unset":        {nil, def, false},
+		"int":          {32, 32, false},
+		"int64":        {int64(4), 4, false},
+		"uint64":       {uint64(64), 64, false},
+		"float whole":  {float64(8), 8, false},
+		"digits":       {" 40 ", 40, false},
+		"below":        {3, def, true},
+		"above":        {65, def, true},
+		"uint64 huge":  {uint64(1 << 63), def, true},
+		"float part":   {8.5, def, true},
+		"unit":         {"16MiB", def, true},
+		"negative":     {"-1", def, true},
+		"a list":       {[]any{8}, def, true},
+		"empty string": {"", def, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := boundedBytesFrom("k", tc.in, def, lo, hi)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("got %d, %v; want %d, error %v", got, err, tc.want, tc.wantErr)
+			}
+			if err != nil && !strings.HasPrefix(err.Error(), "k ") {
+				t.Errorf("error %q does not name the key", err)
+			}
+		})
+	}
+}
+
+func TestBoundedDurationFrom(t *testing.T) {
+	const def, lo, hi = time.Minute, time.Second, time.Hour
+	for name, tc := range map[string]struct {
+		in      any
+		want    time.Duration
+		wantErr bool
+	}{
+		"unset":         {nil, def, false},
+		"string":        {"90s", 90 * time.Second, false},
+		"duration":      {2 * time.Minute, 2 * time.Minute, false},
+		"at the bounds": {"1h", time.Hour, false},
+		"below":         {"500ms", def, true},
+		"above":         {"61m", def, true},
+		"bare number":   {30, def, true},
+		"not duration":  {"soon", def, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := boundedDurationFrom("k", tc.in, def, lo, hi)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("got %v, %v; want %v, error %v", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
 // LoadConfig("imas") closes the empty config file it creates, so that the
 // CLI can rename a new file over it (imas init's atomic write), which an
 // open handle blocks on Windows.

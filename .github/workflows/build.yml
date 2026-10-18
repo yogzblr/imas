@@ -74,7 +74,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
-          go build -tags no_self_update \
+          go build \
             -ldflags "-X main.GitCommit=${{ steps.meta.outputs.commit }} -X main.Tag=ci" \
             -o "dist/imas-${{ matrix.binary }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ steps.meta.outputs.ext }}" \
             "${{ steps.meta.outputs.path }}"
@@ -108,7 +108,7 @@ jobs:
         run: |
           mkdir -p docker/build
           GIT_COMMIT=$(git rev-parse --short HEAD)
-          go build -tags no_self_update \
+          go build \
             -ldflags "-X main.GitCommit=$GIT_COMMIT -X main.Tag=ci" \
             -o docker/build/imas-farmer \
             ./cmd/farmer

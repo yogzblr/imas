@@ -487,7 +487,10 @@ logged.
 >
 > The path behind it is complete: saasapi sends farmer only the target
 > version for a `self_update`; farmer re-verifies that version against the
-> release catalog (approved by the tenant, registered, not revoked) and
+> release catalog (approved by the tenant, registered, not revoked: a check
+> against a stale or forged request and a saasapi bug, not against a
+> compromised saasapi, which writes the approval itself, security review
+> L7) and
 > sends the sprout a one-step job carrying only the version (FU.7); the
 > sprout fetches its own manifest from farmer (design doc §2.6, FU.1),
 > verifies the release's GPG-signed checksums.txt against the keyring in

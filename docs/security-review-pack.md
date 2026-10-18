@@ -62,11 +62,19 @@ Accepted, Fix needed (with a note) or Not applicable.
    attacker who can alter the manifest can only block updates, not choose a
    package? Say yes or no.
 4. The keyring file is built from the repo's `gpg-public-key.asc` (D21) and
-   ships root-owned and not writable by the sprout user. Check the package
-   scripts for the three platforms.
+   ships root-owned, mode 0600 (on Windows under the SYSTEM/Administrators
+   DACL). The sprout checks it, the cache directory and the staging
+   directories by owner, mode and symlink (`fleetsign.CheckPrivateFile`,
+   `CheckPrivateDir`, `winACLError`; refusal code `unsafe_path`, L3), and a
+   release refuses to ship an empty keyring or a `checksums.txt.sig` that
+   doesn't verify against it (`packaging/test`, `release.yml`, L5). Check
+   the package scripts for the three platforms.
 5. Windows and prerelease handling (SEC.5, #88): an rc cannot replace a final
-   by version confusion; the MSI `ProductVersion` carries no prerelease
-   (finding B8 of review B). Accept or fix.
+   by version confusion. The MSI `ProductVersion` carries no prerelease
+   (finding B8 of review B), so the sprout compares the full version,
+   prerelease included, from the MSI's file name (the name the signed
+   checksum is bound to) with the manifest's (`msiFileVersion`, T1).
+   Accept or fix.
 6. The operator plane registers a release only with a stored signed pair
    (`fleet_release_checksums`, saas migration 00007); the registration hook
    Job uses an operator bearer token and TLS Secret. Who can call it?

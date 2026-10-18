@@ -42,7 +42,11 @@ package natsapi
 // and farmer checks it again against the release catalog it reads
 // read-only (internal/fleetcatalog). The version must be the sprout's
 // tenant's approved_version, registered and not revoked. The SaaS API
-// checked it too, but farmer doesn't take its word for it. A version that
+// checked it too; this re-check catches a stale or forged request and a
+// SaaS API bug. It is not a barrier against a compromised SaaS API, which
+// writes tenant_update_policy (the approval) itself (security review L7):
+// against that, what holds is the sprout's own verification below and
+// its downgrade refusal. A version that
 // passes goes to the sprout as a one-step cook job (the selfupdate
 // ingredient) carrying only the version, over the same tenant connection;
 // the sprout fetches its own manifest from farmer and verifies the
