@@ -642,8 +642,8 @@ follow `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and ignore
 environment of farmer, saasapi or the credential publish
 Job, put the platform OpenBao's host (the host in `*_OPENBAO_ADDR`) in
 `NO_PROXY`, unless the proxy is meant to reach it. With the Helm charts,
-the proxy variables go in `farmer.extraEnv` or `saasapi.extraEnv`; the
-charts set none of them themselves.
+the proxy variables go in `farmer.extraEnv`, `saasapi.extraEnv` or
+`credentialPublisher.extraEnv`; the charts set none of them themselves.
 
 ### An `https://` proxy and OpenBao
 

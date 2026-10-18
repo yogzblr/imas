@@ -791,8 +791,9 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   it as `X-Vault-Namespace` on every request, logins included; when it is
   unset, no namespace header is sent. The chart sets none of them. To use
   a namespace, add the variables to `farmer.extraEnv` (farmer's three
-  clients). saasapi has no OpenBao client. The publish Job has no `extraEnv`, so the chart can't set
-  `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE`, and the `bao` CLI steps (the
+  clients) and `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` to
+  `credentialPublisher.extraEnv` (the publish Job and its refresh
+  CronJob). saasapi has no OpenBao client. The `bao` CLI steps (the
   bootstrap Job and saasapi's `fetch-bus-ca` init container) don't set a
   namespace either. `docs/INSTALL.md` has the full `<prefix>OPENBAO_*` set.
 
@@ -1851,7 +1852,9 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.recipes.writeRateLimit.*` | `1` / `10` | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`: PUT and DELETE per tenant. |
 | `saasapi.recipes.credentialCheck` | `true` | `SAASAPI_RECIPES_CREDENTIAL_CHECK`: saasapi refuses to start unless the object store denies its recipe credential outside `tenants/`, on `sprouts/`, creating and deleting under the platform recipe prefix (farmer's `recipedir`, default `/srv/imas/recipes/prod/`), and put, get, delete and list (of `jobs/` and of the bucket root) in the job bucket. Requires `objectStore.jobBucket`, passed as `SAASAPI_RECIPES_JOB_BUCKET`; the chart refuses to render without it while this is on. `false` turns it off; NOTES warns. See [Tenant recipe upload](#tenant-recipe-upload). |
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `HTTPS_PROXY`/`NO_PROXY`. |
+| `saasapi.pdb.enabled` / `maxUnavailable` | `true` / `1` | saasapi's PodDisruptionBudget; only with `replicaCount` > 1 (saasapi has no HPA). `maxUnavailable` is a whole number from 1 to `replicaCount` - 1, or a percentage above `0%` and below `100%`: the render fails on a value that would block every drain or protect nothing. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job, and its refresh CronJob. |
+| `credentialPublisher.extraEnv` | `[]` | Extra env vars for the publish container of the Job and the refresh CronJob, e.g. `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. Any other `IMAS_*` name fails the render (the chart sets the publisher's own). The publisher's NetworkPolicy allows egress to OpenBao and DNS only, so a proxy needs a NetworkPolicy of your own that lets its pods reach the proxy. |
 | `credentialPublisher.userJWTTTL` | `24h` | `IMAS_SAASAPI_USER_JWT_TTL`: the SaaS API User JWT's lifetime (its `exp`), hours and minutes, 1h to 720h, more than 3 x (`refresh.everyHours` + the CronJob's start delay and run time). A run writes a new JWT once a third of it is left. |
 | `credentialPublisher.refresh.everyHours` | `4` | The refresh CronJob (`<release>-farmer-saasapi-credential-refresh`): the publish run every this many hours (1, 2, 3, 4, 6, 8 or 12), so the JWT is renewed before it expires. The render fails unless `userJWTTTL` is more than 3 times this plus `refresh.startingDeadlineSeconds` and `activeDeadlineSeconds` (12h45m with the defaults): the renewing run may start late and take time to publish. |
 | `credentialPublisher.refresh.minute` | `17` | The minute of the hour it runs at: schedule `<minute> */<everyHours> * * *`. |
