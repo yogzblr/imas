@@ -65,6 +65,10 @@ A unit may start only when every unit in "Needs" is merged to main.
 | T4 | `T-pre-azure.md` T4 | none |
 | T5 | `T-pre-azure.md` T5 | none |
 | T6 | `T-pre-azure.md` T6 | none |
+| U1 | `U-hardening.md` U1 | none |
+| U2 | `U-hardening.md` U2 | U1 |
+| U3 | `U-hardening.md` U3 | U1 |
+| U4 | `U-hardening.md` U4 | U2, U3 |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -232,3 +236,7 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | T4 | P3: deprovision and identity (L10, L11, I7) | T-pre-azure.md | T4 |
 | T5 | P3: OpenBao client (L17 to L21, I2) | T-pre-azure.md | T5 |
 | T6 | P3: bus logging and legacy endpoints (L12, L13, L14) | T-pre-azure.md | T6 |
+| U1 | P3: bus fence, key chain, proofs, CLI keys, cmd.run output (L9, L15, L22, L23, I6) | U-hardening.md | U1 |
+| U2 | P3: tenant key fingerprint in the join token (L24) | U-hardening.md | U2 |
+| U3 | P6: seal cook step events and facts | U-hardening.md | U3 |
+| U4 | Retention settings in the charts | U-hardening.md | U4 |

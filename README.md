@@ -70,4 +70,4 @@ To see the licenses of dependencies, please view [DEPENDENCIES.md](https://githu
 
 Unless otherwise noted, the imas source files are distributed under the 0BSD license found in the [LICENSE](https://github.com/yogzblr/imas/blob/master/LICENSE) file.
 
-All imas logos are Copyright the imas contributors.
+All imas logos are Copyright grlx and imas contributors.
