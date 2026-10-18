@@ -918,6 +918,29 @@ func TestLoadConfig_SproutRootCATOFU(t *testing.T) {
 	}
 }
 
+// enrollpinrequired (L24, U2) defaults to true: a join token without a
+// tenant key fingerprint is refused unless the operator turns it off.
+func TestLoadConfig_EnrollPinRequired(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"default on", "", true},
+		{"turned off", "enrollpinrequired: false\n", false},
+		{"explicitly on", "enrollpinrequired: true\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			EnrollPinRequired = !c.want
+			loadSproutConfig(t, c.content)
+			if EnrollPinRequired != c.want {
+				t.Errorf("EnrollPinRequired = %v, want %v", EnrollPinRequired, c.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_SproutWithCustomID(t *testing.T) {
 	tmpRoot := t.TempDir()
 	content := "sproutid: my-custom-sprout\nloglevel: warn\n"

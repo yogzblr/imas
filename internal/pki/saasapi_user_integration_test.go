@@ -231,6 +231,11 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("farmer subscribe: %v", err)
 	}
+	if _, err := farmer.QueueSubscribe(controlplane.SubjectTenantBoxKey, "imas-core", func(msg *nats.Msg) {
+		_ = msg.Respond([]byte(`{"tenant_id":"t_1"}`))
+	}); err != nil {
+		t.Fatalf("farmer subscribe: %v", err)
+	}
 	// Another SYS user's live reply inbox, and the tenant/sprout subjects
 	// the credential must never reach.
 	farmerInbox := farmer.NewInbox()
@@ -260,6 +265,9 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 	}
 	if string(msg.Data) != `{"status":"completed"}` {
 		t.Fatalf("unexpected reply %q", msg.Data)
+	}
+	if msg, err := saas.Request(controlplane.SubjectTenantBoxKey, []byte(`{}`), 2*time.Second); err != nil || string(msg.Data) != `{"tenant_id":"t_1"}` {
+		t.Fatalf("expected internal.tenant.boxkey to round-trip through farmer: %v", err)
 	}
 	replyMu.Lock()
 	gotReply := append([]string(nil), replyTo...)
@@ -302,6 +310,7 @@ func TestSaaSAPICredential_SproutActionScopedOnLiveBus(t *testing.T) {
 	// requests), every other SYS user's inboxes, and tenant traffic.
 	for _, subj := range []string{
 		controlplane.SubjectSproutAction,
+		controlplane.SubjectTenantBoxKey,
 		"internal.sprout.>",
 		"internal.>",
 		farmerInbox,

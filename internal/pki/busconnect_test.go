@@ -218,7 +218,7 @@ func TestEnrollSprout_RejectsBadNatsURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnrollSprout(t.Context(), "ek_1.supersecret", "web-01", boxPub); err == nil || !strings.Contains(err.Error(), "nats_urls") {
+	if _, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.supersecret"), "web-01", boxPub); err == nil || !strings.Contains(err.Error(), "nats_urls") {
 		t.Fatalf("EnrollSprout with ws:// nats_urls: err = %v", err)
 	}
 	if SproutEnrolled() {
@@ -254,7 +254,7 @@ func TestSproutBus_ConnectsToEnrolledURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := EnrollSprout(t.Context(), "ek_1.supersecret", "web-01", boxPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.supersecret"), "web-01", boxPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout: %v", err)
 	}

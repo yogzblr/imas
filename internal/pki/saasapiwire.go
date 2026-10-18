@@ -41,6 +41,14 @@ var saasapiRequestPurposes = map[string]string{
 	controlplane.SubjectTenantDeprovision: payloadbox.PurposeSaaSTenantDeprovision,
 	controlplane.SubjectTenantPurge:       payloadbox.PurposeSaaSTenantPurge,
 	controlplane.SubjectSproutAction:      payloadbox.PurposeSaaSSproutAction,
+	controlplane.SubjectTenantBoxKey:      payloadbox.PurposeSaaSTenantBoxKey,
+}
+
+// saasapiReplyPurposes maps each request-reply SaaS API subject to its
+// reply's purpose. The other request subjects get no reply.
+var saasapiReplyPurposes = map[string]string{
+	controlplane.SubjectSproutAction: payloadbox.PurposeSaaSSproutActionReply,
+	controlplane.SubjectTenantBoxKey: payloadbox.PurposeSaaSTenantBoxKeyReply,
 }
 
 // SaaSAPIRequestWire is the wire of a SaaS API request on subject; false
@@ -53,15 +61,30 @@ func SaaSAPIRequestWire(subject string) (SaaSAPIWire, bool) {
 	return SaaSAPIWire{Purpose: purpose, Method: strings.TrimPrefix(subject, SaaSAPISubjectPrefix), Subject: subject}, true
 }
 
-// SproutActionReplyWire is the wire of farmer's reply to
-// internal.sprout.action: f2a.sprout.action, bound by ReplyTo to the
-// request's ID, with the request's method and subject.
-func SproutActionReplyWire() SaaSAPIWire {
-	return SaaSAPIWire{
-		Purpose: payloadbox.PurposeSaaSSproutActionReply,
-		Method:  strings.TrimPrefix(controlplane.SubjectSproutAction, SaaSAPISubjectPrefix),
-		Subject: controlplane.SubjectSproutAction,
+// SaaSAPIReplyWire is the wire of farmer's reply to the request-reply
+// SaaS API request on subject (f2a.sprout.action, f2a.tenant.boxkey),
+// bound by ReplyTo to the request's ID, with the request's method and
+// subject; false for a subject that gets no reply.
+func SaaSAPIReplyWire(subject string) (SaaSAPIWire, bool) {
+	purpose, ok := saasapiReplyPurposes[subject]
+	if !ok {
+		return SaaSAPIWire{}, false
 	}
+	return SaaSAPIWire{Purpose: purpose, Method: strings.TrimPrefix(subject, SaaSAPISubjectPrefix), Subject: subject}, true
+}
+
+// SproutActionReplyWire is the wire of farmer's reply to
+// internal.sprout.action: f2a.sprout.action.
+func SproutActionReplyWire() SaaSAPIWire {
+	w, _ := SaaSAPIReplyWire(controlplane.SubjectSproutAction)
+	return w
+}
+
+// TenantBoxKeyReplyWire is the wire of farmer's reply to
+// internal.tenant.boxkey: f2a.tenant.boxkey.
+func TenantBoxKeyReplyWire() SaaSAPIWire {
+	w, _ := SaaSAPIReplyWire(controlplane.SubjectTenantBoxKey)
+	return w
 }
 
 // tenantResultPurposes maps each tenant job to its result's purpose.

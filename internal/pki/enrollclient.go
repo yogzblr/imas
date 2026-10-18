@@ -46,6 +46,16 @@ package pki
 //     private half that names the new key (authenticated tenant key
 //     rotation, sproutbox.go's reconcileTenantKeyPin); then the pin
 //     moves to the new key.
+//   - The tenant X25519 public key a first enrollment returns is checked
+//     against the tenant key fingerprint in the join token (security
+//     review 2026-10, L24; internal/jointoken) before anything is sealed
+//     to it or pinned, so the pin is no longer trust on first use against
+//     the DMZ Envoy: an Envoy that substitutes its own key is refused
+//     with ErrTenantKeyFingerprintMismatch. A token with no fingerprint is
+//     refused (ErrJoinTokenNoFingerprint) unless the sprout's
+//     "enrollpinrequired" is false, and then every enrollment logs a
+//     warning. Later tenant keys reach the sprout through continuity
+//     proofs (reconcileTenantKeyPin), not through a token.
 //   - The tenant ID is pinned at enrollment too (sproutbox.go's
 //     pinSproutTenant), and never moves. Every sealed message names it.
 //     So is the sprout ID farmer assigned (pinSproutID), which a sealed
@@ -88,6 +98,7 @@ import (
 	jwxjwt "github.com/lestrrat-go/jwx/v2/jwt"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/jointoken"
 	log "github.com/yogzblr/imas/internal/log"
 )
 
@@ -111,6 +122,23 @@ var ErrTenantKeyMismatch = errors.New("pki: farmer returned a different tenant X
 // silently from the next response. Callers treat it as fatal, like
 // ErrTenantKeyMismatch.
 var ErrTenantKeyNotPinned = errors.New("pki: sprout is enrolled but has no pinned tenant X25519 public key; refusing to accept one from a refresh")
+
+// ErrTenantKeyFingerprintMismatch means the tenant X25519 public key a
+// first enrollment response carried is not the one whose fingerprint the
+// join token carries (security review 2026-10, L24). Either something
+// between the sprout and farmer (the DMZ Envoy) substituted its own key,
+// or the tenant key was rotated after the token was minted. Nothing is
+// sealed to the key or pinned; callers treat it as fatal. Mint a new join
+// token, and if the tenant key was not rotated, investigate the path to
+// farmer.
+var ErrTenantKeyFingerprintMismatch = errors.New("pki: the tenant X25519 public key in farmer's enrollment response does not match the tenant key fingerprint in the join token; refusing it (a substituted key on the path to farmer, or a token minted before the tenant key was rotated: mint a new one)")
+
+// ErrJoinTokenNoFingerprint means the join token carries no tenant key
+// fingerprint ({key_id}.{secret}, minted before L24 was fixed) and the
+// sprout's "enrollpinrequired" is true, the default. Nothing is sent to
+// farmer. Mint a new token, or set enrollpinrequired: false to enroll
+// trusting the first tenant key farmer's response names.
+var ErrJoinTokenNoFingerprint = errors.New("pki: the join token carries no tenant key fingerprint and enrollpinrequired is true; refusing to enroll with it (mint a new join token, or set enrollpinrequired: false to trust the tenant key on first use)")
 
 // ErrNotEnrolled is returned when the sprout has no persisted NATS User
 // JWT, i.e. it has not completed POST /v1/enroll yet.
@@ -335,7 +363,7 @@ func EnrollSprout(ctx context.Context, joinToken, hostname, sproutPub string) (*
 	if client == nil {
 		return nil, ErrNKeyClientNotReady
 	}
-	c := &EnrollClient{HTTP: client, FarmerURL: config.FarmerURL}
+	c := &EnrollClient{HTTP: client, FarmerURL: config.FarmerURL, AllowTokenWithoutFingerprint: !config.EnrollPinRequired}
 	return c.Enroll(ctx, joinToken, hostname, EnrollKeys{NKey: kp, BoxPriv: priv})
 }
 
@@ -364,6 +392,12 @@ type EnrollClient struct {
 	// sprout needs. Enroll makes its own requests' timestamps strictly
 	// increasing either way.
 	Timestamp func() int64
+	// AllowTokenWithoutFingerprint lets Enroll use a join token that
+	// carries no tenant key fingerprint, trusting the tenant key the
+	// first response names (with a warning). False, the zero value,
+	// refuses such a token (ErrJoinTokenNoFingerprint). A sprout sets it
+	// from "enrollpinrequired: false".
+	AllowTokenWithoutFingerprint bool
 }
 
 // Enroll enrolls keys through POST /v1/enroll with joinToken, asking for
@@ -380,6 +414,11 @@ type EnrollClient struct {
 // gateway JWT: farmer issues none for an NKey signature alone, which a
 // compromised bus can obtain (enroll.go's package comment). The second
 // response must name the same sprout, tenant and tenant key as the first.
+//
+// The first response's tenant key must match the tenant key fingerprint
+// the join token carries (ErrTenantKeyFingerprintMismatch), checked before
+// the proof is sealed to it; a token without one is refused before any
+// request (ErrJoinTokenNoFingerprint) unless AllowTokenWithoutFingerprint.
 //
 // The second request is tried enrollStep2Attempts times, each with a
 // fresh signature and proof: farmer issues the binding only once, so a
@@ -406,6 +445,16 @@ func (c *EnrollClient) Enroll(ctx context.Context, joinToken, hostname string, k
 	if err != nil {
 		return nil, err
 	}
+	tok, err := jointoken.Parse(joinToken)
+	if err != nil {
+		return nil, fmt.Errorf("pki: %w", err)
+	}
+	if tok.Fingerprint == "" {
+		if !c.AllowTokenWithoutFingerprint {
+			return nil, ErrJoinTokenNoFingerprint
+		}
+		log.Warnf("enroll: the join token (key_id %s) carries no tenant key fingerprint and enrollpinrequired is false: trusting the tenant key farmer's response names on first use, so a substituted key on the path to farmer would go unnoticed", tok.KeyID)
+	}
 	var last int64
 	var first *EnrollResponse
 	err = retryWhileBusy(ctx, "/v1/enroll", func() error {
@@ -415,6 +464,11 @@ func (c *EnrollClient) Enroll(ctx context.Context, joinToken, hostname string, k
 	})
 	if err != nil {
 		return nil, err
+	}
+	if tok.Fingerprint != "" {
+		if err := checkTenantKeyFingerprint(first.TenantX25519Pub, tok.Fingerprint); err != nil {
+			return nil, err
+		}
 	}
 	var second *EnrollResponse
 	for attempt := 1; ; attempt++ {
@@ -445,6 +499,16 @@ func (c *EnrollClient) Enroll(ctx context.Context, joinToken, hostname string, k
 		return nil, errors.New("pki: farmer's two enrollment responses name different sprouts, tenants or tenant keys")
 	}
 	return second, nil
+}
+
+// checkTenantKeyFingerprint returns ErrTenantKeyFingerprintMismatch
+// unless tenantPub (standard base64, already validated) has fingerprint.
+func checkTenantKeyFingerprint(tenantPub, fingerprint string) error {
+	got, err := jointoken.FingerprintB64(tenantPub)
+	if err != nil || got != fingerprint {
+		return ErrTenantKeyFingerprintMismatch
+	}
+	return nil
 }
 
 // enrollStep2Attempts and enrollStep2RetryDelay bound EnrollSprout's
@@ -749,6 +813,10 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 	backoff := retryDelay
 	for {
 		resp, err := EnrollSprout(ctx, joinToken, requestedID, sproutPub)
+		if errors.Is(err, ErrJoinTokenNoFingerprint) || errors.Is(err, ErrTenantKeyFingerprintMismatch) {
+			// Not retried: the same token gets the same answer.
+			return "", err
+		}
 		if err == nil {
 			if err := PersistEnrollment(resp); err != nil {
 				return "", err

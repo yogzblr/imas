@@ -78,8 +78,9 @@ func TestCreateEnrollmentKeyValidation(t *testing.T) {
 // TestCreateEnrollmentKeyNeverPersistsRawSecret is the security-critical
 // assertion for this task: the stored row's key_hash must be the SHA-256
 // of the issued secret, the raw secret itself must never be persisted,
-// and the two halves of the returned registration_key must match key_id
-// and the format from design doc §3.1 ("{key_id}.{secret}").
+// and the parts of the returned registration_key must match key_id and
+// the format from design doc §3.1, with the tenant key fingerprint
+// ("{key_id}.{secret}.{tenant_key_fingerprint}", internal/jointoken).
 func TestCreateEnrollmentKeyNeverPersistsRawSecret(t *testing.T) {
 	gdb := newTestDB(t)
 	tenantID := mustCreateTenant(t, "Acme Bank")
@@ -95,11 +96,14 @@ func TestCreateEnrollmentKeyNeverPersistsRawSecret(t *testing.T) {
 		t.Fatalf("decoding response: %v", err)
 	}
 
-	parts := strings.SplitN(resp.RegistrationKey, ".", 2)
-	if len(parts) != 2 {
-		t.Fatalf("registration_key %q is not in key_id.secret form", resp.RegistrationKey)
+	parts := strings.Split(resp.RegistrationKey, ".")
+	if len(parts) != 3 {
+		t.Fatalf("registration_key %q is not in key_id.secret.fingerprint form", resp.RegistrationKey)
 	}
 	keyID, secret := parts[0], parts[1]
+	if parts[2] != testTenantKeyFingerprint || resp.TenantKeyFingerprint != testTenantKeyFingerprint {
+		t.Fatalf("fingerprint %q / tenant_key_fingerprint %q, want the tenant key's %q", parts[2], resp.TenantKeyFingerprint, testTenantKeyFingerprint)
+	}
 	if keyID != resp.KeyID {
 		t.Fatalf("registration_key's key_id half = %q, want %q", keyID, resp.KeyID)
 	}

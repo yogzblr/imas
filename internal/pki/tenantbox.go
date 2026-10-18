@@ -593,6 +593,25 @@ func GetTenantX25519PublicKey(tenantID string) (string, error) {
 	return base64.StdEncoding.EncodeToString(set.current.pub[:]), nil
 }
 
+// TenantX25519PublicKeyForJoinToken returns tenantID's current NaCl box
+// public key, standard base64, for the tenant key fingerprint the SaaS
+// API puts in a join token it mints (internal.tenant.boxkey; security
+// review 2026-10, L24). It reads OpenBao afresh rather than this
+// replica's cache, so a token minted just after a rotation on another
+// replica names the new key, and it creates the tenant's key if there is
+// none yet, as the tenant's first enrollment would. A deprovisioned
+// tenant is refused (ErrTenantDeprovisioned): its tokens enroll nothing.
+func TenantX25519PublicKeyForJoinToken(tenantID string) (string, error) {
+	if !IsValidTenantID(tenantID) {
+		return "", ErrTenantIDInvalid
+	}
+	if err := refuseDeprovisionedTenant(tenantID); err != nil {
+		return "", err
+	}
+	InvalidateTenantBoxKeys(tenantID)
+	return GetTenantX25519PublicKey(tenantID)
+}
+
 // tenantKeyContinuityBody is a continuity proof's authenticated body.
 type tenantKeyContinuityBody struct {
 	// To is the tenant public key (standard base64) the sprout should pin
