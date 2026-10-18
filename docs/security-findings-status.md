@@ -104,3 +104,97 @@ parallel with this unit). When V1 merges, its status fragment updates them.
 | bI4 | The job store had no tenant segment in its keys | Fixed (ready for review) | FIX.2, PR #111 | `internal/jobs/store.go` `jobKey` (`jobs/<tenant>/<sprout>/<jid>`) | `TestJobKey_RefusesHostileSegments`, `TestTwoTenants_SameSproutAndJID_WriteListReadDelete` (`internal/jobs/tenant_test.go`) |
 | bI5 | Confirms M7 fixed | Fixed | As M7 | As M7 | As M7 |
 | bI6 | URL redaction covers http(s) URLs; a scheme-less URL in a message would pass | Fixed; scheme-less residual accepted in the review | SEC.5, PR #86 | `internal/ingredients/selfupdate/download.go` `reURLQuery`, `redactedError` | `TestRedactedError`, `TestApply_RedirectURLsNeverReachTheError` (`internal/ingredients/selfupdate/pkgmeta_test.go`) |
+
+## P11: carry-over follow-ups from PRs #62 to #113
+
+The list is the archive's Open item 10
+([`archive/BUILD-STATUS-2026-10-09.md`](archive/BUILD-STATUS-2026-10-09.md),
+"Leftovers and follow-ups from PR #62 to #113"). The build plan has no
+separate list; it only cites that item. Each follow-up was checked on `main`.
+**Done**: on `main` already, with where it is. **Done (V3)**: built in this
+unit. **Decided**: no code change. The verdict follows the owner decisions
+and the code on `main`, and names where the reason is recorded. **Out of
+scope**: by the owner decision in `docs/briefs/V-leftovers.md` (the web UI
+submodule), or the item needs a real release, the Azure run or another unit.
+
+| # | Area | Follow-up | Verdict | Where, or why |
+|---|---|---|---|---|
+| 1 | Release | Re-enable `release.yml`'s tag trigger | Done | `.github/workflows/release.yml` `on: push: tags: ["v*"]` |
+| 2 | Release | Commit the GPG public key | Done | `gpg-public-key.asc` (P22, PR #226); release gate `packaging/test/keyring_test.go` (T1) |
+| 3 | Release | The rest of the first release checklist; chart publishing | Out of scope | Unit V2 (P10) and real releases (`docs/RELEASING.md`) |
+| 4 | Release | nfpm packages carry a `+git` version suffix | Decided | The sprout maps it back to semver (SEC.5, `internal/ingredients/selfupdate/pkgmeta.go`) |
+| 5 | Release | Check each catalog row against the tag's signed `checksums.txt` | Done | P22: the registration carries `checksums.txt` and its signature (`internal/saasapi/fleet_releases.go`), and the sprout verifies them against its keyring |
+| 6 | Release | OIDC-to-Rekor, image builds, `sha256sum --check` and MSI reproducibility untested | Out of scope | Needs a real release (V2 and the release checklist) |
+| 7 | Release | `RELEASING.md` step 4 calls the `go-licenses` save a known failure | Done (V3) | `docs/RELEASING.md` step 4: the workflow must be green (it passes since LIC.1) |
+| 8 | Enrolment | Pre-CL.1 sprouts keep the unused `fleetsigningkeys` grant | Done | Farmer re-mints a JWT whose permissions differ from `pki.SproutPermissions`; `internal/pki/sproutjwt_isolation_integration_test.go` |
+| 9 | Enrolment | A sprout uses a changed JWT only after a restart | Done | T3, PR #275: `cmd/sprout` `heartbeatGate`, `pki.SproutBus.ReloadUserJWT` |
+| 10 | Enrolment | Run `syncTenantSprouts` for every tenant at farmer start | Out of scope | Unit V1, finding I9 (`PushAllAccounts` runs it per tenant before pushing) |
+| 11 | Deleted sprouts | User JWTs have no `exp`, so the revoked list only grows | Decided | Revocation is carried in each Account JWT (H1, SEC.3a). Rows of deleted sprouts are erased with the tenant (S6) |
+| 12 | Deleted sprouts | A deleted sprout's stored JWT stays behind | Done (V3) | `internal/pki` `DeleteNKey` now also deletes the sprout's stored User JWT row and its object (`forgetSproutUserJWT`) |
+| 13 | Deleted sprouts | Envoy can't see revocation; a retired host's gateway JWT costs farmer a lookup | Decided | Accepted in `docs/security-review-pack.md` 3.5 item 2 (P3 walkthrough, 2026-10-17); farmer refuses it (SEC.7c) |
+| 14 | Sealed | A keyless accepted sprout is closed; nothing deletes it or regenerates its NKey | Decided | "Sealed only, no downgrade" (BUILD-STATUS "Decisions in force"); `imas keys delete` and a fresh enrolment |
+| 15 | Sealed | A keyless sprout gets no staged copy, so a pull can't catch it up | Decided | Same decision |
+| 16 | Sealed | A copy staged before a tenant key rotation is not caught up (PR #107 question 1) | Decided | No previous pin is kept, by design (`docs/design/imas-payload-encryption-design.md`). The next dispatch reaches the sprout |
+| 17 | Sealed | A copy staged before a box key rotation is pulled after the grace | Decided | Bounded by `sproutboxkeyprevgrace` (`config.DefaultSproutBoxKeyPrevGrace`), by design |
+| 18 | Sealed | The `stagedrecipeclockskew` window lets an older captured job run | Decided | Accepted cost in SEC.7d (PR #110), capped at 5 minutes (`config.MaxStagedRecipeClockSkew`) |
+| 19 | Sealed | A staged copy's size and key are visible to `/files/` readers | Decided | Accepted residual, `docs/security-review-pack.md` 3.4 (P3 walkthrough, 2026-10-17) |
+| 20 | Sealed | The join event is plaintext | Decided | P6 owner decision, 2026-10-18 |
+| 21 | Sealed | `jobs.cancel` is plaintext and nothing on the sprout acts on it | Decided | P6 owner decision, 2026-10-18 (cancel stays an accepted residual) |
+| 22 | Sealed | An older CLI prints `invalid message` for a result with an error | Decided | An old binary can't be changed; a current CLI decodes it (PR #118) |
+| 23 | Sealed | `imas cook` keeps exit status 0 when the cook failed | Done (V3) | `cmd/imas/cmd/cook.go`: exits 1 when a step failed, the wait timed out, or a target never completed |
+| 24 | Sealed | Should a remote failure exit 2 rather than 1? | Decided | 1, as on `main` for `imas cmd run`; `imas cook` matches it |
+| 25 | Sealed | `PingPong.Error` and `Inline.Error` print as `{}` | Done | PR #122 (`internal/api/types/wireerror.go`) |
+| 26 | Sealed | A multi-sprout CLI cook only logs a keyless sprout's refusal | Decided | The sprout never completes, so the CLI reports it as not completed, and since V3 `imas cook` exits 1 for it (row 23) |
+| 27 | Sealed | `cmd.RegisterNatsConn` and its unused connection | Done (V3) | Removed from `internal/ingredients/cmd` and `internal/ingredients/test` and their calls in `cmd/sprout/main.go` |
+| 28 | Sealed | The routeless `HTestPing` handler | Done (V3) | `internal/api/handlers/ingredients/` deleted (no importer) |
+| 29 | Sealed | The orchestration doc describes the removed plaintext fallback | Done (V3) | `docs/design/imas-sprout-orchestration.md`, "As built: cook's wire format" |
+| 30 | Sealed | The exported test seam `pki.UseInMemoryJoinToken` | Done (V3) | Panics outside a test binary (`testing.Testing()`) |
+| 31 | Sealed | Should the proof of possession also carry the binding ID? | Decided | No: the enrol binding was confirmed sound in the P3 walkthrough 3.5 (2026-10-17) |
+| 32 | Sealed | Should an out-of-range `stagedrecipeclockskew` stop the sprout? | Decided | No: it logs and uses the default, like every bounded sprout setting on `main` (`internal/config`) |
+| 33 | Job store | A lookup by JID alone lists the tenant's whole prefix | Out of scope | Scale work, BUILD-STATUS P23 |
+| 34 | Job store | The reaper lists the whole bucket hourly on every replica | Done | `internal/jobs/expiry.go` `reapLeased` runs under one cluster-wide lease |
+| 35 | Job store | Old-layout objects are never read or swept | Decided | No deployment wrote the old layout (`docs/security-review-2026-10-b.md` I4); `TestOldLayoutNotRead` |
+| 36 | Facts | `props.static` can set reserved fact names | Done (V3) | `cmd/farmer` drops reserved names from `props.static` before loading them, with an error log |
+| 37 | Facts | `hostname` in a recipe is the reported fact, then the sprout ID | Decided | By design, SEC.4 (`internal/cook/farmercook.go`, `facts.HostnamePropTTL`) |
+| 38 | Facts | `props.GetHostnameFuncForTenant` has no caller | Done (V3) | Deleted with `GetHostnameFunc`: both returned farmer's own hostname |
+| 39 | Facts, REC.1 | A deprovisioned tenant's `recipes/` and `recipe-audit/` are not deleted | Done | S6, PR #268: the purge deletes `tenants/<id>/` (`internal/tenantpurge`) |
+| 40 | Facts | The render budget is per render, not per cook | Done | S4, PR #266 (`cookBudget`) |
+| 41 | REC.1 | Audit records are bucket objects, not a `saas` table | Decided | Retention (U4) and erasure (S6) are built on the object form; `docs/retention.md` |
+| 42 | REC.1 | Audit retention and PR #90's defaults questions | Done | U4, PR #283: `farmer.retention.recipeAuditDays` (365 days), `docs/retention.md` |
+| 43 | REC.1 | §1.5's `cook` action has no recipe role check | Decided | The actions route also runs `cmd.run`, so a recipe role on `cook` alone would narrow nothing (recorded in `docs/design/imas-machine-manager-api-design.md`) |
+| 44 | REC.1 | `DELETE` with `If-Match` is a check then a delete; validation renders with empty props | Decided | S3 has no conditional delete; the cook-time budget is the enforcement (documented in the API design, "Concurrency" and "Validation") |
+| 45 | FIX.3 | The AWS read probe vs a key that can't list; PR #112's questions | Decided | The probe and its limit are documented in FIX.3; the chart's rule and the required bootstrap admin stay as on `main` |
+| 46 | OPS.1 | `saasapi.pdb.maxUnavailable` of 0 or at least `replicaCount` is not refused | Done (V3) | `deploy/helm/farmer/templates/saasapi-pdb.yaml` refuses both |
+| 47 | OpenBao | The credential publisher has no `extraEnv` | Done (V3) | `credentialPublisher.extraEnv` on the Job and the CronJob |
+| 48 | OpenBao | No sprout-side namespace; the `bao` CLI steps set none; no test against a namespaced server | Decided | Not supported, and now documented (`docs/INSTALL.md` "Sprouts", `deploy/helm/farmer/README.md` "Namespaces") |
+| 49 | Web UI | `imas serve`'s add-user form must send `boxpub` | Out of scope | Owner decision: the `grlx-web-ui` submodule is empty on `main` |
+| 50 | CLI | After a tenant key rotation the CLI re-pins `tenantboxpub` by hand | Decided | The documented procedure (`docs/INSTALL.md`, "The imas CLI") |
+| 51 | Tests | The JWT-detector helpers are copied into two packages | Done (V3) | One shared test helper package, `internal/payloadbox/sealedwiretest` |
+| 52 | Tests | In-memory test databases keyed on `t.Name()` break under `-count` | Done (V3) | Every `mode=memory` DSN carries a per-package counter, as `internal/pki` already did |
+| 53 | Codes | Move `self_update_disabled` and the other farmer-only codes into `internal/controlplane` | Done (V3) | `controlplane.ErrorSelfUpdateDisabled`, `ErrorRolloutWindowClosed`, `ErrorFarmerBusy`, `ErrorSproutReenrollRequired`; pinned by `TestSproutActionErrorCodeValues` |
+
+## P17: tests that pinned the old behaviour, and test gaps
+
+BUILD-STATUS P17 listed tests that would pass while a problem existed, and
+tests that pinned the behaviour a fix would change. After the S, T and U
+batches:
+
+| Item | Then | Now |
+|---|---|---|
+| L9 | `internal/natsapi/sprout_action_test.go` and `internal/saasapi/sprout_actions_test.go` passed output through | Changed (U1): `TestSproutAction_CmdRunThroughRealHandler` requires no output in the reply. V3 adds `TestCmdRunResultCarriesNoOutput`, because the saasapi side held only through the type |
+| L12 | `internal/api/handlers/pki_test.go` filed an unproven NKey | Changed (T6): `TestPutNKey_RefusesWithoutProofOfPossession` |
+| L20 | `rotation_test.go` dropped the token by hand | Changed (T5): `TestCertRotationWhileRunning` fails unless the reload drops it |
+| L22 | `TestTenantKeyContinuity_SkipsDeletedVersions` | Changed (U1): `TestTenantKeyContinuity_GapStopsTheWalk` and `_DeletingTheSeveringVersionKeepsTheCut` |
+| I1 | `TestCheckDSN` accepts a non-UTC `loc` with a warning | Unchanged on `main`: unit V1 makes it a refusal and changes the test |
+| I2 | Tests accepted `http://` | Changed (T5): they set `*_OPENBAO_ALLOW_INSECURE=true`, and `TestInsecureAddrRefused` pins the refusal |
+| Error codes | `TestItemErrorCodesDocumented` iterated only the message map | Closed (T2): it derives the stored codes from the source |
+| B4 | Nothing tested `maxRecipeIncludes` | Closed (S4): `internal/cook/cook_budget_test.go` |
+| I5 | `-tags no_self_update` read by no file | Closed (T1). V3 adds `TestNoSelfUpdateBuildTag` and `TestSproutLinksSelfUpdate` |
+| L5 | `packaging/test` checked the keyring's presence only | Closed (T1): `TestPackagedKeyring`, `TestReleaseChecksums` |
+| P5 | No test for farmer's redial after the NATS client gives up | Closed (T2): `TestTenantRedialAfterNATSClientGivesUp` (`cmd/farmer/tenantredial_test.go`) |
+| P12 | No heartbeat race or Valkey Cluster test | Closed (T3): `TestPresence_ReconnectRace_BothOrders` (`internal/heartbeat/presence_race_test.go`, a 3-shard cluster in CI) |
+| P4 | Other re-signs could tie on `iat` | Closed (T2): `TestEveryAccountResignWaitsPastIssuedAt`, `TestEveryResignAdvancesIat` |
+| L13 | The test turned Trace and Debug off itself | Closed (T6): `TestBusDefaultLogLevelLogsNoPayload`. V3 adds `TestBaseNatsOptionsNoTraceOrDebug` for the bus defaults |
+
+Gaps left: none that a test can close. The findings without a pinning test
+are documentation changes (L7, I3), or are V1's (L16, I1, I8, I9, I12).

@@ -630,7 +630,9 @@ client certificate never reach it.
 
 The provider ignores `VAULT_*` and `BAO_*` variables, so a
 `VAULT_HTTP_PROXY` or `BAO_HTTP_PROXY` set for other tools has no effect on
-it.
+it. It sends no namespace header either: a server namespace (Vault
+Enterprise, or an OpenBao namespace) is not supported for `sdb://openbao`,
+so point it at a mount in the root namespace.
 
 ### farmer and saasapi
 
