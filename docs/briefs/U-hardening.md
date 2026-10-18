@@ -109,6 +109,35 @@ CLI, the web UI if it shows tokens), `cmd/sprout`, `ansible/roles/imas_sprout`,
   sprout so that the UAT suite and the rig still enrol (grep for the token
   creation calls and the enrol commands).
 
+Brief corrections (U2, as built):
+
+- "Farmer puts the fingerprint in every token it issues (CLI, API, web UI,
+  UAT scripts)": only the SaaS API mints join tokens
+  (`POST /v1/tenants/{tenant_id}/enrollment-keys`); the imas CLI has no
+  token command, `grlx-web-ui/` is empty, and the UAT scripts pass the SaaS
+  API's token through. The SaaS API holds no tenant key, so it asks farmer
+  for it over a new sealed request-reply subject, `internal.tenant.boxkey`
+  (`a2f.tenant.boxkey` / `f2a.tenant.boxkey`, added to the SaaS API User's
+  publish list), and mints no token without farmer's sealed answer
+  (`503 farmer_unavailable`; `409 tenant_deprovisioned`). The response also
+  carries the fingerprint on its own, `tenant_key_fingerprint`.
+- The format: `{key_id}.{secret}.{tenant_key_fingerprint}`, the
+  fingerprint being the lowercase hex SHA-256 of the key's 32 raw bytes
+  (`internal/jointoken`, one definition for every producer and consumer).
+  A `{key_id}.{secret}` token parses exactly as before.
+- Scope: `enrollclient.go` is the sprout's side of enrolment; farmer's is
+  `enroll.go`. Both changed: the sprout's check is the fix, and farmer also
+  refuses a token whose fingerprint isn't the tenant's current key, before
+  redeeming it, so a token minted before a rotation costs no use.
+- "before it pins anything": the sprout checks before it seals its box key
+  proof to the key too (the first thing it does with it), and
+  `EnsureEnrolled` does not retry either refusal.
+- The package default is `enrollpinrequired: true` in
+  `packaging/etc/imas-sprout.conf` (the .deb, .rpm, .apk and the MSI ship
+  it); the role variable is `imas_sprout_enroll_pin_required`, always
+  written. The Molecule stub farmer and `testing/selfupdate-e2e` take the
+  credential and write the full token to `state/join-token`.
+
 ## U3: seal cook step events and facts (P6)
 
 Scope: `internal/cook`, `internal/jobs`, `internal/serve/logstream.go`,

@@ -227,8 +227,16 @@ paths:
       description: |
         Generates a random `key_id` and a separate 32-byte secret, stores
         only the secret's SHA-256 hash, and returns the full
-        `{key_id}.{secret}` token as `registration_key`. This response is
-        the only time the secret is ever returned. Status is 200, not 201.
+        `{key_id}.{secret}.{tenant_key_fingerprint}` token as
+        `registration_key`. This response is the only time the secret is
+        ever returned. Status is 200, not 201.
+
+        The fingerprint is of the tenant's current box public key, which
+        saasapi reads from farmer over the sealed control plane
+        (`internal.tenant.boxkey`) before creating the key. A sprout checks
+        the tenant key its first enrollment response names against it and
+        refuses a mismatch (security review 2026-10, L24). Without farmer's
+        answer no key is created (503 `farmer_unavailable`).
 
         Rate-limited per tenant (the token's `organization.id`): 1
         request/second sustained, burst 5, by default
@@ -250,8 +258,18 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/TenantNotFound" }
+        "409":
+          description: "`tenant_deprovisioned`: farmer has the tenant deprovisioned; its keys would enroll nothing."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
+        "503":
+          description: "`farmer_unavailable`: the tenant's box key could not be read from farmer (no bus, no answer, or an answer that isn't farmer's sealed reply). Nothing was created; try again."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       tags: [enrollment-keys]
       operationId: ListEnrollmentKeys
@@ -1201,15 +1219,23 @@ components:
 
     CreateEnrollmentKeyResponse:
       type: object
-      required: [key_id, registration_key, expires_at, max_uses]
+      required: [key_id, registration_key, tenant_key_fingerprint, expires_at, max_uses]
       properties:
         key_id: { type: string, examples: [ek_nbswy3dpeb3w64tm] }
         registration_key:
           type: string
           description: |
-            The join token, `{key_id}.{secret}` (secret: 32 random bytes,
-            unpadded base64url). Give it to the sprout as `jointoken`,
-            IMAS_JOIN_TOKEN or `--join-token`. Returned only here.
+            The join token, `{key_id}.{secret}.{tenant_key_fingerprint}`
+            (secret: 32 random bytes, unpadded base64url). Give it to the
+            sprout as `jointoken`, IMAS_JOIN_TOKEN or `--join-token`.
+            Returned only here.
+        tenant_key_fingerprint:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            Lowercase hex SHA-256 of the tenant's current box public key
+            (its 32 raw bytes), the token's last part. Not a secret: compare
+            it with the tenant key a sprout pinned.
         expires_at: { type: string, format: date-time }
         max_uses: { type: integer }
 

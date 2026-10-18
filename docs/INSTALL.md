@@ -307,13 +307,19 @@ curl -s "${H[@]}" https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk
 # 3. Mint an enrollment key: valid for 24 hours, up to 50 sprouts.
 curl -s "${H[@]}" -X POST https://saasapi.example.internal/v1/tenants/t_mfrggzdfmztwq2lk/enrollment-keys \
   -d '{"expires_in_hours":24,"max_uses":50}'
-# {"key_id":"ek_…","registration_key":"ek_….<secret>","expires_at":"…","max_uses":50}
+# {"key_id":"ek_…","registration_key":"ek_….<secret>.<tenant_key_fingerprint>","tenant_key_fingerprint":"…","expires_at":"…","max_uses":50}
 ```
 
 `registration_key` is the join token. It's shown only once: saasapi stores
 just its hash. Treat it as a secret. List keys with
 `GET .../enrollment-keys` and revoke one with
 `DELETE .../enrollment-keys/{key_id}`.
+
+Its last part, also returned as `tenant_key_fingerprint`, is the SHA-256 of
+the tenant's box public key, which saasapi reads from farmer when it mints
+the key. The sprout checks the key enrollment hands it against it (see
+"What happens on first start"). A key minted before the tenant's box key
+was rotated no longer enrolls anything: mint a new one.
 
 ## Install and enroll a sprout
 
@@ -343,7 +349,8 @@ write `/etc/imas/sprout`:
 farmerinterface: gateway.example.com   # Envoy's external name
 farmerapiport: 8443                     # Envoy's listener, not farmer's 5405
 sproutrootcatofu: false                 # use the pre-placed CA; never trust on first use
-jointoken: ek_….<secret>                # the registration_key from above
+jointoken: ek_….<secret>.<fingerprint>  # the registration_key from above
+enrollpinrequired: true                 # the default: refuse a key without the tenant key fingerprint
 ```
 
 The join token can instead come from the `IMAS_JOIN_TOKEN` environment
@@ -364,7 +371,14 @@ systemctl enable --now imas-sprout
    keys and hostname, and a signature proving it holds the NKey seed.
 3. farmer redeems one use of the key and accepts the sprout into the key's
    tenant. It answers with the sprout's NATS User JWT, the tenant's X25519
-   public key and the `wss://` `nats_urls`. The sprout then calls
+   public key and the `wss://` `nats_urls`. The sprout checks that tenant
+   key against the fingerprint in its join token before it uses or pins it
+   (security review 2026-10, L24): a mismatch stops the sprout with
+   `the tenant X25519 public key in farmer's enrollment response does not
+   match the tenant key fingerprint in the join token`, without retrying.
+   Either something on the path to farmer (Envoy) substituted its own key,
+   or the tenant's key was rotated after the token was minted; mint a new
+   token, and if no rotation happened, investigate the path. The sprout then calls
    `/v1/enroll` once more, without spending another use, with a proof sealed
    by its box key; only that answer carries the gateway JWT. Later gateway
    JWTs come from `/v1/refresh`, sealed both ways. The sprout ID is the one the sprout asked for (its
@@ -373,6 +387,15 @@ systemctl enable --now imas-sprout
 4. The sprout writes all of that under `/etc/imas/pki/sprout/`, deletes
    `jointoken` from its config file, and connects to the bus over `wss://`
    through Envoy.
+
+A join token without the fingerprint (`ek_….<secret>`, minted before it
+existed) is refused before anything is sent: `the join token carries no
+tenant key fingerprint and enrollpinrequired is true`. Mint a new one, or
+set `enrollpinrequired: false` to enroll with it anyway, trusting the first
+tenant key farmer names; the sprout then logs a warning at every enrollment.
+The setting matters only for a first enrollment: after it, the sprout
+follows tenant key rotations through the continuity proofs farmer sends on
+refresh, and no token is involved.
 
 If the token came from the environment or the flag, the sprout can't delete
 it and logs a warning: remove it yourself. A failed enrollment is retried

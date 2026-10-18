@@ -63,7 +63,7 @@ Owned entirely by the SaaS API (`saas.enrollment_keys`); farmer validates agains
 { "expires_in_hours": 24, "max_uses": 50 }
 
 // response
-{ "key_id": "ek_91cd", "registration_key": "<opaque, shown once>", "expires_at": "2026-09-15T10:00:00Z", "max_uses": 50 }
+{ "key_id": "ek_91cd", "registration_key": "<key_id>.<secret>.<tenant_key_fingerprint>, shown once (§3.1)", "tenant_key_fingerprint": "<64 hex>", "expires_at": "2026-09-15T10:00:00Z", "max_uses": 50 }
 ```
 
 ### 1.3 Asset linking
@@ -324,6 +324,7 @@ Transport: NATS subjects under `imas.api.*` (existing) and a new `imas.internal.
 | `internal.tenant.deprovisioned.{job_id}` | Farmer → SaaS API, published | Deprovision's completion callback, same shape as `provisioned`. |
 | `internal.tenant.purge` | SaaS API → Farmer, fire-and-forget | Erase an offboarded tenant's farmer-side data (S6): Valkey keys, farmer-schema rows, object store prefixes, the payload-encryption keypair in OpenBao KV, Transit keys, leaving the tombstone. Farmer refuses (deleting nothing) a tenant its registry doesn't show deprovisioned, and the legacy current tenant. Same sealing, outbox and retry as deprovision. |
 | `internal.tenant.purged.{job_id}` | Farmer → SaaS API, published | The purge's result: `purged` with counts per category (numbers only), or `failed` with `purge_refused` / `purge_incomplete` and the step it stopped at. On success saasapi deletes the tenant's saas rows and sets it `purged`. |
+| `internal.tenant.boxkey` | SaaS API → Farmer, request-reply | The tenant's current box public key (`tenant_x25519_pub`), which the SaaS API fingerprints into every join token it mints (§3.1; security review 2026-10, L24). Sealed both ways like `internal.sprout.action` (`a2f.tenant.boxkey`, `f2a.tenant.boxkey` bound to the request); farmer answers only on a SaaS API inbox, reads the key from OpenBao afresh, creates it for a tenant that has none yet, and answers `tenant_not_found` for a deprovisioned tenant. |
 | `internal.sprout.mint` | SaaS API → Farmer, request-reply | Mint a User JWT + NKey identity for a newly-enrolled sprout, given `tenant_id` + submitted pubkeys. Called from farmer's own pre-enrollment HTTP path (which validates the registration key against `saas.enrollment_keys` directly, per §1.2) — this subject is the step after that validation succeeds — full sequence in §3. |
 | `internal.sprout.revoke` | SaaS API → Farmer, request-reply | Revoke a sprout's JWT/NKey (backs "unenroll"). |
 | `internal.sprouts.list` | SaaS API → Farmer, request-reply | Tenant-scoped, **paginated** version of `sprouts.list` (the existing subject returns an unbounded list — not viable at 1M sprouts). |
@@ -516,9 +517,11 @@ file name, and downloads it from its configured repository (§2.5).
 
 ### 3.1 Token format
 
-`{key_id}.{secret}` — not just one opaque blob. `key_id` is a short random public identifier (e.g. 8-char base32), stored in plaintext and used purely as an **indexed lookup key**; `secret` is a 32-byte random value whose SHA-256 hash is what's actually stored (`saas.enrollment_keys.key_hash`). This mirrors `kubeadm`'s split for exactly the same reason: without it, validating a token means scanning and hash-comparing against every live key in the table; with it, it's a single indexed `WHERE key_id = ?` followed by one constant-time hash comparison.
+`{key_id}.{secret}.{tenant_key_fingerprint}` — not just one opaque blob. `key_id` is a short random public identifier (e.g. 8-char base32), stored in plaintext and used purely as an **indexed lookup key**; `secret` is a 32-byte random value whose SHA-256 hash is what's actually stored (`saas.enrollment_keys.key_hash`). This mirrors `kubeadm`'s split for exactly the same reason: without it, validating a token means scanning and hash-comparing against every live key in the table; with it, it's a single indexed `WHERE key_id = ?` followed by one constant-time hash comparison.
 
-`POST /tenants/{tenant_id}/enrollment-keys` (§1.2) returns the full `{key_id}.{secret}` string once — that's what goes into the Ansible playbook's `imas_join_token` variable.
+`tenant_key_fingerprint` is the lowercase hex SHA-256 of the tenant's current box public key (its 32 raw bytes), which the SaaS API reads from farmer over the sealed control plane (`internal.tenant.boxkey`, §2.2) when it mints the token (security review 2026-10, L24; `internal/jointoken`). The enrollment response crosses the DMZ Envoy, so a sprout that pinned whatever `tenant_x25519_pub` it named would trust the Envoy on first use; instead the sprout compares the key with the token's fingerprint before it seals its box key proof to it or pins it, and refuses a mismatch. A token without the fingerprint (`{key_id}.{secret}`, minted before it existed) still parses; the sprout refuses it unless its `enrollpinrequired` is false, and then warns at every enrollment. Farmer also refuses a token whose fingerprint isn't the tenant's current key before redeeming it, so a token minted before a tenant key rotation costs no use; it has to be replaced. Rotation is otherwise unaffected: a token is for a first enrollment only, and an enrolled sprout follows later keys through the continuity proofs on refresh.
+
+`POST /tenants/{tenant_id}/enrollment-keys` (§1.2) returns the full `{key_id}.{secret}.{tenant_key_fingerprint}` string once — that's what goes into the Ansible playbook's `imas_join_token` variable.
 
 ### 3.2 The endpoint itself
 
@@ -528,7 +531,7 @@ file name, and downloads it from its configured repository (§2.5).
 // request (field-by-field, including how nkey_sig is computed:
 // imas-envoy-enrollment-design.md, "Proof of possession")
 {
-  "join_token": "<key_id>.<secret>",
+  "join_token": "<key_id>.<secret>.<tenant_key_fingerprint>",
   "nkey_pub":   "U...",
   "hostname":   "web-01",
   "sprout_pub": "<base64 X25519 public key>",
@@ -553,7 +556,7 @@ file name, and downloads it from its configured repository (§2.5).
 0. **Proof of possession**: verify `nkey_sig` against `nkey_pub` and require `timestamp` within ±5 minutes of farmer's clock, before anything is looked up. Each signed request is also single-use: farmer records it in Valkey (`SET NX` with a TTL, shared by every farmer replica) just before issuing anything, in step 1's replay or before step 4's redemption, and refuses a request it has already recorded. See `imas-envoy-enrollment-design.md`, "Proof of possession" and "Replay cache".
 1. **Idempotency check first**: `SELECT * FROM farmer.sprouts WHERE nkey_pub = ?`. If a sprout already exists for this exact public key, return its existing JWT immediately and stop — no enrollment-key touched. This covers the ordinary case of Ansible retrying after a dropped connection: the sprout generates its keypair once, locally, before ever calling out, so a retry presents the same `nkey_pub` and gets the same identity back rather than burning a second use of a possibly single-use token.
 2. **Look up the key**: `SELECT tenant_id, key_hash, expiry, max_uses, used_count, revoked, asset_id FROM saas.enrollment_keys WHERE key_id = ?` — a plain read via farmer's existing grant into `saas`.
-3. **Validate**: unknown `key_id`, revoked, expired, or `used_count >= max_uses` all fail the same way (§3.4).
+3. **Validate**: unknown `key_id`, revoked, expired, `used_count >= max_uses`, or a tenant key fingerprint that isn't the tenant's current key (§3.1) all fail the same way (§3.4).
 4. **Atomically redeem** — this is the one deliberate, narrow exception to the single-writer-per-schema rule:
    ```sql
    UPDATE saas.enrollment_keys

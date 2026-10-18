@@ -186,6 +186,16 @@ Accepted, Fix needed (with a note) or Not applicable.
 5. Envoy terminates sprout TLS in the DMZ and requires the right requirement
    map per route (#6). Walk `deploy/envoy/envoy.yaml`: every gated route
    needs a requirement.
+6. The tenant key pin is no longer trust on first use against Envoy (L24,
+   U2): the join token carries the tenant key's SHA-256
+   (`internal/jointoken`), the SaaS API reads the key from farmer over a
+   new sealed request-reply subject (`internal.tenant.boxkey`, added to the
+   SaaS API User's publish list), and the sprout refuses a first response
+   whose key doesn't match, before sealing its proof to it or pinning it
+   (`internal/pki/enrollclient.go`). Check the comparison happens before
+   any use of the key, that a token without a fingerprint is refused by
+   default (`enrollpinrequired`), and that nothing but farmer's sealed
+   reply can set a token's fingerprint (`internal/saasapi/tenant_boxkey.go`).
 
 ### 3.6 Tenant isolation (PKI.*, SCALE.2, SEC.3a/4, REC.*, FIX.2)
 

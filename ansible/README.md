@@ -57,14 +57,18 @@ curl -sS -X POST "https://<saas-api>/v1/tenants/<tenant_id>/enrollment-keys" \
 ```json
 {
   "key_id": "ek_…",
-  "registration_key": "ek_….<secret>",
+  "registration_key": "ek_….<secret>.<tenant_key_fingerprint>",
+  "tenant_key_fingerprint": "…",
   "expires_at": "2026-09-15T10:00:00Z",
   "max_uses": 50
 }
 ```
 
-`registration_key` is the enrollment key: the full `{key_id}.{secret}`
-string. **It is shown only once.** Choose settings that keep a leaked key as
+`registration_key` is the enrollment key: the full
+`{key_id}.{secret}.{tenant_key_fingerprint}` string. **It is shown only
+once.** The last part is the SHA-256 of the tenant's box public key; the
+sprout checks the key its enrollment answer names against it and refuses a
+mismatch (`imas_sprout_enroll_pin_required`). Choose settings that keep a leaked key as
 harmless as possible:
 
 - `max_uses`: the number of hosts in this rollout. Each first-time enrollment
@@ -92,7 +96,7 @@ Then store the key with **ansible-vault**:
 cd inventory/<yours>/group_vars/sprouts/
 ansible-vault create vault.yml
 # in the editor:
-# vault_imas_join_token: "ek_….<secret>"
+# vault_imas_join_token: "ek_….<secret>.<tenant_key_fingerprint>"
 ```
 
 `vars.yml` reads it from there (`imas_join_token: "{{ vault_imas_join_token
@@ -135,9 +139,9 @@ For each host, the playbook:
    set, `sproutboxkeyprevgrace` if set, `busreconnectbase` and
    `busreconnectcap` if set, the self-update repository settings
    (`sproutupdaterepourl`, `sproutupdaterepoformat`, `sproutupdaterepodist`,
-   `sproutupdaterepopackageid`, `sproutupdaterepotoken`) if set, and
-   `jointoken` if the host isn't
-   enrolled yet. It changes only those keys and leaves the rest of the file
+   `sproutupdaterepopackageid`, `sproutupdaterepotoken`) if set,
+   `disableshell` and `enrollpinrequired` always, and `jointoken` if the
+   host isn't enrolled yet. It changes only those keys and leaves the rest of the file
    alone, including what the sprout writes itself. If you set
    `imas_sprout_root_ca`, it also writes that CA to the sprout's root-CA
    path and sets `sproutrootcatofu: false`.
@@ -163,7 +167,8 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 
 | Variable | Default | |
 |---|---|---|
-| `imas_join_token` | `""` | The enrollment key. Needed only for hosts that aren't enrolled yet. **Secret: store it with ansible-vault.** |
+| `imas_join_token` | `""` | The enrollment key, `{key_id}.{secret}.{tenant_key_fingerprint}`. Needed only for hosts that aren't enrolled yet. **Secret: store it with ansible-vault.** |
+| `imas_sprout_enroll_pin_required` | `true` | The sprout refuses a join token without the tenant key fingerprint, and checks the tenant key enrollment names against it (`enrollpinrequired`; security review 2026-10, L24). `false` accepts an older `{key_id}.{secret}` key, trusting the first tenant key farmer names, and the sprout logs a warning at every such enrollment; the role then accepts that form too. Always written, as `true` or `false`. |
 | `imas_farmer_host` | required | Host the sprout enrolls with: `https://<host>:<port>/v1/enroll`. |
 | `imas_farmer_api_port` | `5405` | Port of the enrollment endpoint (`443` behind the DMZ edge). |
 | `imas_farmer_bus_urls` | `[]` | Bus addresses to pin, e.g. `["wss://bus.example.com:443"]`. Empty: the sprout uses the addresses farmer returns at enrollment. |
@@ -195,9 +200,18 @@ log lines (from `journalctl -u imas-sprout`, or
 - **has not enrolled**: farmer returns the same `enrollment_failed` for
   every rejection, on purpose, so the log can't show why. Check that:
   - the key hasn't expired, been revoked, or run out of `max_uses`
+  - the key was minted after the tenant's box key was last rotated (its
+    fingerprint names the current key)
   - the host can reach the enrollment endpoint and trusts its certificate
     (`imas_sprout_root_ca`)
   - the host's clock is within 5 minutes of farmer's
+
+  A sprout that refused farmer's answer itself says so in its log lines,
+  and stops: `does not match the tenant key fingerprint in the join token`
+  (something on the path to farmer substituted the tenant key, or the key
+  was rotated after the token was minted: mint a new key, and investigate
+  the path if no rotation happened), or `carries no tenant key fingerprint
+  and enrollpinrequired is true` (an old key: mint a new one).
 
   Once you've fixed the cause, re-run the playbook. If the old key is used
   up, re-run it with a new one.

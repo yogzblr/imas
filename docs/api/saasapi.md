@@ -171,7 +171,8 @@ returns **200** with:
 ```json
 {
   "key_id": "ek_…",
-  "registration_key": "ek_….<secret>",
+  "registration_key": "ek_….<secret>.<tenant_key_fingerprint>",
+  "tenant_key_fingerprint": "3f1c…(64 hex characters)",
   "expires_at": "2026-10-04T12:00:00Z",
   "max_uses": 50
 }
@@ -179,9 +180,27 @@ returns **200** with:
 
 `registration_key` is the join token a sprout presents to farmer's
 `POST /v1/enroll` (see [INSTALL.md](../INSTALL.md) for how to hand it to a
-sprout). Only the SHA-256 of the secret is stored, and this response is the
-only place the secret ever appears. Farmer redeems keys against the same
-`saas.enrollment_keys` rows, with an atomic `used_count` increment.
+sprout): `{key_id}.{secret}.{tenant_key_fingerprint}`. Only the SHA-256 of
+the secret is stored, and this response is the only place the secret ever
+appears. Farmer redeems keys against the same `saas.enrollment_keys` rows,
+with an atomic `used_count` increment.
+
+`tenant_key_fingerprint` (also the token's last part) is the lowercase hex
+SHA-256 of the tenant's current box public key, the 32 raw bytes
+(security review 2026-10, L24). saasapi asks farmer for the key over the
+sealed control plane (`internal.tenant.boxkey`) before it creates the key;
+the sprout compares the `tenant_x25519_pub` its first enrollment response
+names with it before pinning anything, and refuses a mismatch, so a DMZ
+Envoy that substitutes its own key is caught. It is not a secret. Farmer
+also refuses a token whose fingerprint isn't the tenant's current key,
+without spending a use: a token minted before a tenant key rotation has to
+be replaced. Rotation is otherwise unaffected, because a token is only for
+a first enrollment; an enrolled sprout follows a rotation through the
+continuity proofs it gets on refresh.
+
+When farmer can't be asked or gives no usable answer, no key is created and
+the answer is **503** `farmer_unavailable` (try again); when farmer has the
+tenant deprovisioned, **409** `tenant_deprovisioned`.
 
 `GET` lists keys newest first with a computed `state`: `active`, `revoked`,
 `expired` or `exhausted`. `DELETE .../{key_id}` sets `revoked`. It only stops

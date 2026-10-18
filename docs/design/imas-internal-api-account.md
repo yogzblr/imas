@@ -98,7 +98,7 @@ the subject strings come from `internal/controlplane`:
 
 | Direction | Allow (nothing else) |
 |---|---|
-| **pub** | `internal.tenant.provision`, `internal.tenant.deprovision`, `internal.tenant.purge` (S6), `internal.sprout.action` |
+| **pub** | `internal.tenant.provision`, `internal.tenant.deprovision`, `internal.tenant.purge` (S6), `internal.sprout.action`, `internal.tenant.boxkey` (U2) |
 | **sub** | `internal.tenant.provisioned.*`, `internal.tenant.deprovisioned.*`, `internal.tenant.purged.*` (S6), `_INBOX.saasapi.>` |
 
 Other claims on the same JWT:

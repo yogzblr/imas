@@ -82,12 +82,21 @@ package pki
 // from a sealed refresh (refreshsealed.go). The sprout never used step
 // 1's gateway JWT.
 //
+// The tenant key fingerprint in the join token (security review 2026-10,
+// L24; internal/jointoken). The sprout compares the tenant key a first
+// response names with the token's fingerprint before it pins it
+// (enrollclient.go), which is what stops a DMZ Envoy substituting its own
+// key. Farmer checks it too, before redeeming (checkTokenTenantKey), so a
+// token minted before a tenant key rotation is refused without spending a
+// use. A token without a fingerprint is accepted here; whether a sprout
+// sends one is its own setting (enrollpinrequired).
+//
 // Every failure path in Enroll returns the single generic
 // ErrEnrollmentFailed sentinel (design doc §3.4) — unknown key_id,
-// malformed token, a hash mismatch, revoked, expired, exhausted, and a
-// lost redemption race are all deliberately indistinguishable over the
-// wire, to deny an attacker an oracle for enumerating key_ids or timing a
-// race against expiry. The specific reason is logged locally (log.Warnf
+// malformed token, a hash mismatch, revoked, expired, exhausted, a stale
+// tenant key fingerprint, and a lost redemption race are all deliberately
+// indistinguishable over the wire, to deny an attacker an oracle for
+// enumerating key_ids or timing a race against expiry. The specific reason is logged locally (log.Warnf
 // below) for operator visibility, never returned.
 import (
 	"context"
@@ -200,7 +209,8 @@ func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
 	return res.RowsAffected == 1, nil
 }
 
-// UseInMemoryJoinToken makes Enroll accept joinToken ("{key_id}.{secret}")
+// UseInMemoryJoinToken makes Enroll accept joinToken ("{key_id}.{secret}",
+// with or without a tenant key fingerprint after it; internal/jointoken)
 // for tenantID up to maxUses times, from an in-memory store that replaces
 // saas.enrollment_keys until the returned function restores it. For tests
 // outside this package that drive POST /v1/enroll end to end
@@ -950,8 +960,8 @@ func checkTokenTenantKey(tenantID, fingerprint string) error {
 }
 
 // hashSecret must stay byte-for-byte identical to internal/saasapi's own
-// hashSecret (idgen.go): both sides hash the secret half of the same
-// {key_id}.{secret} token the same way. farmer can't import
+// hashSecret (idgen.go): both sides hash the secret part of the same
+// {key_id}.{secret}.{tenant_key_fingerprint} token the same way. farmer can't import
 // internal/saasapi (separate schema/service boundary — design doc §5.1's
 // "SaaS API" vs. "Farmer" split), so this is a deliberate, small
 // duplication rather than a cross-service dependency.
