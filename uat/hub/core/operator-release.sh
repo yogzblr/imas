@@ -98,7 +98,11 @@ esac
 # The operator Service through a local port kubectl picks.
 # kubectl itself in the background (not the kc function), so $! is its own
 # pid and killing it ends the tunnel.
-kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$CORE_NS" port-forward "service/$SAASAPI_OPERATOR_FULLNAME" ":$SAASAPI_OPERATOR_PORT" >"$tmp/pf.log" 2>&1 &
+# The log exists before kubectl starts: the shell opens a ">" redirect
+# only in the forked child, and the loop below would otherwise run sed on
+# a file that is not there yet (and, with pipefail, exit).
+: >"$tmp/pf.log"
+kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$CORE_NS" port-forward "service/$SAASAPI_OPERATOR_FULLNAME" ":$SAASAPI_OPERATOR_PORT" >>"$tmp/pf.log" 2>&1 &
 pf_pid=$!
 lport=""
 for _ in $(seq 1 60); do

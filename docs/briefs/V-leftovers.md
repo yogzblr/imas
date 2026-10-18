@@ -137,6 +137,12 @@ Brief corrections (V2, decided by the order in ORCHESTRATOR.md rule 6):
   `release.footer`).
 - **Snapshot.** The local run is `goreleaser release --snapshot --clean
   --skip=sign`, as the workflow runs it: snapshots do not sign (PR #75).
+- **Outside the named files.** `go test ./...` for this unit failed once in
+  `uat/hub/core` (`TestValidateObjectStore`): `validate-object-store.sh`
+  and `operator-release.sh` poll a backgrounded `kubectl port-forward`'s
+  log with `sed` before the forked child has created it, and under `set -e`
+  and `pipefail` exit. Both now create the log first and append to it;
+  `TestPortForwardLogExistsBeforeKubectl` pins it.
 
 ## V3: triage, issues and the findings table (P11, P14)
 

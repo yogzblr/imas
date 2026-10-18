@@ -99,7 +99,11 @@ if [[ "$S3_MODE" == versity ]]; then
 	trap 'cleanup_pf; rm -rf "$work"' EXIT
 	# A local port kubectl picks; kubectl itself in the background (not the
 	# kc function), so $! is its own pid and the trap ends the tunnel.
-	kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$CORE_NS" port-forward "svc/$VERSITY_FULLNAME" ":$VERSITY_PORT" >"$work/pf.log" 2>&1 &
+	# The log exists before kubectl starts: the shell opens a ">" redirect
+	# only in the forked child, and the loop below would otherwise run sed on
+	# a file that is not there yet (and, with pipefail, exit).
+	: >"$work/pf.log"
+	kubectl --kubeconfig "$KUBECONFIG_PATH" -n "$CORE_NS" port-forward "svc/$VERSITY_FULLNAME" ":$VERSITY_PORT" >>"$work/pf.log" 2>&1 &
 	pf_pid=$!
 	pf_port=""
 	for _ in $(seq 1 60); do
