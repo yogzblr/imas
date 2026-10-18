@@ -19,18 +19,19 @@ const (
 // Suffixes after the prefix, e.g. IMAS_NATSSIGN_OPENBAO_ADDR or
 // IMAS_NATSSIGN_TIMEOUT.
 const (
-	EnvOpenBaoAddr         = "OPENBAO_ADDR"
-	EnvOpenBaoCACert       = "OPENBAO_CACERT"
-	EnvOpenBaoAuthMethod   = "OPENBAO_AUTH_METHOD"
-	EnvOpenBaoToken        = "OPENBAO_TOKEN"
-	EnvOpenBaoK8sRole      = "OPENBAO_K8S_ROLE"
-	EnvOpenBaoK8sMount     = "OPENBAO_K8S_MOUNT"
-	EnvOpenBaoK8sJWTPath   = "OPENBAO_K8S_JWT_PATH"
-	EnvOpenBaoNamespace    = "OPENBAO_NAMESPACE"
-	EnvOpenBaoTransitMount = "OPENBAO_TRANSIT_MOUNT" // default "transit"
-	EnvTimeout             = "TIMEOUT"               // default 15s
-	EnvBatchMax            = "BATCH_MAX"             // default 64
-	EnvWorkers             = "WORKERS"               // default 4
+	EnvOpenBaoAddr          = "OPENBAO_ADDR"
+	EnvOpenBaoCACert        = "OPENBAO_CACERT"
+	EnvOpenBaoAuthMethod    = "OPENBAO_AUTH_METHOD"
+	EnvOpenBaoToken         = "OPENBAO_TOKEN"
+	EnvOpenBaoK8sRole       = "OPENBAO_K8S_ROLE"
+	EnvOpenBaoK8sMount      = "OPENBAO_K8S_MOUNT"
+	EnvOpenBaoK8sJWTPath    = "OPENBAO_K8S_JWT_PATH"
+	EnvOpenBaoNamespace     = "OPENBAO_NAMESPACE"
+	EnvOpenBaoAllowInsecure = "OPENBAO_ALLOW_INSECURE" // "true" accepts an http:// address
+	EnvOpenBaoTransitMount  = "OPENBAO_TRANSIT_MOUNT"  // default "transit"
+	EnvTimeout              = "TIMEOUT"                // default 15s
+	EnvBatchMax             = "BATCH_MAX"              // default 64
+	EnvWorkers              = "WORKERS"                // default 4
 )
 
 // Defaults for a Config's zero fields.
@@ -61,6 +62,8 @@ func ConfigFromEnv(prefix string, getenv func(string) string) (Config, error) {
 			K8sMount:   prefix + EnvOpenBaoK8sMount,
 			K8sJWTPath: prefix + EnvOpenBaoK8sJWTPath,
 			Namespace:  prefix + EnvOpenBaoNamespace,
+
+			AllowInsecure: prefix + EnvOpenBaoAllowInsecure,
 		},
 		TransitMount: getenv(prefix + EnvOpenBaoTransitMount),
 	}

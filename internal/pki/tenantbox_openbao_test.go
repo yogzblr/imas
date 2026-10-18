@@ -42,6 +42,7 @@ func TestTenantBoxLive_KVv2AgainstRealOpenBao(t *testing.T) {
 	t.Cleanup(func() { bao.Delete("sys/mounts/" + mount) })
 
 	t.Setenv(EnvTenantBoxOpenBaoAddr, addr)
+	t.Setenv(EnvTenantBoxOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvTenantBoxOpenBaoKVMount, mount)
 	t.Setenv(EnvTenantBoxOpenBaoKVPath, "imas/tenant-x25519")
 	t.Setenv(EnvTenantBoxOpenBaoAuthMethod, TenantBoxAuthMethodToken)

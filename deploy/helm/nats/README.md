@@ -324,7 +324,9 @@ start.
   also reads the optional `IMAS_CERTS_OPENBAO_NAMESPACE`, which it sends as
   `X-Vault-Namespace` on every request, login included. It is unset by
   default and the chart has no value for it: to use a namespace, add it
-  to `bus.extraEnv`. With a proxy in `bus.extraEnv` (`HTTPS_PROXY`), the
+  to `bus.extraEnv`. The address must be `https://` unless
+  `bus.tls.openbao.allowInsecure=true`, and the client follows no
+  redirect to another scheme, host or port. With a proxy in `bus.extraEnv` (`HTTPS_PROXY`), the
   OpenBao host belongs in `NO_PROXY` unless the proxy should reach it
   (`docs/INSTALL.md`, "Proxies and `NO_PROXY`").
 
@@ -795,7 +797,8 @@ sees that address rather than the node's.
 | `bus.tls.mode` | `secret` | `secret` or `openbao`. |
 | `bus.tls.secretName` | `imas-farmerbus-tls` | secret mode: the Secret with `tls.crt`, `tls.key` and `ca.crt`. |
 | `bus.tls.certHosts` | `[]` | openbao mode: SANs to request. Empty uses the Service and per-pod names. |
-| `bus.tls.openbao.addr` | `https://openbao.openbao.svc:8200` | `IMAS_CERTS_OPENBAO_ADDR`. |
+| `bus.tls.openbao.addr` | `https://openbao.openbao.svc:8200` | `IMAS_CERTS_OPENBAO_ADDR`. `https://` only, unless `allowInsecure`. |
+| `bus.tls.openbao.allowInsecure` | `false` | `IMAS_CERTS_OPENBAO_ALLOW_INSECURE`: `true` accepts an `http://` `addr` (a throwaway install only). An `http://` `addr` without it does not render. |
 | `bus.tls.openbao.pkiMount` | `pki` | `IMAS_CERTS_OPENBAO_PKI_MOUNT`. |
 | `bus.tls.openbao.role` | `imas-farmerbus` | `IMAS_CERTS_OPENBAO_ROLE`. |
 | `bus.tls.openbao.caConfigMap` | `openbao-ca` | ConfigMap with OpenBao's CA as `ca.crt` (`IMAS_CERTS_OPENBAO_CACERT`). Empty uses the system roots. |

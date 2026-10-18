@@ -129,6 +129,7 @@ func (r *realServer) store(token string) *TransitKeyStore {
 		token = os.Getenv(envTestOpenBaoToken)
 	}
 	r.t.Setenv(EnvPrefixSign+EnvOpenBaoAddr, r.addr)
+	r.t.Setenv(EnvPrefixSign+EnvOpenBaoAllowInsecure, "true")
 	r.t.Setenv(EnvPrefixSign+EnvOpenBaoAuthMethod, openbao.AuthMethodToken)
 	r.t.Setenv(EnvPrefixSign+EnvOpenBaoToken, token)
 	r.t.Setenv(EnvPrefixSign+EnvOpenBaoTransitMount, r.mount)

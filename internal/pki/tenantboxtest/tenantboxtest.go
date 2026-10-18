@@ -66,6 +66,7 @@ func Start(t testing.TB) *Server {
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.Close)
 	t.Setenv("IMAS_TENANTBOX_OPENBAO_ADDR", s.URL)
+	t.Setenv("IMAS_TENANTBOX_OPENBAO_ALLOW_INSECURE", "true")
 	t.Setenv("IMAS_TENANTBOX_OPENBAO_KV_MOUNT", Mount)
 	t.Setenv("IMAS_TENANTBOX_OPENBAO_KV_PATH", BasePath)
 	t.Setenv("IMAS_TENANTBOX_OPENBAO_AUTH_METHOD", "token")

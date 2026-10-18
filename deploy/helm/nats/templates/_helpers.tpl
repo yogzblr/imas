@@ -220,6 +220,14 @@ explanation rather than deploying something that silently can't work.
 {{- if or (not .Values.bus.tls.openbao.addr) (not .Values.bus.tls.openbao.role) -}}
 {{- fail "bus.tls.openbao.addr and bus.tls.openbao.role are required when bus.tls.mode=openbao" -}}
 {{- end -}}
+{{- $obAddr := lower (toString .Values.bus.tls.openbao.addr) -}}
+{{- if hasPrefix "http://" $obAddr -}}
+{{- if not .Values.bus.tls.openbao.allowInsecure -}}
+{{- fail (printf "bus.tls.openbao.addr %q is plain http://, which would send the bus's OpenBao token and its private key unencrypted: use https://, or set bus.tls.openbao.allowInsecure=true (a throwaway install only)" (toString .Values.bus.tls.openbao.addr)) -}}
+{{- end -}}
+{{- else if not (hasPrefix "https://" $obAddr) -}}
+{{- fail (printf "bus.tls.openbao.addr %q must be an https:// URL" (toString .Values.bus.tls.openbao.addr)) -}}
+{{- end -}}
 {{- if not (has .Values.bus.tls.openbao.authMethod (list "kubernetes" "token")) -}}
 {{- fail "bus.tls.openbao.authMethod must be \"kubernetes\" or \"token\"" -}}
 {{- end -}}

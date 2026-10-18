@@ -83,6 +83,7 @@ func NewSigner(t testing.TB, priv ed25519.PrivateKey) *gatewayjwt.GatewaySigner 
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	t.Setenv(gatewayjwt.EnvOpenBaoAddr, srv.URL)
+	t.Setenv(gatewayjwt.EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(gatewayjwt.EnvOpenBaoTransitMount, "transit")
 	t.Setenv(gatewayjwt.EnvOpenBaoAuthMethod, gatewayjwt.AuthMethodToken)
 	t.Setenv(gatewayjwt.EnvOpenBaoToken, token)

@@ -26,6 +26,7 @@ const prefix = "IMAS_OBTEST_OPENBAO_"
 var testEnv = Env{
 	Addr: prefix + "ADDR", CACert: prefix + "CACERT", AuthMethod: prefix + "AUTH_METHOD", Token: prefix + "TOKEN",
 	K8sRole: prefix + "K8S_ROLE", K8sMount: prefix + "K8S_MOUNT", K8sJWTPath: prefix + "K8S_JWT_PATH", Namespace: prefix + "NAMESPACE",
+	AllowInsecure: prefix + "ALLOW_INSECURE",
 }
 
 var (
@@ -72,7 +73,7 @@ func (s *stub) all() []recorded {
 // it were built from api.DefaultConfig, plus this test identity's own.
 func clearAmbient(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"ADDR", "CACERT", "AUTH_METHOD", "TOKEN", "K8S_ROLE", "K8S_MOUNT", "K8S_JWT_PATH", "NAMESPACE"} {
+	for _, k := range []string{"ADDR", "CACERT", "AUTH_METHOD", "TOKEN", "K8S_ROLE", "K8S_MOUNT", "K8S_JWT_PATH", "NAMESPACE", "ALLOW_INSECURE"} {
 		t.Setenv(prefix+k, "")
 	}
 }
@@ -81,6 +82,7 @@ func setTokenEnv(t *testing.T, addr, token string) {
 	t.Helper()
 	clearAmbient(t)
 	t.Setenv(testEnv.Addr, addr)
+	t.Setenv(testEnv.AllowInsecure, "true")
 	t.Setenv(testEnv.Token, token)
 }
 
@@ -97,6 +99,7 @@ func setK8sEnv(t *testing.T, addr, jwtPath string) {
 	t.Helper()
 	clearAmbient(t)
 	t.Setenv(testEnv.Addr, addr)
+	t.Setenv(testEnv.AllowInsecure, "true")
 	t.Setenv(testEnv.AuthMethod, AuthMethodKubernetes)
 	t.Setenv(testEnv.K8sRole, "imas-role")
 	t.Setenv(testEnv.K8sJWTPath, jwtPath)
@@ -235,6 +238,7 @@ func TestIgnoresAmbientBaoAndVaultVariables(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(testEnv.Addr, srv.URL)
+	t.Setenv(testEnv.AllowInsecure, "true")
 	c, err = NewFromEnv(testEnv, testErrs)
 	if err != nil {
 		t.Fatal(err)

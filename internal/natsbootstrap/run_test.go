@@ -267,6 +267,7 @@ func setup(t *testing.T) *env {
 
 	p := natskeys.EnvPrefixBoot
 	t.Setenv(p+natskeys.EnvOpenBaoAddr, obSrv.URL)
+	t.Setenv(p+natskeys.EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(p+natskeys.EnvOpenBaoAuthMethod, "token")
 	t.Setenv(p+natskeys.EnvOpenBaoToken, "")
 	t.Setenv(p+natskeys.EnvOpenBaoTransitMount, "transit")

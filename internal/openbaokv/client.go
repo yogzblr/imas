@@ -52,6 +52,10 @@ const (
 
 	// EnvOpenBaoNamespace optionally sets the X-Vault-Namespace header.
 	EnvOpenBaoNamespace = "IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE"
+
+	// EnvOpenBaoAllowInsecure set to true accepts an http:// address
+	// (tests and throwaway installs only).
+	EnvOpenBaoAllowInsecure = "IMAS_SAASAPI_CRED_OPENBAO_ALLOW_INSECURE"
 )
 
 // Recognized values for IMAS_SAASAPI_CRED_OPENBAO_AUTH_METHOD.
@@ -71,6 +75,8 @@ var openBaoEnv = openbao.Env{
 	K8sMount:   EnvOpenBaoK8sMount,
 	K8sJWTPath: EnvOpenBaoK8sJWTPath,
 	Namespace:  EnvOpenBaoNamespace,
+
+	AllowInsecure: EnvOpenBaoAllowInsecure,
 }
 
 var (
@@ -105,7 +111,7 @@ func NewClientFromEnv() (*Client, error) {
 	if mount == "" {
 		mount = defaultKVMount
 	}
-	if err := validatePath(mount); err != nil {
+	if err := validateMount(mount); err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrNotConfigured, EnvOpenBaoKVMount, err)
 	}
 	return &Client{ob: ob, mount: mount}, nil
@@ -114,22 +120,23 @@ func NewClientFromEnv() (*Client, error) {
 // Mount is the KV v2 mount this client reads and writes under.
 func (c *Client) Mount() string { return c.mount }
 
-// validatePath rejects a mount or secret path that is empty, has empty
-// segments, or contains "." / ".." segments. OpenBao's policy language
-// matches on the literal request path, so a path that a proxy or the
-// server could normalize to something else is refused outright rather
-// than escaped.
+// validatePath rejects a secret path openbao.ValidatePath refuses: empty,
+// an empty segment, or a "." or ".." segment, also when percent-encoded.
+// OpenBao's policy language matches on the literal request path, so a
+// path that a proxy or the server could normalize to something else is
+// refused outright rather than escaped.
 func validatePath(p string) error {
-	if p == "" {
-		return fmt.Errorf("%w: empty", ErrInvalidPath)
+	if err := openbao.ValidatePath(p); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}
-	for _, seg := range strings.Split(p, "/") {
-		switch seg {
-		case "":
-			return fmt.Errorf("%w: %q has an empty segment", ErrInvalidPath, p)
-		case ".", "..":
-			return fmt.Errorf("%w: %q has a %q segment", ErrInvalidPath, p, seg)
-		}
+	return nil
+}
+
+// validateMount is validatePath for the KV mount, which also must not be
+// auth, sys or identity (openbao.ValidateMountPath).
+func validateMount(p string) error {
+	if err := openbao.ValidateMountPath(p); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}
 	return nil
 }

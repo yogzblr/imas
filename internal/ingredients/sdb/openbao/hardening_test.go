@@ -31,9 +31,14 @@ func TestNew_TransportSettings(t *testing.T) {
 	t.Cleanup(p.Close)
 
 	cfg := p.client.CloneConfig()
-	tr, ok := cfg.HttpClient.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport is %T", cfg.HttpClient.Transport)
+	// The client's transport is the host pin (TestRedirectToAnotherHostRefused)
+	// around p.base.
+	if _, ok := cfg.HttpClient.Transport.(*http.Transport); ok {
+		t.Fatal("transport is not wrapped in the host pin")
+	}
+	tr := p.base
+	if tr == nil {
+		t.Fatal("no base transport")
 	}
 	if tr.Proxy == nil || reflect.ValueOf(tr.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
 		t.Error("transport does not use http.ProxyFromEnvironment")

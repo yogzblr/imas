@@ -32,6 +32,7 @@ type CertWatcher struct {
 	mu          sync.Mutex
 	certModTime time.Time
 	keyModTime  time.Time
+	onReload    []func()
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -109,8 +110,25 @@ func (w *CertWatcher) watch() {
 				continue
 			}
 			log.Infof("sdb: reloaded rotated client cert %s", w.certFile)
+			w.mu.Lock()
+			hooks := append([]func(){}, w.onReload...)
+			w.mu.Unlock()
+			for _, f := range hooks {
+				f()
+			}
 		}
 	}
+}
+
+// OnReload registers f to run after every reload of a rotated
+// certificate, once the new one is what GetClientCertificate returns:
+// for a caller holding state tied to the old certificate (a login token
+// it obtained) to drop it. Not run for the initial load in
+// NewCertWatcher, nor for a reload that failed.
+func (w *CertWatcher) OnReload(f func()) {
+	w.mu.Lock()
+	w.onReload = append(w.onReload, f)
+	w.mu.Unlock()
 }
 
 // GetClientCertificate satisfies tls.Config.GetClientCertificate, always

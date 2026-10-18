@@ -330,6 +330,7 @@ func setupControlPlaneKeys(t *testing.T) (*tenantboxtest.Server, *SaaSAPIBox) {
 	InvalidatePlatformBoxKeys()
 	t.Cleanup(InvalidatePlatformBoxKeys)
 	t.Setenv(EnvCPBoxOpenBaoAddr, srv.URL)
+	t.Setenv(EnvCPBoxOpenBaoAllowInsecure, "true")
 	t.Setenv(EnvCPBoxOpenBaoAuthMethod, "token")
 	t.Setenv(EnvCPBoxOpenBaoToken, tenantboxtest.Token)
 	t.Setenv(EnvCPBoxOpenBaoKVPath, tenantboxtest.BasePath)

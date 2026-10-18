@@ -103,3 +103,30 @@ func TestTokenCache_Invalidate(t *testing.T) {
 		t.Errorf("expected Invalidate to force a refetch, got %d fetches", calls)
 	}
 }
+
+// TestTokenCache_InvalidateDuringFetch: a token fetched while Invalidate
+// ran (a certificate reload in the middle of a login) is returned to that
+// caller but not cached, so the next Get fetches again.
+func TestTokenCache_InvalidateDuringFetch(t *testing.T) {
+	calls := 0
+	var c *TokenCache
+	c = &TokenCache{
+		Fetch: func(context.Context) (string, time.Duration, error) {
+			calls++
+			if calls == 1 {
+				c.Invalidate()
+				return "old-cert-token", time.Hour, nil
+			}
+			return "new-cert-token", time.Hour, nil
+		},
+	}
+	if tok, err := c.Get(t.Context()); err != nil || tok != "old-cert-token" {
+		t.Fatalf("first Get = %q, %v", tok, err)
+	}
+	if tok, err := c.Get(t.Context()); err != nil || tok != "new-cert-token" {
+		t.Fatalf("second Get = %q, %v; want a fresh fetch", tok, err)
+	}
+	if tok, _ := c.Get(t.Context()); tok != "new-cert-token" || calls != 2 {
+		t.Fatalf("third Get = %q after %d fetches; want the cached new-cert-token", tok, calls)
+	}
+}

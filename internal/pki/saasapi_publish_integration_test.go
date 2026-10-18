@@ -95,6 +95,7 @@ func TestPublishSaaSAPICredential_JobTopologyOnLiveBus(t *testing.T) {
 	const kvPath = "platform/imas/saasapi-nats-user"
 	calls, kvURL := startKVMock(t, "s.job-token")
 	t.Setenv(openbaokv.EnvOpenBaoAddr, kvURL)
+	t.Setenv(openbaokv.EnvOpenBaoAllowInsecure, "true")
 	t.Setenv(openbaokv.EnvOpenBaoKVMount, "imas-kv")
 	t.Setenv(openbaokv.EnvOpenBaoAuthMethod, openbaokv.AuthMethodToken)
 	t.Setenv(openbaokv.EnvOpenBaoToken, "s.job-token")

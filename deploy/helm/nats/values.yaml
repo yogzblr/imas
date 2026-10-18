@@ -261,8 +261,13 @@ bus:
     # Service and per-pod headless DNS names.
     certHosts: []
     openbao:
-      # -- IMAS_CERTS_OPENBAO_ADDR.
+      # -- IMAS_CERTS_OPENBAO_ADDR. https:// only, unless allowInsecure.
       addr: https://openbao.openbao.svc:8200
+      # -- IMAS_CERTS_OPENBAO_ALLOW_INSECURE: true accepts an http:// addr
+      # (the bus's OpenBao token and private key would cross the network
+      # unencrypted; a throwaway install only). The chart refuses to render
+      # an http:// addr without it.
+      allowInsecure: false
       # -- IMAS_CERTS_OPENBAO_PKI_MOUNT.
       pkiMount: pki
       # -- IMAS_CERTS_OPENBAO_ROLE (PKI role). Required in openbao mode.

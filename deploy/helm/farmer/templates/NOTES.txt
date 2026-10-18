@@ -18,6 +18,12 @@ EVAL DEPENDENCIES deployed by this release:
   - Valkey ({{ if dig "replica" "enabled" false .Values.valkey }}a primary and {{ dig "replica" "replicas" 0 .Values.valkey }} replicas{{ else }}standalone{{ end }}, {{ if .Values.valkey.auth.enabled }}password from Secret {{ .Values.valkey.auth.secretName }}{{ else }}NO PASSWORD{{ end }}, {{ if .Values.valkey.tls.enabled }}TLS{{ else }}no TLS{{ end }}, maxmemory-policy noeviction).
 {{- end }}
 {{- end }}
+{{- if and (include "imas-farmer.openbaoAllowInsecure" .) (hasPrefix "http://" (lower (include "imas-farmer.openbaoAddr" .))) }}
+
+OPENBAO OVER PLAIN HTTP ({{ include "imas-farmer.openbaoAddr" . }}{{ if .Values.openbaoClient.allowInsecure }}, openbaoClient.allowInsecure=true{{ else }}, the bundled dev-mode OpenBao{{ end }}).
+farmer's, saasapi's and the Jobs' OpenBao tokens, login JWTs and tenant box keys
+cross the network unencrypted. This is for a throwaway install only.
+{{- end }}
 {{- if not .Values.valkey.auth.enabled }}
 
 VALKEY HAS NO PASSWORD (valkey.auth.enabled=false, valkey.auth.allowInsecure=true).

@@ -165,6 +165,13 @@ openbaoClient:
   # the system roots (and plain http for the eval OpenBao).
   caConfigMap: ""
   caKey: ca.crt
+  # imas's OpenBao clients refuse a plain http:// address: tokens, login
+  # JWTs and tenant box keys would cross the network unencrypted. true
+  # accepts one (*_OPENBAO_ALLOW_INSECURE=true), for a throwaway install;
+  # the chart refuses to render an http:// addr without it. The bundled
+  # dev-mode OpenBao (openbao.enabled with openbao.server.dev.enabled and
+  # no addr: the eval install) is http only and gets it without this.
+  allowInsecure: false
   # kubernetes (projected ServiceAccount token, 10-minute expiry) or token.
   authMethod: kubernetes
   k8sMount: kubernetes

@@ -278,9 +278,20 @@ and its `openbao` provider, farmer chart notes, docs.
   The test that pins the old behaviour (`rotation_test.go`) changes with this.
 - **L21.** `sdb://openbao` refs are validated segment by segment: reject `.`,
   `..`, empty segments, a leading `auth`, `sys` or `identity` segment, and
-  percent-encoded forms of those, as `internal/openbaokv/client.go` does.
+  percent-encoded forms of those. (Correction: `internal/openbaokv/client.go`
+  rejected only `.`, `..` and empty segments, not the encoded forms or the
+  reserved first segment; T5 moved the check to `internal/openbao`
+  (`ValidatePath`, `ValidateMountPath`) and both use it.)
 - **I2.** An `http://` OpenBao address is refused unless `allowInsecure` is set,
   in every client (farmer, sprout, loader); the refusal message names the key.
+  (Correction: the bus loader has no OpenBao client. "Every client" is every
+  `internal/openbao` identity, farmer's, the Jobs' and the bus's
+  `IMAS_CERTS_OPENBAO_*`, plus the sprout's `sdb://openbao` provider. The key
+  is `<prefix>OPENBAO_ALLOW_INSECURE` / `IMAS_SDB_OPENBAO_ALLOW_INSECURE`,
+  set by the chart values `openbaoClient.allowInsecure` and
+  `bus.tls.openbao.allowInsecure`; the farmer chart implies it for its
+  bundled dev-mode OpenBao, which serves http only, so the eval install
+  still renders and runs.)
 
 ## T6: bus logging and legacy endpoints (L12, L13, L14)
 
