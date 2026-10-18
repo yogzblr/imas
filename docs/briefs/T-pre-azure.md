@@ -303,6 +303,10 @@ Scope: `internal/pki/nats.go`, `cmd/farmerbus`, `internal/api` (`routers.go`,
   (a signature over a server nonce), and the revoke-by-rejection of an NKey that
   another row accepted never happens (`syncNatsAuth` skips it and logs). The test
   that pins the current behaviour (`pki_test.go`) changes with this.
+  Correction (2026-10-18, fix/main-ci): T4's I7 makes `(tenant_id, nkey)`
+  unique, so the store refuses the second row before any sync sees it; the
+  sync's skip stays as a second guard, tested on its own
+  (`TestRevokeUnlessAccepted`).
 - **L13.** The bus does not log at Trace or Debug unless `IMAS_BUS_LOG_LEVEL`
   says so (`info` default; `debug` and `trace` accepted), and the chart does not
   set them. Prove with a test that, at the default level, a published payload
