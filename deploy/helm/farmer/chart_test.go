@@ -609,6 +609,8 @@ func TestValidationFailures(t *testing.T) {
 		args       []string
 	}{
 		{"postgresql key", "postgresql.* is not a value of this chart", []string{"--set", "postgresql.enabled=true"}},
+		{"non-UTC loc", "database.params sets loc=Local; it must be loc=UTC", []string{"--set", "database.params=parseTime=true&loc=Local"}},
+		{"non-UTC loc first", "database.params sets loc=Asia/Kolkata", []string{"--set", "database.params=loc=Asia/Kolkata&parseTime=true"}},
 		{"no bus service", "bus.serviceName is required", []string{"--set", "bus.serviceName="}},
 		{"no sprout bus urls", "bus.sproutBusURLs is required", []string{"--set", "bus.sproutBusURLs=null"}},
 		{"non-wss sprout url", "must be a wss:// URL", []string{"--set", "bus.sproutBusURLs[0]=tls://bus:5406"}},

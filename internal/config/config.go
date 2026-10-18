@@ -589,7 +589,9 @@ var (
 	// `farmer` schema (PKI, props/facts, RBAC — see internal/pxc,
 	// internal/props/store.go, internal/pki/store.go,
 	// internal/rbac/store.go), e.g.
-	// "farmer_svc:pass@tcp(pxc-cluster:3306)/farmer?parseTime=true".
+	// "farmer_svc:pass@tcp(pxc-cluster:3306)/farmer?parseTime=true&loc=UTC".
+	// loc must be UTC (or absent, the driver's default): internal/pxc's
+	// OpenDB refuses any other.
 	PXCDSN string
 
 	// ValkeyAddrs is the comma-separated list of Valkey node addresses

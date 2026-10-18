@@ -2,14 +2,13 @@ package saasapi
 
 import (
 	"fmt"
-	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	log "github.com/yogzblr/imas/internal/log"
+	"github.com/yogzblr/imas/internal/mysqldsn"
 )
 
 // db is the package-level GORM handle used by the HTTP handlers, set once
@@ -46,9 +45,11 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 // DATETIME columns as bytes, and every time.Time field (updated_at,
 // expiries, farmer.props' expiry the fleet update gate reads) fails to
 // scan, which today would only surface as errors at read time. A loc other
-// than UTC is allowed but logged: farmer and saasapi read and write the
-// same DATETIME columns, and the Helm chart sets loc=UTC for both. The
-// DSN itself is never echoed: it holds the password.
+// than UTC is refused too (mysqldsn.RequireUTC, security review 2026-10,
+// I1): farmer and saasapi read and write the same DATETIME columns, and
+// the outbox and row leases are written and compared as UTC times; the
+// Helm chart sets loc=UTC for both. The DSN itself is never echoed: it
+// holds the password.
 func checkDSN(dsn string) error {
 	if dsn == "" {
 		return fmt.Errorf("saasapi: empty DSN")
@@ -60,10 +61,7 @@ func checkDSN(dsn string) error {
 	if !cfg.ParseTime {
 		return fmt.Errorf("saasapi: SAASAPI_DSN must set parseTime=true (e.g. ...?parseTime=true&loc=UTC); without it DATETIME columns can't be read")
 	}
-	if cfg.Loc != nil && cfg.Loc != time.UTC {
-		log.Warnf("saasapi: SAASAPI_DSN sets loc=%s; farmer and saasapi share DATETIME columns and the Helm chart uses loc=UTC", cfg.Loc)
-	}
-	return nil
+	return mysqldsn.RequireUTC("saasapi: SAASAPI_DSN", dsn)
 }
 
 // Models is every table this package owns (tenants, provisioning_jobs,

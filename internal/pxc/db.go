@@ -21,15 +21,22 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/yogzblr/imas/internal/jobs"
+	"github.com/yogzblr/imas/internal/mysqldsn"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/rbac"
 )
 
-// OpenDB opens a GORM connection to the farmer schema.
+// OpenDB opens a GORM connection to the farmer schema. It refuses a DSN
+// whose loc is not UTC before connecting (mysqldsn.RequireUTC, security
+// review 2026-10, I1): farmer and saasapi share DATETIME and lease
+// columns.
 func OpenDB(dsn string) (*gorm.DB, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("pxc: empty DSN")
+	}
+	if err := mysqldsn.RequireUTC("pxc: IMAS_PXC_DSN (pxcdsn)", dsn); err != nil {
+		return nil, err
 	}
 	d, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
