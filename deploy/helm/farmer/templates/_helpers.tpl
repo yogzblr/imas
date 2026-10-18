@@ -893,6 +893,9 @@ explanation rather than deploying something that silently can't work.
 */}}
 {{- define "imas-farmer.validate" -}}
 {{- include "imas-farmer.retention.validate" . -}}
+{{- if gt (len (regexFindAll "(^|&)loc=" (toString .Values.database.params) -1)) 1 -}}
+{{- fail "database.params sets loc more than once; set it once, to loc=UTC (the driver takes the last one, and farmer and saasapi refuse any loc but UTC)" -}}
+{{- end -}}
 {{- $loc := regexFind "(^|&)loc=[^&]*" (toString .Values.database.params) | trimPrefix "&" | trimPrefix "loc=" -}}
 {{- if and (regexMatch "(^|&)loc=" (toString .Values.database.params)) (ne $loc "UTC") -}}
 {{- fail (printf "database.params sets loc=%s; it must be loc=UTC (or no loc): farmer and saasapi refuse to start with any other, since they write and compare the shared lease and DATETIME columns as UTC (security review 2026-10, I1)" $loc) -}}

@@ -3,10 +3,12 @@ package pki
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	jwt "github.com/nats-io/jwt/v2"
 )
 
@@ -165,5 +167,38 @@ func TestLostSysAccountJWTRebuiltFromDatabase(t *testing.T) {
 	}
 	if _, ok := heldAccountJWT(trust.SysAccountPub); ok {
 		t.Error("a SYS Account JWT was held after the failed rebuild")
+	}
+}
+
+// The saas migration that creates saasapi_credential_state can run after
+// farmer starts (farmer waits for its own schema only): a missing table
+// (MySQL error 1146) is no rotation recorded, and the trust's SYS
+// Account JWT is used; any other read error, a denied SELECT among them,
+// still fails closed.
+func TestLostSysAccountJWTStateTableNotYetMigrated(t *testing.T) {
+	setupTestPKI(t)
+	trust, err := LoadNATSTrustDir(NATSTrustDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := readSaaSAPICredentialState
+	t.Cleanup(func() { readSaaSAPICredentialState = orig })
+	for _, tc := range []struct {
+		number uint16
+		ok     bool
+	}{{1146, true}, {1142, false}, {2013, false}} {
+		forgetHeldJWTs()
+		readSaaSAPICredentialState = func(context.Context) (*SaaSAPICredentialState, error) {
+			return nil, fmt.Errorf("reading: %w", &mysql.MySQLError{Number: tc.number, Message: "x"})
+		}
+		mat, err := ensurePlatformAuth()
+		switch {
+		case tc.ok && err != nil:
+			t.Errorf("MySQL error %d: %v, want the trust's SYS Account JWT", tc.number, err)
+		case tc.ok && mat.sysAccountJWT != trust.SysAccountJWT:
+			t.Errorf("MySQL error %d: not the trust's SYS Account JWT", tc.number)
+		case !tc.ok && err == nil:
+			t.Errorf("MySQL error %d: accepted, want a fail-closed error", tc.number)
+		}
 	}
 }

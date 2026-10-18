@@ -162,6 +162,14 @@ func sysAccountJWTFromTrust(ctx context.Context, mat *natsAuthMaterial, trustJWT
 		return trustJWT, nil
 	}
 	state, err := readSaaSAPICredentialState(ctx)
+	if isMissingTableError(err) {
+		// The saas migration that creates the table has not run yet
+		// (farmer waits only for its own schema, and cmd/migrate applies
+		// the saas set after it): saasapi has recorded no credential, so
+		// there is nothing to revoke. Every other error still fails.
+		log.Warnf("SYS account %s: %s does not exist yet; no SaaS API key has been rotated out", mat.sysAccountPub, saasAPICredentialStateTable)
+		state, err = nil, nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("pki: SYS account %s: rebuilding its revocations from the database (%s) before using the trust's SYS Account JWT: %w", mat.sysAccountPub, saasAPICredentialStateTable, err)
 	}

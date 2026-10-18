@@ -16,6 +16,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -135,7 +136,20 @@ const enrollBusyRetryAfter = 5 * time.Second
 // body over maxEnrollRequestBytes answers 413, with the same body.
 func Enroll(w http.ResponseWriter, r *http.Request) {
 	var req enrollRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEnrollRequestBytes)).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEnrollRequestBytes))
+	err := dec.Decode(&req)
+	if err == nil {
+		// The whole body is read before anything is acted on: a second
+		// value, or trailing bytes past the limit after a complete object
+		// (which Decode alone would not reach), fails the request.
+		if extra := dec.Decode(&struct{}{}); extra != io.EOF {
+			err = extra
+			if err == nil {
+				err = errors.New("more than one JSON value")
+			}
+		}
+	}
+	if err != nil {
 		log.Warnf("enroll: invalid request body: %v", err)
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {

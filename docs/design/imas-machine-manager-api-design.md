@@ -576,7 +576,7 @@ file name, and downloads it from its configured repository (§2.5).
 
 Unknown key, expired, revoked, and exhausted all return the same `enrollment_failed` body. Distinguishing them in the response would hand an attacker a free oracle for guessing valid `key_id`s or timing a race against expiry — the specific reason is logged in farmer's audit trail (feeding the CERT-In/DPDP retention question already flagged in §6) but never returned over the wire.
 
-The status carries no more than the size or retry class. A request body over 64 KiB (`maxEnrollRequestBytes`, `internal/api/handlers/enroll.go`; security review 2026-10, I12) is refused with `413` and the same `enrollment_failed` body before it is read further; `/v1/refresh` caps its body at the same size (`maxRefreshRequestBytes`) and answers an oversized one with the generic `401`. A busy User JWT mint is `503` with `Retry-After`. Every other failure is `401`.
+The status carries no more than the size or retry class. A request body over 64 KiB (`maxEnrollRequestBytes`, `internal/api/handlers/enroll.go`; security review 2026-10, I12) is refused with `413` and the same `enrollment_failed` body, and so is a body with anything after its one JSON object (`401`, or `413` past the limit), before anything is acted on; `/v1/refresh` caps its body at the same size (`maxRefreshRequestBytes`) and answers an oversized one with the generic `401`. A busy User JWT mint is `503` with `Retry-After`. Every other failure is `401`.
 
 ---
 

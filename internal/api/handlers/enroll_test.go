@@ -394,6 +394,26 @@ func TestEnroll_BodyLimit(t *testing.T) {
 		t.Error("pki.Enroll ran for an oversized body")
 	}
 
+	// A complete object followed by more than the limit: Decode alone
+	// would stop after the object; the whole body is still refused.
+	trailing := `{"join_token":"t"}` + strings.Repeat(" ", maxEnrollRequestBytes+1)
+	w = httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", strings.NewReader(trailing)))
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("object then trailing bytes past the limit: status %d, want 413", w.Code)
+	}
+	// A second JSON value is refused too.
+	kp, _ := nkeys.CreateUser()
+	one, _ := json.Marshal(signedEnrollRequest(t, kp, "tok", "host-1", generateTestBoxPub(t)))
+	w = httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(append(append(one, ' '), one...))))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("two JSON values: status %d, want the generic 401", w.Code)
+	}
+	if called {
+		t.Error("pki.Enroll ran for a body with trailing data")
+	}
+
 	padded := `{"join_token":"` + strings.Repeat("a", maxEnrollRequestBytes-64) + `"}`
 	w = httptest.NewRecorder()
 	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", strings.NewReader(padded)))

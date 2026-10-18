@@ -1195,7 +1195,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return errors.New("pki: no path configured")
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAllDurable(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
@@ -1228,6 +1228,32 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return syncDir(dir)
 }
 
+// mkdirAllDurable is os.MkdirAll(dir, 0o755) that also fsyncs the parent
+// of every directory it creates, so a new credential directory's own
+// entry survives a power loss along with the file written into it
+// (syncDir covers only the entries inside dir).
+func mkdirAllDurable(dir string) error {
+	var created []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); !os.IsNotExist(err) {
+			break
+		}
+		created = append(created, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, d := range created {
+		if err := syncDir(filepath.Dir(d)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // syncDir fsyncs dir, so a rename or link into it survives a power loss
 // (security review 2026-10, I12): without it the new directory entry can
 // be lost even though the file's data was synced. Windows has no
@@ -1256,7 +1282,7 @@ func writeFileOnce(path string, data []byte, perm os.FileMode) error {
 		return errors.New("pki: no path configured")
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAllDurable(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -201,6 +202,18 @@ func TestAtomicWritesSyncTheDirectory(t *testing.T) {
 		if b, err := os.ReadFile(path); err != nil || string(b) != "jwt" {
 			t.Errorf("written file: %q, %v", b, err)
 		}
+	}
+	// A credential directory that does not exist yet: each new
+	// directory's entry is synced in its parent, then the file's.
+	synced = nil
+	nested := filepath.Join(dir, "a", "b", "user.jwt")
+	if err := writeFileAtomic(nested, []byte("jwt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{dir, filepath.Join(dir, "a"), filepath.Join(dir, "a", "b")}
+	slices.Sort(synced)
+	if !slices.Equal(synced, want) {
+		t.Errorf("directory syncs %v, want %v", synced, want)
 	}
 	if runtime.GOOS != "windows" {
 		if err := orig(filepath.Join(dir, "missing")); err == nil {
