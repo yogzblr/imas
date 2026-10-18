@@ -599,8 +599,11 @@ func GetTenantX25519PublicKey(tenantID string) (string, error) {
 // review 2026-10, L24). It reads OpenBao afresh rather than this
 // replica's cache, so a token minted just after a rotation on another
 // replica names the new key, and it creates the tenant's key if there is
-// none yet, as the tenant's first enrollment would. A deprovisioned
-// tenant is refused (ErrTenantDeprovisioned): its tokens enroll nothing.
+// none yet, as the tenant's first enrollment would. A fresh read replaces
+// the cached set; a failed one leaves it in place, so the other callers
+// keep their stale-copy fallback (loadTenantKeySet) while OpenBao is
+// unreachable. A deprovisioned tenant is refused (ErrTenantDeprovisioned):
+// its tokens enroll nothing.
 func TenantX25519PublicKeyForJoinToken(tenantID string) (string, error) {
 	if !IsValidTenantID(tenantID) {
 		return "", ErrTenantIDInvalid
@@ -608,8 +611,22 @@ func TenantX25519PublicKeyForJoinToken(tenantID string) (string, error) {
 	if err := refuseDeprovisionedTenant(tenantID); err != nil {
 		return "", err
 	}
-	InvalidateTenantBoxKeys(tenantID)
-	return GetTenantX25519PublicKey(tenantID)
+	e := tenantBoxEntryFor(tenantID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	client, err := newTenantBoxClientFromEnv()
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	set, err := client.ensureTenantKeySet(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	e.set = set
+	return base64.StdEncoding.EncodeToString(set.current.pub[:]), nil
 }
 
 // tenantKeyContinuityBody is a continuity proof's authenticated body.

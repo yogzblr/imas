@@ -240,3 +240,30 @@ func TestTenantX25519PublicKeyForJoinToken(t *testing.T) {
 		t.Errorf("deprovisioned tenant: %v, want ErrTenantDeprovisioned", err)
 	}
 }
+
+// A join token's key read that fails (OpenBao down) leaves this replica's
+// cached key set in place, so every other caller keeps its stale-copy
+// fallback; a read that succeeds replaces it.
+func TestTenantX25519PublicKeyForJoinToken_KeepsTheCacheOnFailure(t *testing.T) {
+	setupEnrollTest(t)
+	srv := setupTenantBoxOpenBao(t)
+	pub, err := TenantX25519PublicKeyForJoinToken("t_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := srv.Reads
+	if got, err := GetTenantX25519PublicKey("t_1"); err != nil || got != pub || srv.Reads != reads {
+		t.Fatalf("GetTenantX25519PublicKey = %s, %v (%d reads); want the set the token read cached", got, err, srv.Reads-reads)
+	}
+
+	srv.Close()
+	origTTL := tenantBoxCacheTTL
+	t.Cleanup(func() { tenantBoxCacheTTL = origTTL })
+	tenantBoxCacheTTL = 0
+	if _, err := TenantX25519PublicKeyForJoinToken("t_1"); err == nil {
+		t.Fatal("minted a token's key with OpenBao down")
+	}
+	if got, err := GetTenantX25519PublicKey("t_1"); err != nil || got != pub {
+		t.Fatalf("after a failed token read: %s, %v; want the cached key still served", got, err)
+	}
+}
