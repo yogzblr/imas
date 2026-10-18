@@ -791,7 +791,8 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   it as `X-Vault-Namespace` on every request, logins included; when it is
   unset, no namespace header is sent. The chart sets none of them. To use
   a namespace, add the variables to `farmer.extraEnv` (farmer's three
-  clients) and `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` to
+  clients) and `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` (its KV client) and
+  `IMAS_NATSSIGN_OPENBAO_NAMESPACE` (its signer) to
   `credentialPublisher.extraEnv` (the publish Job and its refresh
   CronJob). saasapi has no OpenBao client. The `bao` CLI steps (the
   bootstrap Job and saasapi's `fetch-bus-ca` init container) don't set a
@@ -1854,7 +1855,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `HTTPS_PROXY`/`NO_PROXY`. |
 | `saasapi.pdb.enabled` / `maxUnavailable` | `true` / `1` | saasapi's PodDisruptionBudget; only with `replicaCount` > 1 (saasapi has no HPA). `maxUnavailable` is a whole number from 1 to `replicaCount` - 1, or a percentage above `0%` and below `100%`: the render fails on a value that would block every drain or protect nothing. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job, and its refresh CronJob. |
-| `credentialPublisher.extraEnv` | `[]` | Extra env vars for the publish container of the Job and the refresh CronJob, e.g. `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. Any other `IMAS_*` name fails the render (the chart sets the publisher's own). The publisher's NetworkPolicy allows egress to OpenBao and DNS only, so a proxy needs a NetworkPolicy of your own that lets its pods reach the proxy. |
+| `credentialPublisher.extraEnv` | `[]` | Extra env vars for the publish container of the Job and the refresh CronJob, e.g. `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. `IMAS_NATSSIGN_OPENBAO_NAMESPACE` sets the signer's namespace. Any other `IMAS_*` name, or an entry without a name, fails the render (the chart sets the publisher's own). The publisher's NetworkPolicy allows egress to OpenBao and DNS only, so a proxy needs a NetworkPolicy of your own that lets its pods reach the proxy. |
 | `credentialPublisher.userJWTTTL` | `24h` | `IMAS_SAASAPI_USER_JWT_TTL`: the SaaS API User JWT's lifetime (its `exp`), hours and minutes, 1h to 720h, more than 3 x (`refresh.everyHours` + the CronJob's start delay and run time). A run writes a new JWT once a third of it is left. |
 | `credentialPublisher.refresh.everyHours` | `4` | The refresh CronJob (`<release>-farmer-saasapi-credential-refresh`): the publish run every this many hours (1, 2, 3, 4, 6, 8 or 12), so the JWT is renewed before it expires. The render fails unless `userJWTTTL` is more than 3 times this plus `refresh.startingDeadlineSeconds` and `activeDeadlineSeconds` (12h45m with the defaults): the renewing run may start late and take time to publish. |
 | `credentialPublisher.refresh.minute` | `17` | The minute of the hour it runs at: schedule `<minute> */<everyHours> * * *`. |

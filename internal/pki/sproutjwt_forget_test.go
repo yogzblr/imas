@@ -194,10 +194,24 @@ func TestForgetSproutUserJWTKeepsForeignObject(t *testing.T) {
 	}
 }
 
-// forgetSproutUserJWT with no bucket configured is a no-op, not a panic.
+// forgetSproutUserJWT with no bucket configured still drops the row (the
+// bucket setting may have been removed since the JWT was stored), and
+// doesn't panic reaching for the object.
 func TestForgetSproutUserJWTWithoutBucket(t *testing.T) {
 	newTestDB(t)
 	SetSproutJWTStore(nil)
 	t.Setenv(SproutJWTBucketEnv, "")
+	key := sproutJWTObjectKey("t1", "web-1", "abc")
+	if err := db.Create(&sproutUserJWTRow{TenantID: "t1", SproutID: "web-1", ObjectKey: &key}).Error; err != nil {
+		t.Fatal(err)
+	}
 	forgetSproutUserJWT(context.Background(), "t1", "web-1")
+	var n int64
+	if err := db.Model(&sproutUserJWTRow{}).Where("tenant_id = ? AND sprout_id = ?", "t1", "web-1").Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d rows left, want the row dropped", n)
+	}
+	forgetSproutUserJWT(context.Background(), "t1", "web-1") // nothing left: a no-op
 }

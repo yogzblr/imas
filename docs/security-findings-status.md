@@ -154,7 +154,7 @@ submodule), or the item needs a real release, the Azure run or another unit.
 | 33 | Job store | A lookup by JID alone lists the tenant's whole prefix | Out of scope | Scale work, BUILD-STATUS P23 |
 | 34 | Job store | The reaper lists the whole bucket hourly on every replica | Done | `internal/jobs/expiry.go` `reapLeased` runs under one cluster-wide lease |
 | 35 | Job store | Old-layout objects are never read or swept | Decided | No deployment wrote the old layout (`docs/security-review-2026-10-b.md` I4); `TestOldLayoutNotRead` |
-| 36 | Facts | `props.static` can set reserved fact names | Done (V3) | `cmd/farmer` `staticPropsWithoutFacts` drops reserved names before loading them, with an error log, and at start `props.DropStaticProps` removes any such row an older farmer stored (`TestStaticPropsWithoutFacts`, `TestDropStaticProps`) |
+| 36 | Facts | `props.static` can set reserved fact names | Done (V3) | `cmd/farmer` `staticPropsWithoutFacts` drops reserved names, and names outside `props.ValidName` (which PXC's collation could fold onto a reserved row), before loading them, with an error log; at start `props.DropStaticProps` removes any such row an older farmer stored (`TestStaticPropsWithoutFacts`, `TestStaticPropNameRefused`, `TestDropStaticProps`) |
 | 37 | Facts | `hostname` in a recipe is the reported fact, then the sprout ID | Decided | By design, SEC.4 (`internal/cook/farmercook.go`, `facts.HostnamePropTTL`) |
 | 38 | Facts | `props.GetHostnameFuncForTenant` has no caller | Done (V3) | Deleted with `GetHostnameFunc`: both returned farmer's own hostname |
 | 39 | Facts, REC.1 | A deprovisioned tenant's `recipes/` and `recipe-audit/` are not deleted | Done | S6, PR #268: the purge deletes `tenants/<id>/` (`internal/tenantpurge`) |

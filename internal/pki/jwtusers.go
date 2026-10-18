@@ -885,8 +885,13 @@ func (s *sproutJWTStore) dropUnnamedObject(ctx context.Context, tenantID, sprout
 func forgetSproutUserJWT(ctx context.Context, tenantID, sproutID string) {
 	s, err := defaultSproutJWTStore()
 	if err != nil {
-		log.Debugf("pki: not forgetting sprout %s's JWT in tenant %s: %v", sproutID, tenantID, err)
-		return
+		if db == nil {
+			return
+		}
+		// No bucket (unset since the JWT was stored, say): still drop the
+		// row; the object, if any, can't be reached to delete.
+		log.Debugf("pki: forgetting sprout %s's JWT row in tenant %s without its object: %v", sproutID, tenantID, err)
+		s = &sproutJWTStore{db: db}
 	}
 	s.forget(ctx, tenantID, sproutID)
 }
@@ -920,7 +925,7 @@ func (s *sproutJWTStore) forget(ctx context.Context, tenantID, sproutID string) 
 		log.Debugf("pki: deleted sprout %s's JWT row in tenant %s changed while being forgotten", sproutID, tenantID)
 		return
 	}
-	if row.ObjectKey == nil || !ownSproutJWTObject(tenantID, sproutID, *row.ObjectKey) {
+	if s.objects == nil || row.ObjectKey == nil || !ownSproutJWTObject(tenantID, sproutID, *row.ObjectKey) {
 		return
 	}
 	if err := s.objects.Delete(ctx, *row.ObjectKey); err != nil {

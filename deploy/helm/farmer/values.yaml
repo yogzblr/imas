@@ -1141,8 +1141,9 @@ credentialPublisher:
   ttlSecondsAfterFinished: 3600
   # Extra env vars for the publish container, in the Job and the refresh
   # CronJob alike, e.g. IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE (README.md,
-  # "OpenBao") or HTTPS_PROXY/NO_PROXY. Any other IMAS_* name is refused
-  # at render: the chart sets the publisher's own. The publisher's NetworkPolicy allows egress
+  # "OpenBao"), IMAS_NATSSIGN_OPENBAO_NAMESPACE (the signer's) or
+  # HTTPS_PROXY/NO_PROXY. Every entry needs a name; any other IMAS_* name is
+  # refused at render: the chart sets the publisher's own. The publisher's NetworkPolicy allows egress
   # to OpenBao and DNS only, and has no extraEgress, so a proxy is
   # unreachable until you add a NetworkPolicy of your own that lets the
   # publisher's pods reach it.

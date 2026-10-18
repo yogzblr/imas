@@ -227,12 +227,13 @@ func AcceptNKey(tenantID, id string) error {
 // The sprout ID itself is free again: a host can enrol under it, but only
 // with an NKey that isn't revoked, and it gets a fresh box key.
 func DeleteNKey(tenantID, id string) error {
-	defer func() {
+	reload := func() {
 		if err := reloadNKeysFor(tenantID); err != nil {
 			log.Errorf("failed to reload NATS auth for deleted sprout %s in tenant %s: %v", id, tenantID, err)
 		}
-	}()
+	}
 	if !IsValidSproutID(id) {
+		reload()
 		return ErrSproutIDInvalid
 	}
 	err := db.Transaction(func(tx *gorm.DB) error {
@@ -247,12 +248,23 @@ func DeleteNKey(tenantID, id string) error {
 	})
 	if err == nil {
 		notifySproutLeftAccepted(tenantID, id)
+	}
+	// The revocation reaches the bus first; the stored JWT's cleanup is
+	// best effort and must not hold it up.
+	reload()
+	if err == nil {
 		// After the commit: with the pki_nkeys row gone no mint can
 		// recreate the stored JWT (checkEligible).
-		forgetSproutUserJWT(context.Background(), tenantID, id)
+		ctx, cancel := context.WithTimeout(context.Background(), forgetSproutJWTTimeout)
+		forgetSproutUserJWT(ctx, tenantID, id)
+		cancel()
 	}
 	return err
 }
+
+// forgetSproutJWTTimeout bounds DeleteNKey's best-effort removal of the
+// deleted sprout's stored JWT row and object.
+const forgetSproutJWTTimeout = 30 * time.Second
 
 func DenyNKey(tenantID, id string) error {
 	defer func() {

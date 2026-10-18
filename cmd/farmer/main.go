@@ -223,7 +223,7 @@ func main() {
 	props.LoadStaticProps(staticPropsWithoutFacts(config.StaticProps()))
 	// A reserved name an older farmer loaded from config stays until
 	// dropped: static props never expire on their own.
-	if n := props.DropStaticProps(facts.IsReservedPropName); n > 0 {
+	if n := props.DropStaticProps(staticPropNameRefused); n > 0 {
 		log.Warnf("props.static: dropped %d stored static prop(s) with a reserved fact name", n)
 	}
 	loadCohortRegistry()
@@ -1373,6 +1373,13 @@ func endShellSessions(timeout time.Duration) {
 	}
 }
 
+// staticPropNameRefused reports whether props.static may not hold name:
+// a reserved fact name, or one outside props.ValidName, which PXC's
+// collation could fold onto a reserved row.
+func staticPropNameRefused(name string) bool {
+	return facts.IsReservedPropName(name) || !props.ValidName(name)
+}
+
 // staticPropsWithoutFacts returns cfg, the "props.static" config section
 // (sprout ID to a map of prop names to values), without any prop whose
 // name is a reserved fact name (facts.IsReservedPropName): those props
@@ -1395,6 +1402,13 @@ func staticPropsWithoutFacts(cfg map[string]any) map[string]any {
 		for k, v := range propsMap {
 			if facts.IsReservedPropName(k) {
 				log.Errorf("props.static: ignoring %q for sprout %q: it is a reserved fact name, set only from the sprout's own facts", k, sproutID)
+				continue
+			}
+			if !props.ValidName(k) {
+				// PXC's collation folds accents and some control
+				// characters, so "hóstname" would address the reserved
+				// "hostname" row (props.ValidName).
+				log.Errorf("props.static: ignoring %q for sprout %q: a prop name must be 1-%d ASCII letters, digits, '_', '-', '.' or ':'", k, sproutID, props.MaxNameLen)
 				continue
 			}
 			kept[k] = v

@@ -308,6 +308,15 @@ func TestPublisherExtraEnv(t *testing.T) {
 	}
 	// extraEnv adds variables, it never replaces the publisher's own
 	// identity, key or path: every other IMAS_* name is refused.
+	mustFail(t, "credentialPublisher.extraEnv: every entry needs a name",
+		"--set", "credentialPublisher.extraEnv[0].value=x")
+	// Both OpenBao clients' namespaces may be set: the KV client's and the
+	// signer's (the publisher signs through IMAS_NATSSIGN_* before it writes).
+	ns := mustRender(t, "--set", "credentialPublisher.extraEnv[0].name=IMAS_NATSSIGN_OPENBAO_NAMESPACE",
+		"--set", "credentialPublisher.extraEnv[0].value=platform")
+	if v := envValues(container(t, find(t, ns, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_NATSSIGN_OPENBAO_NAMESPACE"]; v != "platform" {
+		t.Errorf("IMAS_NATSSIGN_OPENBAO_NAMESPACE = %q, want platform", v)
+	}
 	for _, name := range []string{"IMAS_SAASAPI_CRED_OPENBAO_KV_PATH", "IMAS_SAASAPI_CRED_OPENBAO_ADDR", "IMAS_NATS_SAASAPI_USER_SEED_FILE", "IMAS_SAASAPI_USER_JWT_TTL"} {
 		mustFail(t, "credentialPublisher.extraEnv may not set "+name,
 			"--set", "credentialPublisher.extraEnv[0].name="+name, "--set", "credentialPublisher.extraEnv[0].value=x")
