@@ -72,8 +72,8 @@ import (
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/jointoken"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
