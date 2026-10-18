@@ -484,6 +484,40 @@ func TestSproutJWTReuseAndRemint(t *testing.T) {
 		}
 		e.checkStored(t, "t1", "web-1", pub2)
 	})
+
+	// Every re-mint above deleted the object the row named before: the
+	// bucket holds the sprout's current JWT only (docs/retention.md).
+	t.Run("superseded objects are deleted", func(t *testing.T) {
+		row := e.row(t, "t1", "web-1")
+		if keys := e.srv.Keys(); len(keys) != 1 || keys[0] != *row.ObjectKey {
+			t.Fatalf("bucket holds %v, want only the current %s", keys, *row.ObjectKey)
+		}
+	})
+}
+
+// A row naming an object outside the sprout's own key layout is never
+// followed to a delete.
+func TestSproutJWTRemintDeletesOnlyItsOwnObject(t *testing.T) {
+	ctx := context.Background()
+	e := newSproutJWTEnv(t)
+	pub := e.accept(t, "t1", "web-1")
+	r := e.replica("replica-a", false)
+	if _, err := r.mintOrReuse(ctx, "t1", "web-1", pub); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"t1/web-2/other.jwt", "t1/web-1/x/y.jwt"} {
+		e.srv.Set(k, "x")
+		if err := e.db.Model(&sproutUserJWTRow{}).Where("tenant_id = ? AND sprout_id = ?", "t1", "web-1").
+			Update("object_key", k).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.mintOrReuse(ctx, "t1", "web-1", pub); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := e.srv.Object(k); !ok {
+			t.Fatalf("re-mint deleted %s, which is not the sprout's own JWT object", k)
+		}
+	}
 }
 
 func TestSproutJWTRefusesIneligible(t *testing.T) {

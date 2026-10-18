@@ -149,6 +149,15 @@ import (
 //   - SAASAPI_TENANT_PURGE_AFTER: how long a tenant stays offboarded
 //     before it is purged, default 720h (30 days), 1h..8760h.
 //
+// Terminal rows (retention.go, U4; docs/retention.md). The outbox sweeper
+// deletes finished action batches and items, finished provisioning jobs
+// of tenants that are not offboarding, offboarded or purged, and expired
+// enrollment keys once they are this old. An invalid or out-of-range
+// value is a startup error:
+//
+//   - SAASAPI_TERMINAL_ROW_RETENTION: default 2160h (90 days),
+//     24h..87600h; empty or 0 is the default.
+//
 // Dispatch concurrency (dispatch_limits.go; security review M5). Per
 // process; an invalid or out-of-range value is a startup error:
 //
@@ -278,6 +287,10 @@ type Config struct {
 	// passed to SetTenantPurgeSettings before NewRouter.
 	TenantPurge TenantPurgeSettings
 
+	// Retention configures how long terminal rows are kept, passed to
+	// SetRetentionSettings before StartOutboxSweeper.
+	Retention RetentionSettings
+
 	// OperatorListenAddr enables the operator plane (NewOperatorServer)
 	// on this address. Empty means it is off.
 	OperatorListenAddr        string
@@ -338,6 +351,8 @@ func LoadConfig() (Config, error) {
 
 		TenantPurge: DefaultTenantPurgeSettings(),
 
+		Retention: DefaultRetentionSettings(),
+
 		OperatorListenAddr:        os.Getenv("SAASAPI_OPERATOR_LISTEN_ADDR"),
 		OperatorTLSCertFile:       os.Getenv("SAASAPI_OPERATOR_TLS_CERT_FILE"),
 		OperatorTLSKeyFile:        os.Getenv("SAASAPI_OPERATOR_TLS_KEY_FILE"),
@@ -388,6 +403,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if err := loadTenantPurgeSettings(&cfg.TenantPurge); err != nil {
+		return Config{}, err
+	}
+	if err := loadRetentionSettings(&cfg.Retention); err != nil {
 		return Config{}, err
 	}
 	if err := loadRecipeSettings(&cfg.Recipes); err != nil {

@@ -25,7 +25,9 @@ var reapBody = (*Store).reap
 
 // StartReaper launches a background goroutine that periodically removes jobs
 // with no activity for longer than the given TTL. It checks once per hour. A
-// TTL of 0 disables expiration entirely. The reaper runs until the process
+// TTL of 0 disables expiration entirely; farmer never passes one
+// (config.JobLogTTL is IMAS_JOB_LOG_TTL or joblogttl, where 0 means the
+// 720h default; docs/retention.md). The reaper runs until the process
 // exits; use StartReaperCtx to bind its lifetime to a context.
 //
 // Every farmer replica ticks its own reaper, but a tick only reaps under

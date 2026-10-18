@@ -205,7 +205,9 @@ tenant deprovisioned, **409** `tenant_deprovisioned`.
 `GET` lists keys newest first with a computed `state`: `active`, `revoked`,
 `expired` or `exhausted`. `DELETE .../{key_id}` sets `revoked`. It only stops
 new enrollments; sprouts that already enrolled with the key keep their
-identity.
+identity. A key is deleted, and no longer listed, once its expiry is
+`SAASAPI_TERMINAL_ROW_RETENTION` (default 90 days) in the past
+([outbox sweeper](#outbox-sweeper)).
 
 Key minting is rate-limited per tenant: 1 request/second sustained, burst 5,
 tunable with `SAASAPI_ENROLLMENT_KEY_RATE_LIMIT` and `_BURST`, and shared
@@ -494,8 +496,10 @@ validation is audited: tenant, caller (token `sub`), name, sha256 and size
 before and after, outcome and error code, never the content. A change first
 writes an `attempted` record, and if that can't be stored, nothing changes
 and the answer is `503 audit_unavailable`. Records are JSON objects under
-`tenants/<tenant_id>/recipe-audit/` in the recipe bucket, and are also
-logged.
+`tenants/<tenant_id>/recipe-audit/<YYYY-MM-DD>/` in the recipe bucket, and
+are also logged. saasapi can add records but never read or delete one;
+farmer deletes the days older than `IMAS_RECIPE_AUDIT_RETENTION_DAYS`
+(default 365; `0` keeps them for ever; [`docs/retention.md`](../retention.md)).
 
 ### Fleet update dispatch: not generally available
 
@@ -639,6 +643,22 @@ dispatching, every `SAASAPI_OUTBOX_SWEEP_INTERVAL` (30 seconds):
 | action item `dispatching` whose pod died | never re-sent | — | failed with `dispatch_outcome_unknown` once its pod would have given up on the reply |
 | update rollout with `queued`, `dispatching` or `running` items | the batch's lease has lapsed, and only with `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED=true` | resumed as described under [fleet update dispatch](#fleet-update-dispatch-not-generally-available) | an item in `dispatching`: failed as above, halting the rollout and freeing the tenant's slot |
 | tenant `offboarded` for `SAASAPI_TENANT_PURGE_AFTER` | no purge job pending and none started in the last 24 hours, with `SAASAPI_TENANT_PURGE_ENABLED` on | a new purge job (trigger `retention`), then re-published like any provisioning job | a second pending purge job: starting one claims the tenant row (`purge_claimed_at`) in the job's transaction |
+
+The sweeper also deletes terminal rows once they are
+`SAASAPI_TERMINAL_ROW_RETENTION` old (default 2160h, 90 days;
+`internal/saasapi/retention.go`, [`docs/retention.md`](../retention.md)),
+every hour on a loop of its own (it needs no bus): a batch, update
+rollouts included, whose every item is terminal (`succeeded`, `failed`,
+`unresolved`, `unresponsive_after_update`), created and last changed
+before the cutoff and not leased, items first and then the batch, after
+which `GET .../sprouts/actions/{batch_id}` answers 404; a provisioning job
+that succeeded or failed before the cutoff, of a tenant that is `pending`,
+`active` or `failed` (an offboarding, offboarded or purged tenant's jobs
+are its tombstone's record and stay); an enrollment key whose expiry is
+before the cutoff. Each statement deletes at most 500 rows, by primary
+key and tenant with the terminal condition repeated, with a pause after
+it and at most 50 statements of each kind per run, so the prune never
+locks a table or holds more than 500 row locks.
 
 Work is claimed with a lease on the row (`lease_owner`, `lease_until`,
 migration `saas/00006`), taken by one conditional `UPDATE` that must affect
@@ -797,6 +817,7 @@ error, never a silent default.
 | `SAASAPI_OUTBOX_LEASE_TTL` | `2m` | how long a lease lasts unrenewed: how soon a dead pod's batch or rollout is taken over; `15s`–`1h` |
 | `SAASAPI_TENANT_PURGE_ENABLED` | `true` | the outbox sweeper erases an offboarded tenant's data once `SAASAPI_TENANT_PURGE_AFTER` has passed; `false` leaves purging to the operator route |
 | `SAASAPI_TENANT_PURGE_AFTER` | `720h` | how long a tenant stays `offboarded` before its data is erased, a Go duration; `1h`–`8760h` |
+| `SAASAPI_TERMINAL_ROW_RETENTION` | `2160h` | how long the [outbox sweeper](#outbox-sweeper) keeps finished batches and items, finished provisioning jobs and expired enrollment keys, a Go duration; `24h`–`87600h`; empty or `0` is the default |
 | `SAASAPI_OPERATOR_LISTEN_ADDR` | empty (off) | operator plane HTTPS listener; with it set, the certificate, key and `SAASAPI_OPERATOR_TOKEN_FILE` are required |
 | `SAASAPI_OPERATOR_TLS_CERT_FILE` / `_KEY_FILE` | — | the operator listener's certificate and key |
 | `SAASAPI_OPERATOR_TOKEN_FILE` / `_PREVIOUS_FILE` | — / empty | operator bearer token(s), as mounted Secret files |

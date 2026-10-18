@@ -125,6 +125,7 @@ Images the Helm charts run that are not part of the Go build:
 | Component | Licence | Where |
 |---|---|---|
 | Versity Gateway (`versitygw`, `docker.io/versity/versitygw`, pinned by digest) | Apache-2.0 | `deploy/helm/farmer`, optional (`versity.enabled`, off by default): the S3 gateway in front of Azure Blob, the production object store (design D18) |
+| Fluent Bit (`docker.io/fluent/fluent-bit`, 4.2.0, pinned by digest) | Apache-2.0 | `deploy/helm/farmer`, optional (`logShipping.enabled`, off by default): ships the namespace's container logs (service and audit logs) to the object store (design D16) |
 
 The chart subcharts (OpenBao, PXC, Valkey) and their licences are listed in
 `deploy/helm/farmer/README.md`, "Licensing".

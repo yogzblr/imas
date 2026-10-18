@@ -532,7 +532,9 @@ func TestVersityCIValues(t *testing.T) {
 	if vals["IMAS_S3_ENDPOINT"] != versityEndpoint || vals["IMAS_ACCOUNTS_S3_ENDPOINT"] != versityEndpoint {
 		t.Errorf("endpoints %q %q", vals["IMAS_S3_ENDPOINT"], vals["IMAS_ACCOUNTS_S3_ENDPOINT"])
 	}
-	if len(planOf(t, docs).Buckets) != 4 {
+	// The recipe, job, sprout JWT and accounts buckets, and the log bucket
+	// (logShipping, U4).
+	if len(planOf(t, docs).Buckets) != 5 {
 		t.Error("ci/versity-values.yaml: not every bucket on the gateway")
 	}
 }

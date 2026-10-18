@@ -288,6 +288,12 @@ spec:
               value: {{ .after | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- with $s.retention }}
+            {{- with .terminalRows }}
+            - name: SAASAPI_TERMINAL_ROW_RETENTION
+              value: {{ . | toString | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Recipe template render limits: the same values farmer
             renders under, so an upload is validated as it will be cooked,
             and the include cap an upload's own include list is checked

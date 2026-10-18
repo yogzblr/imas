@@ -240,6 +240,7 @@ spec:
 ---
 # The gateway. Allowed, and nothing else:
 #   in:  farmer, saasapi (with saasapi.recipes), the createBuckets Job, the
+#        log shipper and the log retention CronJob (with logShipping), the
 #        nats chart's bus pods in this cluster (networkPolicy.dmz; the
 #        account loader) and versity.networkPolicy.extraIngressFrom -> S3
 #   out: Azure Blob on 443 (versity.networkPolicy.azureEgress; empty: any
@@ -270,6 +271,16 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "imas-farmer.versity.bucketsSelectorLabels" . | nindent 14 }}
+        {{- if and (include "imas-farmer.s3UsesVersity" .) .Values.logShipping.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.logShipping.selectorLabels" . | nindent 14 }}
+        {{- end }}
+        {{- if and (include "imas-farmer.s3UsesVersity" .) (include "imas-farmer.logShipping.ownOutput" .) }}
+        - podSelector:
+            matchLabels:
+              {{- include "imas-farmer.logRetention.selectorLabels" . | nindent 14 }}
+        {{- end }}
         {{- if include "imas-farmer.accountsUseVersity" . }}
         - namespaceSelector:
             {{- toYaml $np.dmz.namespaceSelector | nindent 12 }}

@@ -1,0 +1,288 @@
+{{- if .Values.logShipping.enabled }}
+{{- include "imas-farmer.validate" . -}}
+{{- $l := .Values.logShipping -}}
+{{- $own := include "imas-farmer.logShipping.ownOutput" . -}}
+{{- /*
+logShipping (design D16; README.md, "Log shipping and retention"): Fluent
+Bit on every node ships this namespace's container logs to the log
+bucket, and the retention CronJob deletes the days older than
+logShipping.retention.days (internal/retention).
+FLAG FOR SECURITY REVIEW: the shipper reads every container log of the
+namespace on its node as root (no capabilities), and the retention
+CronJob's credential can delete the logs under the prefix.
+*/}}
+{{- if $own }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "imas-farmer.logShipping.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-shipper
+data:
+  fluent-bit.yaml: |
+    {{- include "imas-farmer.logShipping.config" . | nindent 4 }}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $l.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-shipper
+# No RBAC and no token: the shipper reads files on its node and talks to
+# the object store; it never asks the API server about pods.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "imas-farmer.logShipping.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-shipper
+spec:
+  selector:
+    matchLabels:
+      {{- include "imas-farmer.logShipping.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "imas-farmer.logShipping.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- if $own }}
+        checksum/config: {{ include "imas-farmer.logShipping.config" . | sha256sum }}
+        {{- end }}
+        {{- with $l.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $l.serviceAccountName }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $l.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $l.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with $l.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $l.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: fluent-bit
+          image: {{ include "imas-farmer.logShipping.image" . | quote }}
+          imagePullPolicy: {{ $l.image.pullPolicy }}
+          args: ["-c", "/fluent-bit/etc/imas/fluent-bit.yaml"]
+          {{- if or $own $l.extraEnv }}
+          env:
+            {{- if $own }}
+            # Fluent Bit's S3 output takes its credential from the AWS
+            # chain, which reads these variables; the writer may only put
+            # objects under logShipping.prefix.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: { name: {{ $l.credentialsSecret | quote }}, key: {{ $l.accessKeyIdKey | quote }} }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $l.credentialsSecret | quote }}, key: {{ $l.secretAccessKeyKey | quote }} }
+            {{- end }}
+            {{- with $l.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - { name: http, containerPort: 2020, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /api/v1/health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/v1/health, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            {{- toYaml $l.securityContext | nindent 12 }}
+          {{- with $l.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /fluent-bit/etc/imas
+              readOnly: true
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            # Tail offsets and the S3 output's buffer. Lost with the pod:
+            # a restarted shipper reads its node's files from the head
+            # again, so a restart can ship a line twice, never drop one
+            # the node still has.
+            - name: state
+              mountPath: /var/fluent-bit
+      volumes:
+        - name: config
+          configMap:
+            name: {{ default (include "imas-farmer.logShipping.fullname" .) $l.existingConfigMap }}
+        - name: varlog
+          hostPath:
+            path: /var/log
+            type: Directory
+        - name: state
+          emptyDir:
+            sizeLimit: 1Gi
+{{- if $own }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $l.retention.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-retention
+# No RBAC and no token: the CronJob only talks to the object store.
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "imas-farmer.logRetention.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-retention
+spec:
+  schedule: {{ $l.retention.schedule | quote }}
+  {{- with $l.retention.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ $l.retention.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $l.retention.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $l.retention.backoffLimit }}
+      activeDeadlineSeconds: {{ $l.retention.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "imas-farmer.logRetention.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $l.retention.serviceAccountName }}
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          {{- with .Values.farmer.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: log-retention
+              # The same image, same tag, as the farmer Deployment.
+              image: {{ include "imas-farmer.farmer.image" . | quote }}
+              imagePullPolicy: {{ .Values.farmer.image.pullPolicy }}
+              args: # ENTRYPOINT is /farmer
+                - log-retention
+                - {{ printf "-endpoint=%s" (include "imas-farmer.s3Endpoint" .) | quote }}
+                - {{ printf "-use-ssl=%s" (include "imas-farmer.s3UseSSL" .) | quote }}
+                - {{ printf "-bucket=%s" $l.bucket | quote }}
+                - {{ printf "-prefix=%s" $l.prefix | quote }}
+                - {{ printf "-days=%s" (include "imas-farmer.logRetention.days" .) | quote }}
+                - -credentials-dir=/var/run/secrets/imas/log-retention
+                - {{ printf "-timeout=%s" $l.retention.timeout | quote }}
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              {{- with $l.retention.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: credential
+                  mountPath: /var/run/secrets/imas/log-retention
+                  readOnly: true
+          volumes:
+            - name: credential
+              secret:
+                secretName: {{ $l.retention.credentialsSecret | quote }}
+                defaultMode: 0440
+                items:
+                  - { key: {{ $l.retention.accessKeyIdKey | quote }}, path: access-key-id }
+                  - { key: {{ $l.retention.secretAccessKeyKey | quote }}, path: secret-access-key }
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# The shipper. Allowed, and nothing else:
+#   in:  nothing (its health port is for the kubelet's probes, which
+#        NetworkPolicy does not filter)
+#   out: the object store (as farmer's rule: objectStore.endpoint's port
+#        and networkPolicy.external.objectStore, or the gateway's pods),
+#        DNS, logShipping.networkPolicy.extraEgress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.logShipping.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-shipper
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.logShipping.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    {{- if include "imas-farmer.s3Endpoint" . }}
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" (fromYamlArray (include "imas-farmer.objectStorePeers" (dict "root" . "versity" (include "imas-farmer.s3UsesVersity" .)))) "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
+    {{- end }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+    {{- with $l.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- if $own }}
+---
+# The retention CronJob talks to the object store and DNS, nothing else.
+# Rendered with it whatever networkPolicy.enabled says, like the hook
+# Jobs'.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "imas-farmer.logRetention.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "imas-farmer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: log-retention
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "imas-farmer.logRetention.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    {{- include "imas-farmer.depEgress" (dict "bundled" false "peers" (fromYamlArray (include "imas-farmer.objectStorePeers" (dict "root" . "versity" (include "imas-farmer.s3UsesVersity" .)))) "port" (include "imas-farmer.objectStorePort" .)) | nindent 4 }}
+    {{- include "imas-farmer.dnsEgress" . | nindent 4 }}
+{{- end }}
+{{- end }}

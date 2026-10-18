@@ -88,6 +88,7 @@ var PurgeRoots = map[string][]string{
 // stays, or that look like a root and are not per tenant, with the reason.
 var KeepRoots = map[string]string{
 	"accounts/": "the accounts bucket: the tombstone's locked-out Account JWT (re-signed with nothing but the ID and the lock-out) stays, so a bus node started empty loads the tenant locked out",
+	"logs/":     "the log bucket (logShipping, U4): the platform's service and audit logs, by day, not per tenant; the log retention CronJob deletes them after logShipping.retention.days (docs/retention.md)",
 }
 
 // ObjectPrefixes returns tenantID's prefixes in every purged bucket, in

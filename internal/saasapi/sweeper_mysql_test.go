@@ -332,3 +332,18 @@ func TestMySQLStartPurgeOnePending(t *testing.T) {
 		t.Fatalf("a start while one is pending: %v, want errPurgeInProgress", err)
 	}
 }
+
+// Removing terminal rows on MySQL (U4): two replicas prune a large action
+// table by turns, every DELETE stays within pruneBatchRows, and only the
+// finished batches older than the retention go.
+func TestMySQLPruneTerminalRowsLargeTable(t *testing.T) {
+	g1, g2 := newMySQLSaasSchema(t)
+	testPruneLargeTable(t, g1, g2, 200, 120) // 24,480 items
+}
+
+// The same on MySQL for provisioning jobs (the tenant status subquery in
+// the DELETE) and enrollment keys.
+func TestMySQLPruneTerminalRowsProvisioningJobsAndEnrollmentKeys(t *testing.T) {
+	g, _ := newMySQLSaasSchema(t)
+	testPruneJobsAndKeys(t, g)
+}

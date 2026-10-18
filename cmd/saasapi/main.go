@@ -195,6 +195,7 @@ func newRouter(cfg saasapi.Config) *http.ServeMux {
 	saasapi.SetFleetUpdateClockSkew(cfg.FleetUpdateClockSkew)
 	saasapi.SetOutboxSweeperSettings(cfg.OutboxSweeper)
 	saasapi.SetTenantPurgeSettings(cfg.TenantPurge)
+	saasapi.SetRetentionSettings(cfg.Retention)
 	return saasapi.NewRouter()
 }
 

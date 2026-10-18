@@ -47,6 +47,7 @@ import (
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/pxc"
 	"github.com/yogzblr/imas/internal/rbac"
+	"github.com/yogzblr/imas/internal/retention"
 	"github.com/yogzblr/imas/internal/saasapicred"
 	"github.com/yogzblr/imas/internal/tenantconn"
 	"github.com/yogzblr/imas/internal/valkeyconn"
@@ -295,6 +296,11 @@ func main() {
 	installConnGetter(tenantRegistry)
 	if recipeStore != nil {
 		go waitForObjectStore(ctx, recipeStore, "recipe", config.S3Bucket)
+		// The recipe audit sweep (U4, docs/retention.md): the SaaS API
+		// writes audit records create-only and can't delete them;
+		// farmer's recipe bucket credential can, once they are older
+		// than IMAS_RECIPE_AUDIT_RETENTION_DAYS (0 keeps them for ever).
+		retention.StartRecipeAuditSweeper(ctx, farmerDB, recipeStore, config.RecipeAuditRetentionDays)
 	}
 	if jobStore != nil {
 		go waitForObjectStore(ctx, jobStore, "job", config.S3JobBucket)
@@ -420,9 +426,14 @@ func installRecipeLimits(l config.RecipeTemplateLimits) error {
 	})
 }
 
+// farmerDB is the farmer-schema handle installStorage installed, for the
+// background jobs main starts itself (their job_leases rows).
+var farmerDB *gorm.DB
+
 // installStorage hands the farmer-schema handle to every package
 // that reads or writes through it.
 func installStorage(db *gorm.DB) {
+	farmerDB = db
 	props.SetDB(db)
 	pki.SetDB(db)
 	rbac.SetDB(db)

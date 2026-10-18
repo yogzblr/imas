@@ -765,7 +765,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("keyfile", filepath.Join(systemConfigRoot, "pki/farmer/tls-key.pem"))
 			jety.SetDefault("auditlevel", "write")
 			jety.SetDefault("joblogdir", "/var/cache/imas/farmer/jobs")
-			jety.SetDefault("joblogttl", 30*24*time.Hour) // 30 days default
+			jety.SetDefault("joblogttl", DefaultJobLogTTL)
 			jety.SetDefault("cohortrefreshinterval", 5*time.Minute)
 			jety.SetDefault("propsdir", "/var/cache/imas/farmer/props")
 			jety.SetDefault("rootca", filepath.Join(systemConfigRoot, "pki/farmer/tls-rootca.pem"))
@@ -773,12 +773,20 @@ func LoadConfig(binary string) {
 			jety.SetDefault("farmerorganization", "imas farmer")
 			jety.SetDefault("gatewayjwtttl", 24*time.Hour)
 			jety.SetDefault("gatewaytransitkeyname", "imas-gateway-jwt")
-			jety.SetDefault("boxkeygraceduration", 24*time.Hour)
+			jety.SetDefault("boxkeygraceduration", DefaultBoxKeyGraceDuration)
 			jety.SetDefault("s3usessl", true)
 			jety.SetDefault("enrollment", true)
 			EnrollmentDisabled = !jety.GetBool("enrollment")
 			JobLogDir = jety.GetString("joblogdir")
-			JobLogTTL = jety.GetDuration("joblogttl")
+			// Retention (U4, docs/retention.md): validated here, so a bad
+			// value stops farmer instead of turning an expiry off.
+			ret, err := farmerRetentionFromEnv(jety.Get)
+			if err != nil {
+				log.Fatalf("retention: %v", err)
+			}
+			JobLogTTL = ret.JobLogTTL
+			RecipeAuditRetentionDays = ret.RecipeAuditRetentionDays
+			jety.Set("boxkeygraceduration", ret.BoxKeyGraceDuration)
 			PropsDir = jety.GetString("propsdir")
 			BusMaxConnections = jety.GetInt("busmaxconnections")
 			if BusMaxConnections < 0 {

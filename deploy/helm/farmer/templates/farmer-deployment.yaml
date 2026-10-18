@@ -197,6 +197,22 @@ spec:
             - name: IMAS_JOB_LEASE_TTL
               value: {{ . | quote }}
             {{- end }}
+            # Retention (docs/retention.md, U4): types checked in validate,
+            # ranges by farmer at startup (internal/config retention.go).
+            {{- with .Values.farmer.retention }}
+            {{- with .jobLogTTL }}
+            - name: IMAS_JOB_LOG_TTL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (or (kindIs "invalid" .recipeAuditDays) (eq (toString .recipeAuditDays) "")) }}
+            - name: IMAS_RECIPE_AUDIT_RETENTION_DAYS
+              value: {{ .recipeAuditDays | int | toString | quote }}
+            {{- end }}
+            {{- with .boxKeyGrace }}
+            - name: IMAS_BOX_KEY_GRACE_DURATION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             # Per-tenant bus connections: idle close (owner decision 3 of
             # docs/briefs/P21-slice3-farmer-saasapi-state.md).
             {{- with .Values.farmer.tenantConnections }}

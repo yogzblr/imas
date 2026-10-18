@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -393,6 +394,13 @@ func FarmerUserJWT() (string, error) {
 // A replica that dies after the PUT and before the row UPDATE leaves an
 // object no row points at; harmless, since the key carries the hash and
 // the next minter writes its own. Its lease lapses at lease_until.
+//
+// A re-mint (a new key, new permissions, a damaged object) deletes the
+// object the row named before, once the row names the new one
+// (docs/retention.md): nothing reads a superseded JWT again, so the
+// bucket keeps one object per sprout, not one per mint until the tenant
+// is purged. Best effort: a failed delete leaves an object no row points
+// at, as above.
 
 // SproutJWTBucketEnv names the private bucket sprout User JWTs are kept
 // in. It must be neither the recipe bucket (GET /files/ serves every key
@@ -456,6 +464,7 @@ func SproutJWTModels() []any { return []any{&sproutUserJWTRow{}} }
 type sproutJWTObjects interface {
 	GetLimited(ctx context.Context, key string, limit int64) ([]byte, error)
 	Put(ctx context.Context, key string, data []byte) error
+	Delete(ctx context.Context, key string) error
 }
 
 // sproutJWTIssuer returns the Account a tenant's sprout User JWTs are
@@ -786,6 +795,13 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 			return "", err
 		}
 	}
+	// The object the row names now, deleted once the row names the new
+	// one. Only a key of this sprout's own layout: a row naming anything
+	// else is not trusted to point at something deletable.
+	var prev sproutUserJWTRow
+	if err := s.db.WithContext(ctx).Where("tenant_id = ? AND sprout_id = ?", tenantID, sproutID).Take(&prev).Error; err != nil {
+		return "", fmt.Errorf("pki: reading sprout JWT row: %w", err)
+	}
 	r := s.db.WithContext(ctx).Model(&sproutUserJWTRow{}).
 		Where("tenant_id = ? AND sprout_id = ? AND lease_owner = ?", tenantID, sproutID, owner).
 		UpdateColumns(map[string]any{
@@ -801,6 +817,12 @@ func (s *sproutJWTStore) mintLeased(ctx context.Context, tenantID, sproutID, pub
 	if r.RowsAffected != 1 {
 		// The lease lapsed and another replica took it: its row wins.
 		return "", fmt.Errorf("sprout %s in tenant %s: lease lost while minting: %w", sproutID, tenantID, ErrSproutJWTBusy)
+	}
+	if old := prev.ObjectKey; old != nil && *old != objKey && strings.HasPrefix(*old, tenantID+"/"+sproutID+"/") &&
+		!strings.Contains(strings.TrimPrefix(*old, tenantID+"/"+sproutID+"/"), "/") {
+		if err := s.objects.Delete(ctx, *old); err != nil {
+			log.Warnf("pki: deleting sprout %s's superseded JWT object in tenant %s: %v", sproutID, tenantID, err)
+		}
 	}
 	// Check again, after signing: a deny, delete or revocation that
 	// committed before this read is caught here, and one that commits

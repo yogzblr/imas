@@ -1282,6 +1282,8 @@ RustFS policies (`uat/hub/core/rustfs-setup.sh`):
 | `saasapi-recipes` (with `saasapi.recipes.enabled`) | `saasapi.recipes.credentialsSecret` | recipe bucket: `files/objectstore-policies/saasapi-recipes.json` (list under `tenants/*/recipes/*`, read and write there, put under `tenants/*/recipe-audit/*`) |
 | `accounts-writer` | `accountStore.credentialsSecret` | accounts bucket: list, get, put (no delete) |
 | `accounts-reader` | `versity.accountsReader.credentialsSecret` | accounts bucket: list, get. The DMZ bus's account loader |
+| `logs-writer` (with `logShipping.enabled`) | `logShipping.credentialsSecret` | log bucket: put under `logShipping.prefix` (`files/objectstore-policies/logs-writer.json`) |
+| `logs-retention` (with `logShipping.enabled`) | `logShipping.retention.credentialsSecret` | log bucket: list, delete under `logShipping.prefix` (`files/objectstore-policies/logs-retention.json`) |
 
 No user reaches a bucket it is not listed for, and the sprout JWT bucket
 is farmer's alone (it is in farmer's credential; there is no separate
@@ -1586,6 +1588,84 @@ JSON to stdout (`farmer.logFormat`, default `json`) and Fluent Bit ships it
 
 For example, with Fluent Bit's `grep` filter, `Regex msg farmer_account_bucket_write_failed=`.
 
+## Data retention
+
+How long every kind of data is kept, where, and the value that decides it,
+is [`docs/retention.md`](../../../docs/retention.md) (U4). This chart's
+values:
+
+| Value | Variable | Default | What it keeps |
+|---|---|---|---|
+| `saasapi.tenantPurge.after` | `SAASAPI_TENANT_PURGE_AFTER` | `720h` | an offboarded tenant's data, then the purge ([Erasing an offboarded tenant's data](#erasing-an-offboarded-tenants-data)) |
+| `farmer.retention.jobLogTTL` | `IMAS_JOB_LOG_TTL` | `720h` | job records and step events after the job's last activity |
+| `farmer.retention.recipeAuditDays` | `IMAS_RECIPE_AUDIT_RETENTION_DAYS` | `365` (`0`: for ever) | recipe audit records (`tenants/<tenant>/recipe-audit/<day>/`) |
+| `farmer.retention.boxKeyGrace` | `IMAS_BOX_KEY_GRACE_DURATION` | `24h` | a sprout's previous box public key after a rotation |
+| `saasapi.retention.terminalRows` | `SAASAPI_TERMINAL_ROW_RETENTION` | `2160h` | finished action batches and items, finished provisioning jobs, expired enrollment keys |
+| `logShipping.retention.days` | the CronJob's `-days` | `30` | service and audit logs in the log bucket |
+
+null or `""` emits no variable. saasapi then uses its default;
+`logShipping.retention.days` renders `-days=30`. Farmer's three fall back
+to farmer's config file key (`joblogttl`, `recipeauditretentiondays`,
+`boxkeygraceduration`, which `farmer.extraConfig` can set), and only
+without one to farmer's default; a set variable wins over the key. `0` is the default too,
+except for `recipeAuditDays`, where it keeps the records for ever. The render refuses a value of the wrong type; the
+binary refuses one out of range at startup, naming the variable.
+
+Terminal rows are removed by saasapi's outbox sweeper every hour, at most
+500 rows per statement (selected by primary key with a plain read, then
+deleted by key and tenant with the terminal condition repeated), with a
+pause between statements and at most 50 statements of each kind per run,
+so no statement holds more than 500 row locks and none locks a table. An
+offboarding, offboarded or purged tenant's provisioning jobs are never
+removed: they are its tombstone's record.
+
+## Log shipping and retention
+
+With `logShipping.enabled`, Fluent Bit (design D16; Apache-2.0,
+`DEPENDENCIES.md`) runs as a DaemonSet and tails the container logs of
+this release's namespace on every node (`/var/log/containers/*_<namespace>_*.log`,
+or `logShipping.paths`): farmer's audit log and service logs, saasapi's,
+and every other pod's, all JSON on stdout. It writes them gzipped to
+`logShipping.bucket` on the object store farmer uses (`objectStore.endpoint`,
+or the Versity Gateway with `versity.enabled`), one object per pod at most
+every `logShipping.uploadTimeout`, under
+`<prefix><YYYY>/<MM>/<DD>/<pod>-<HHMMSS>-<uuid>.gz`.
+
+The log retention CronJob (`farmer log-retention`, `logShipping.retention`,
+daily at 03:17) lists the prefix and deletes every object of a day older
+than `logShipping.retention.days` (default 30): an object of day D goes
+at the first run on day D+31. It dates objects by the day in the key, so
+a key without one is never deleted. Not a bucket lifecycle rule: Versity
+Gateway v1.8.0 answers `PutBucketLifecycleConfiguration` with
+`NotImplemented`, and the code speaks S3 only (D15).
+
+Two credentials, each in a Secret of its own:
+
+| Secret | Who | Grants (`files/objectstore-policies/`) |
+|---|---|---|
+| `logShipping.credentialsSecret` | the shipper (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) | `logs-writer.json`: `PutObject` under the prefix, nothing else (it cannot read, list or delete a log) |
+| `logShipping.retention.credentialsSecret` | the CronJob (mounted as files) | `logs-retention.json`: list the bucket, `DeleteObject` under the prefix (it cannot read a log) |
+
+With `versity.enabled` the createBuckets Job creates the log bucket and
+writes those two policies for the users `logs-writer` and
+`logs-retention`. Elsewhere, create the bucket and give the two
+credentials these policies (`LOG_BUCKET` and `LOG_PREFIX` replaced).
+
+`logShipping.existingConfigMap` names a ConfigMap of your own with key
+`fluent-bit.yaml`, used instead of the chart's, to send the logs
+elsewhere without a chart change (D16). The chart then renders neither
+its configuration nor the CronJob: retention is the destination's own.
+`logShipping.extraEnv` passes a credential that output needs, and
+`logShipping.networkPolicy.extraEgress` lets it out.
+
+The shipper runs as root to read the node's root-owned log files, with
+no capabilities, a read-only root filesystem and `/var/log` mounted
+read-only, and has no API token (it reads no pod metadata). Its tail
+offsets are in an `emptyDir`: a restarted shipper reads its node's files
+from the head again, so a line can be shipped twice, never dropped while
+the node still has it. The UAT hubs do not turn it on: their clusters are
+destroyed after each run, and their logs are read with `kubectl`.
+
 ## NetworkPolicy
 
 | Pods | Direction | Peer | Port |
@@ -1606,9 +1686,11 @@ For example, with Fluent Bit's `grep` filter, `Regex msg farmer_account_bucket_w
 | migrate Jobs | out | PXC, DNS; nothing else, no ingress | 3306, 53 |
 | sprout release hook Job | out | saasapi's pods on the operator port, DNS; nothing else, no ingress | 8443, 53 |
 | openbao-bootstrap | out | OpenBao, DNS | 8200, 53 |
-| Versity Gateway (`versity.enabled`) | in | farmer, saasapi (with `saasapi.recipes`), the createBuckets Job, the nats chart's bus pods (`networkPolicy.dmz`), `versity.networkPolicy.extraIngressFrom` | `versity.port` (7070) |
+| Versity Gateway (`versity.enabled`) | in | farmer, saasapi (with `saasapi.recipes`), the createBuckets Job, the log shipper and the log retention CronJob (with `logShipping`), the nats chart's bus pods (`networkPolicy.dmz`), `versity.networkPolicy.extraIngressFrom` | `versity.port` (7070) |
 | Versity Gateway | out | Azure Blob (`versity.networkPolicy.azureEgress`, default any destination), DNS | 443, 53 |
 | createBuckets Job | out | the gateway's pods, DNS; nothing else, no ingress (rendered whatever `networkPolicy.enabled` says) | 7070, 53 |
+| log shipper (`logShipping.enabled`) | out | the object store, as farmer's rule (or the gateway's pods), DNS, `logShipping.networkPolicy.extraEgress`; no ingress | `objectStore.endpoint`'s port, or `versity.port`; 53 |
+| log retention CronJob | out | the object store (or the gateway's pods), DNS; nothing else, no ingress (rendered whatever `networkPolicy.enabled` says) | the same; 53 |
 | all | out | DNS | 53 |
 
 - **The migrate Jobs' policy** is a hook itself, created before them at
@@ -1726,6 +1808,9 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `farmer.adminPubKeys` | `[]` | Removed in J.3: rendering fails if set. An admin with no CLI box key can't make a request; use `farmer.bootstrapAdmin`. |
 | `farmer.jobs.reconcileWindow` | `"2h"` | `IMAS_JOB_RECONCILE_WINDOW` (`deploy/farmer/values.job-reconcile.yaml`). |
 | `farmer.jobs.leaseTTL` | `""` | `IMAS_JOB_LEASE_TTL`: lease TTL of the hourly jobs, a quoted Go duration. Empty: farmer's 120s. |
+| `farmer.retention.jobLogTTL` | `"720h"` | `IMAS_JOB_LOG_TTL`: job records and step events are deleted this long after the job's last activity. A quoted Go duration, `1h` to `87600h`; `"0"` or null: 720h. See [Data retention](#data-retention). |
+| `farmer.retention.recipeAuditDays` | `365` | `IMAS_RECIPE_AUDIT_RETENTION_DAYS`: days the recipe audit records are kept, 1 to 3650; `0` keeps them for ever; null: 365. |
+| `farmer.retention.boxKeyGrace` | `"24h"` | `IMAS_BOX_KEY_GRACE_DURATION`: how long a sprout's previous box public key stays valid after a rotation. `10m` to `720h`; `"0"` or null: 24h. |
 | `farmer.tenantConnections.idleTTL` / `heartbeatWindow` | `"10m"` / `"15m"` | `IMAS_TENANT_CONN_IDLE_TTL` / `IMAS_TENANT_CONN_HEARTBEAT_WINDOW`: a tenant bus connection is closed once unused this long and with no sprout heartbeat in the window. Quoted Go durations. |
 | `farmer.tenantRelockInterval` | `"10m"` | `IMAS_TENANT_RELOCK_INTERVAL`: how often a fresh lock-out is pushed for every deprovisioned tenant still live on the bus or in the accounts bucket. A quoted Go duration from `"1m"` to `"24h"`; farmer refuses to start outside that range. Empty: farmer's 10m. |
 | `farmer.recipes.templateLimits.maxSourceBytes` | `262144` | `IMAS_RECIPE_MAX_SOURCE_BYTES`: largest recipe source farmer reads or renders. |
@@ -1756,6 +1841,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.outboxSweeper.{interval,provisioningStaleAfter,actionStaleAfter,actionMaxAge,leaseTTL}` / `maxAttempts` | `""` / `null` (30s, 2m, 2m, 30m, 2m / 5) | `SAASAPI_OUTBOX_SWEEP_INTERVAL`, `_PROVISIONING_STALE_AFTER`, `_ACTION_STALE_AFTER`, `_ACTION_MAX_AGE`, `_LEASE_TTL`, `_MAX_ATTEMPTS`. Empty or null emits no env var. See [`docs/api/saasapi.md`](../../../docs/api/saasapi.md#outbox-sweeper). |
 | `saasapi.tenantPurge.enabled` | `null` (on) | `SAASAPI_TENANT_PURGE_ENABLED`: the sweeper erases an offboarded tenant's data after `after`. `false`: only the operator route purges. null emits no env var. See [Erasing an offboarded tenant's data](#erasing-an-offboarded-tenants-data). |
 | `saasapi.tenantPurge.after` | `null` (`720h`) | `SAASAPI_TENANT_PURGE_AFTER`: the retention delay after offboarding, a Go duration, `1h` to `8760h` (saasapi refuses to start otherwise). null emits no env var. |
+| `saasapi.retention.terminalRows` | `"2160h"` | `SAASAPI_TERMINAL_ROW_RETENTION`: finished action batches and items, finished provisioning jobs (not an offboarded or purged tenant's) and expired enrollment keys are deleted once this old. `24h` to `87600h`; `"0"` or null: 2160h. See [Data retention](#data-retention). |
 | `saasapi.operator.*` | off, port `8443` | The operator plane: TLS Secret, token Secret. See [saasapi's operator plane](#saasapis-operator-plane). |
 | `saasapi.enrollmentKeys.rateLimit.*` | `1` / `5` | `deploy/saasapi/values.rate-limit.yaml`. `null` emits no env var. |
 | `saasapi.recipes.enabled` | `false` | Tenant recipe upload: `SAASAPI_RECIPES_S3_*` from `objectStore.endpoint`/`bucket`/`useSSL` and saasapi's own credential. Off, the recipe routes answer 503. See [Tenant recipe upload](#tenant-recipe-upload). |
@@ -1785,6 +1871,17 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `versity.rootCredentials.*` | `""`, `access-key-id`, `secret-access-key` | The gateway's root S3 credential (required when enabled). |
 | `versity.accountsReader.*` | `""`, `access-key-id`, `secret-access-key` | The DMZ bus's read-only accounts credential (required when the accounts bucket is the gateway's). |
 | `versity.createBuckets.*` | `imas-versity-buckets`, `10m`, ... | The bucket hook Job: ServiceAccount, in-pod timeout, backoff, deadline, Argo CD hooks, resources. |
+| `logShipping.enabled` | `false` | Fluent Bit on every node, shipping this namespace's container logs to `logShipping.bucket`. See [Log shipping and retention](#log-shipping-and-retention). |
+| `logShipping.image.*` | `docker.io/fluent/fluent-bit`, `4.2.0`, pinned by digest | The shipper's image; the render fails without a digest. |
+| `logShipping.bucket` / `prefix` / `region` | `imas-logs` / `logs/` / `us-east-1` | The log bucket (must differ from every other bucket), the key root (ending in `/`), the region the S3 output signs for (`versity.region` with the gateway). |
+| `logShipping.credentialsSecret` / `accessKeyIdKey` / `secretAccessKeyKey` | `""` / `access-key-id` / `secret-access-key` | The writer's Secret: put under the prefix only. Required unless `existingConfigMap`; a Secret of its own. |
+| `logShipping.paths` / `totalFileSize` / `uploadTimeout` | `[]` / `50M` / `10m` | Host files tailed (empty: this namespace's container logs); when an object is written. |
+| `logShipping.existingConfigMap` | `""` | A ConfigMap of your own (key `fluent-bit.yaml`) used instead of the chart's; no CronJob then. |
+| `logShipping.retention.days` | `30` | Days a log object is kept, by the day in its key, 1 to 3650; `0` or null: 30. |
+| `logShipping.retention.schedule` / `timeZone` | `"17 3 * * *"` / `""` | The log retention CronJob's schedule. |
+| `logShipping.retention.credentialsSecret` / keys | `""` / `access-key-id`, `secret-access-key` | The CronJob's Secret: list the bucket, delete under the prefix. Required unless `existingConfigMap`; must differ from the writer's. |
+| `logShipping.retention.*` (other) | `imas-log-retention`, `30m`, ... | ServiceAccount, in-pod timeout, backoff, deadline, history limits, resources. |
+| `logShipping.securityContext` / `resources` / `tolerations` / `nodeSelector` / `priorityClassName` / `podAnnotations` / `extraEnv` / `networkPolicy.extraEgress` | root, no capabilities, read-only root / ... / every taint | The shipper's pods. |
 | `versity.networkPolicy.extraIngressFrom` / `azureEgress` | `[]` / `[]` | More S3 clients (e.g. a DMZ cluster's nodes); the Azure Blob egress peers (empty: any destination on 443). |
 | `versity.topologySpreadConstraints`, `pdb.*`, `service.*`, `resources`, `podSecurityContext`, `securityContext`, probes, `podAnnotations` | see `values.yaml` | As for farmer. |
 | `networkPolicy.*` | on | See above. `saasapiOperatorIngress.from` is the operator plane's peer; `external.objectStore` is the object store's peer for farmer and for saasapi's recipe writes; `farmerExtraEgress` and `saasapiExtraEgress` are added on top. |
@@ -1941,6 +2038,21 @@ from source and no cluster:
   - the sprout release hook against a real saasapi, and `podFailurePolicy`
     failing the Job on exit 2.
 
+**Log shipping and retention (U4, 2026-10-18)**, in containers:
+
+- the chart's rendered Fluent Bit configuration passes Fluent Bit 4.2.0's
+  `--dry-run`, and, run with a read-only root filesystem against a CRI log
+  file, shipped it as `logs/<YYYY>/<MM>/<DD>/<pod>-<time>-<uuid>.gz`;
+- against Versity Gateway v1.8.0 (posix backend), with the users
+  `farmer versity-iam` wrote from credential directories and the policies
+  `farmer versity-buckets` wrote from the rendered plan: `logs-writer`
+  could put under `logs/` only (put elsewhere, list and delete were
+  refused), `logs-retention` could not read an object, and
+  `farmer log-retention` deleted the objects of the days older than 30
+  and kept the 30th day and today's;
+- Versity Gateway v1.8.0 refused a bucket lifecycle rule
+  (`NotImplemented`); RustFS 1.0.1 accepted one.
+
 ## Known gaps
 
 1. **saasapi runs in the release namespace.** The reference put its
@@ -1963,10 +2075,26 @@ exceptions, all subcharts and none of them Go dependencies:
   this choice when it was flagged.
 
 Not an exception: the optional **Versity Gateway** image
-(`versity.enabled`) is Apache-2.0 (design D18; `DEPENDENCIES.md`).
+(`versity.enabled`) is Apache-2.0 (design D18; `DEPENDENCIES.md`), and so
+is the optional **Fluent Bit** image (`logShipping.enabled`, design D16).
 
 ## Security review notes
 
+- **Log shipping** (`logShipping.enabled`, [Log shipping and
+  retention](#log-shipping-and-retention)). The shipper reads every
+  container log of the namespace on its node, as root without
+  capabilities, from a read-only hostPath of `/var/log`; its writer
+  credential is in its environment (Fluent Bit's S3 output reads the AWS
+  variables) and may only add objects under the prefix. The retention
+  CronJob's credential can delete every log under the prefix, which is
+  how retention works; it cannot read one. Logs hold what the services
+  log: the audit log never holds secrets ([What the audit log never
+  contains](#what-the-audit-log-never-contains)).
+- **Retention deletes data** ([Data retention](#data-retention)). The
+  recipe audit sweep runs with farmer's recipe bucket credential, which
+  already has delete on that bucket (the purge, S6); saasapi's credential
+  still cannot read or delete an audit record. The terminal-row prune
+  deletes only rows nothing will change again, and never a tombstone's.
 - **The Versity Gateway** (`versity.enabled`, [Versity Gateway](#versity-gateway)).
   Its pods hold the Azure storage account key (full access to every
   container in the account), the gateway's root credential and every
