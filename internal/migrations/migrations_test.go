@@ -242,7 +242,7 @@ func TestCompatibleFromReviewed(t *testing.T) {
 		set           Set
 		latest, floor int64
 	}{
-		{Farmer, 5, 2}, // 00004 and 00005 only add tables (P21 slice 3)
+		{Farmer, 6, 2}, // 00004 and 00005 only add tables (P21 slice 3); 00006 only a unique index an older farmer fails closed on (T4)
 		{Saas, 10, 1},  // 00007 and 00008 only add tables (P22 slice 2, P21 slice 3); 00009 only an index (S3); 00010 only nullable or defaulted columns (S6)
 	} {
 		if c.set.Latest() != c.latest || c.set.compatibleFrom != c.floor {

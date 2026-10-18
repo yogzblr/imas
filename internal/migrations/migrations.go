@@ -80,6 +80,13 @@ var saasFS embed.FS
 // provisioning_jobs.purge_trigger), which an older saasapi neither reads
 // nor names in its inserts, and backfills offboarded_at, which it never
 // reads.
+//
+// farmer 00006 (T4) leaves the farmer floor at 2: it adds a unique index
+// on pki_nkeys (tenant_id, nkey), which no row an older farmer reads
+// changes, and whose only refusal of an older farmer's write is an
+// enrollment of an NKey the tenant already holds under another sprout ID:
+// that enrollment fails, which is the fail-closed outcome the index is
+// there for, and the binary runs on otherwise.
 const (
 	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1

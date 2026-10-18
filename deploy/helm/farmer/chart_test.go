@@ -557,13 +557,14 @@ func TestFarmerSpread(t *testing.T) {
 
 // The env vars P21 slice 3 added: the sprout JWT bucket (owner decision 7
 // of issue #197), the tenant bus idle policy, the job lease TTL and the
-// log format.
+// log format; and T4's periodic relock interval.
 func TestFarmerStatelessEnv(t *testing.T) {
 	docs := mustRender(t)
 	env := envMap(container(t, farmerDeploy(t, docs), "farmer"))
 	for k, want := range map[string]string{
 		"IMAS_TENANT_CONN_IDLE_TTL":         "10m",
 		"IMAS_TENANT_CONN_HEARTBEAT_WINDOW": "15m",
+		"IMAS_TENANT_RELOCK_INTERVAL":       "10m",
 		"IMAS_LOG_FORMAT":                   "json",
 	} {
 		if e, ok := env[k]; !ok || e["value"] != want {
@@ -582,6 +583,7 @@ func TestFarmerStatelessEnv(t *testing.T) {
 	docs = mustRender(t, "--set", "objectStore.bucket=recipes", "--set", "objectStore.jobBucket=jobs",
 		"--set", "objectStore.sproutJWTBucket=sprout-jwts", "--set", "farmer.jobs.leaseTTL=90s",
 		"--set", "farmer.tenantConnections.idleTTL=5m", "--set", "farmer.tenantConnections.heartbeatWindow=30m",
+		"--set", "farmer.tenantRelockInterval=30m",
 		"--set", "farmer.logFormat=text", "--set", "saasapi.logFormat=text")
 	vals := envValues(container(t, farmerDeploy(t, docs), "farmer"))
 	for k, want := range map[string]string{
@@ -589,6 +591,7 @@ func TestFarmerStatelessEnv(t *testing.T) {
 		"IMAS_JOB_LEASE_TTL":                "90s",
 		"IMAS_TENANT_CONN_IDLE_TTL":         "5m",
 		"IMAS_TENANT_CONN_HEARTBEAT_WINDOW": "30m",
+		"IMAS_TENANT_RELOCK_INTERVAL":       "30m",
 		"IMAS_LOG_FORMAT":                   "text",
 	} {
 		if vals[k] != want {
@@ -650,6 +653,7 @@ func TestValidationFailures(t *testing.T) {
 		{"bare number idle ttl", "farmer.tenantConnections.idleTTL must be a quoted duration", []string{"--set", "farmer.tenantConnections.idleTTL=600"}},
 		{"bare number heartbeat window", "farmer.tenantConnections.heartbeatWindow must be a quoted duration", []string{"--set", "farmer.tenantConnections.heartbeatWindow=900"}},
 		{"bare number lease ttl", "farmer.jobs.leaseTTL must be a quoted duration", []string{"--set", "farmer.jobs.leaseTTL=120"}},
+		{"bare number relock interval", "farmer.tenantRelockInterval must be a quoted duration", []string{"--set", "farmer.tenantRelockInterval=600"}},
 		{"bad farmer log format", "farmer.logFormat must be", []string{"--set", "farmer.logFormat=logfmt"}},
 		{"bad saasapi log format", "saasapi.logFormat must be", []string{"--set", "saasapi.logFormat=yaml"}},
 		{"sprout jwt bucket is recipes", "objectStore.sproutJWTBucket \"recipes\" must differ", []string{"--set", "objectStore.bucket=recipes", "--set", "objectStore.sproutJWTBucket=recipes"}},

@@ -23,8 +23,9 @@ type UpResult struct {
 //
 // In order: refuse a schema whose floor excludes this binary; if the
 // schema is already ahead of this binary, apply nothing (the rollback
-// case); otherwise raise the recorded floor to s.CompatibleFrom, then
-// apply what's pending. The floor goes first so that a run that fails
+// case); otherwise run the preflight of every pending migration that has
+// one (preflight.go: a refusal applies nothing and raises nothing), raise
+// the recorded floor to s.CompatibleFrom, then apply what's pending. The floor goes first so that a run that fails
 // partway never leaves a schema that claims to support binaries its
 // applied migrations already broke. It only ever rises.
 func Up(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ...any)) (UpResult, error) {
@@ -43,9 +44,6 @@ func Up(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ..
 		logf("%s: schema version %d is newer than this binary's %d and still supports it; nothing to apply", s.name, st.Version, s.latest)
 		return res, nil
 	}
-	if err := raiseFloor(ctx, db, s.compatibleFrom); err != nil {
-		return res, fmt.Errorf("%s: %w", s.name, err)
-	}
 	// Out of order allowed: versions are reserved per workstream and can
 	// merge out of order (saas 00008 can land before 00007), so a version
 	// below one already applied is applied, not refused. A migration that
@@ -53,6 +51,12 @@ func Up(ctx context.Context, db *sql.DB, s Set, logf func(format string, args ..
 	p, err := goose.NewProvider(goose.DialectMySQL, db, s.fsys, goose.WithDisableGlobalRegistry(true),
 		goose.WithAllowOutofOrder(true))
 	if err != nil {
+		return res, fmt.Errorf("%s: %w", s.name, err)
+	}
+	if err := runPreflights(ctx, db, s); err != nil {
+		return res, fmt.Errorf("%s: %w", s.name, err)
+	}
+	if err := raiseFloor(ctx, db, s.compatibleFrom); err != nil {
 		return res, fmt.Errorf("%s: %w", s.name, err)
 	}
 	results, err := p.Up(ctx)

@@ -103,14 +103,8 @@ func resetRaceHooks(t *testing.T) {
 	})
 }
 
-// claimsLookupSubject is answered by the full resolver with the Account
-// JWT it holds.
-const claimsLookupSubject = "$SYS.REQ.ACCOUNT.%s.CLAIMS.LOOKUP"
-
 // isLockedOut reports whether ac carries lockOutAccount's lockout.
-func isLockedOut(ac *jwt.AccountClaims) bool {
-	return ac.Limits.Conn == 0 && ac.Revocations[jwt.All] > 0
-}
+func isLockedOut(ac *jwt.AccountClaims) bool { return accountIsLockedOut(ac) }
 
 // busAccountClaims returns the Account JWT the bus's resolver holds for
 // tenantID, decoded.

@@ -170,8 +170,10 @@ func TestVerifyGatewaySubject_DeprovisionedTenantRefused(t *testing.T) {
 	if err := upsertNKeyRow(nkeyRow{TenantID: "t_gone", SproutID: "web-01", NKey: nkey, State: stateAccepted}); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyGatewaySubject("t_gone", "web-01", nkey); !errors.Is(err, ErrTenantNotFound) {
-		t.Errorf("deprovisioned tenant: got %v, want ErrTenantNotFound", err)
+	// The same error every identity path gives a deprovisioned tenant
+	// (refuseDeprovisionedTenant; security review 2026-10, L10).
+	if err := VerifyGatewaySubject("t_gone", "web-01", nkey); !errors.Is(err, ErrTenantDeprovisioned) {
+		t.Errorf("deprovisioned tenant: got %v, want ErrTenantDeprovisioned", err)
 	}
 	if err := VerifyGatewaySubject("t_never", "web-01", nkey); !errors.Is(err, ErrTenantNotFound) {
 		t.Errorf("unknown tenant: got %v, want ErrTenantNotFound", err)

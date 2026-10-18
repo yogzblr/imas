@@ -128,9 +128,13 @@ const provisioningNoResultMessage = "no result was received for this request aft
 // applyProvisioningResult applies the first result of a job and ignores
 // the rest. A late copy of a provision request still
 // running on farmer when the tenant is offboarded is handled by farmer
-// (internal/pki re-checks the tenant after its push and locks it out again;
-// a tenant deprovisioned before any row existed gets a deleted tombstone),
-// so DELETE doesn't wait for re-published copies (DeleteTenant).
+// (internal/pki re-checks the tenant after its push, retried, and locks it
+// out again; a copy that finds the tenant already deprovisioned is refused
+// and pushes a fresh lockout, which also repairs a bus left live by an
+// earlier copy whose re-check could not read the database; farmer's
+// periodic relock covers a copy that is never redelivered; a tenant
+// deprovisioned before any row existed gets a deleted tombstone), so
+// DELETE doesn't wait for re-published copies (DeleteTenant).
 func (sw *sweeper) sweepProvisioningJobs() {
 	now := dbTime(outboxNow())
 	var jobs []ProvisioningJob
