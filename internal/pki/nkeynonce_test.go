@@ -137,9 +137,12 @@ func TestNKeyNonceStateless(t *testing.T) {
 // An NKey that one row has accepted is never revoked because another row
 // of the same tenant files it as unaccepted, denied or rejected (security
 // review 2026-10, L12: a legacy PUT /pki/putnkey filing someone's public
-// NKey as "rejected" revoked that sprout). A rejected row with its own
-// NKey is still revoked. Both the legacy tenant's sync (syncNatsAuth) and
-// a provisioned tenant's (syncTenantSprouts).
+// NKey as "rejected" revoked that sprout). Since (tenant_id, nkey) is
+// unique (I7), the store refuses such a second row outright
+// (errNKeyAmbiguous), so the sync never sees one; revokeUnlessAccepted's
+// own guard is pinned by TestRevokeUnlessAccepted. A rejected row with
+// its own NKey is still revoked. Both the legacy tenant's sync
+// (syncNatsAuth) and a provisioned tenant's (syncTenantSprouts).
 func TestSyncNeverRevokesAnotherRowsAcceptedNKey(t *testing.T) {
 	setupTestPKI(t)
 	useRealFarmerKey(t)
@@ -183,16 +186,27 @@ func TestSyncNeverRevokesAnotherRowsAcceptedNKey(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			victim, own := newPub(), newPub()
-			rows := []nkeyRow{
+			for _, r := range []nkeyRow{
 				{TenantID: tc.tenant, SproutID: "victim", NKey: victim, State: stateAccepted},
-				{TenantID: tc.tenant, SproutID: "victim_1", NKey: victim, State: stateRejected},
-				{TenantID: tc.tenant, SproutID: "squatter", NKey: victim, State: stateUnaccepted},
 				{TenantID: tc.tenant, SproutID: "rogue", NKey: own, State: stateRejected},
-			}
-			for _, r := range rows {
+			} {
 				if err := upsertNKeyRow(r); err != nil {
 					t.Fatal(err)
 				}
+			}
+			// The attack rows: the accepted NKey filed again under other
+			// sprout IDs. Refused, and the accepted row is unchanged.
+			for _, r := range []nkeyRow{
+				{TenantID: tc.tenant, SproutID: "victim_1", NKey: victim, State: stateRejected},
+				{TenantID: tc.tenant, SproutID: "squatter", NKey: victim, State: stateUnaccepted},
+				{TenantID: tc.tenant, SproutID: "denier", NKey: victim, State: stateDenied},
+			} {
+				if err := upsertNKeyRow(r); !errors.Is(err, errNKeyAmbiguous) {
+					t.Fatalf("sprout %q filing the accepted NKey as %s: %v, want errNKeyAmbiguous", r.SproutID, r.State, err)
+				}
+			}
+			if row, err := findNKeyRowByNKeyInTenant(tc.tenant, victim); err != nil || row.SproutID != "victim" || row.State != stateAccepted {
+				t.Fatalf("the accepted NKey's row after the refused writes: %+v, %v", row, err)
 			}
 			signed, err := tc.sync()
 			if err != nil {
@@ -209,5 +223,32 @@ func TestSyncNeverRevokesAnotherRowsAcceptedNKey(t *testing.T) {
 				t.Fatal("a rejected row's own NKey was not revoked")
 			}
 		})
+	}
+}
+
+// revokeUnlessAccepted, the sync's guard behind the store's (tenant_id,
+// nkey) uniqueness: a key another row has accepted is left alone and
+// reported unchanged, whatever state it is filed under; any other key is
+// revoked, once (security review 2026-10, L12).
+func TestRevokeUnlessAccepted(t *testing.T) {
+	accepted, other := "UACCEPTED", "UOTHER"
+	owners := map[string]string{accepted: "victim"}
+	for _, state := range []string{stateUnaccepted, stateDenied, stateRejected} {
+		ac := jwt.NewAccountClaims("AACCOUNT")
+		if revokeUnlessAccepted(ac, "t_l12", "victim_1", state, accepted, owners) {
+			t.Errorf("%s: reported a change for an accepted NKey", state)
+		}
+		if _, revoked := ac.Revocations[accepted]; revoked {
+			t.Errorf("%s: revoked the NKey another row has accepted", state)
+		}
+		if !revokeUnlessAccepted(ac, "t_l12", "rogue", state, other, owners) {
+			t.Errorf("%s: reported no change revoking a key nobody accepted", state)
+		}
+		if _, revoked := ac.Revocations[other]; !revoked {
+			t.Errorf("%s: a key nobody accepted was not revoked", state)
+		}
+		if revokeUnlessAccepted(ac, "t_l12", "rogue", state, other, owners) {
+			t.Errorf("%s: reported a change revoking an already revoked key", state)
+		}
 	}
 }

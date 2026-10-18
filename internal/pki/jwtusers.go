@@ -206,7 +206,9 @@ func ensureUserRevoked(ac *jwt.AccountClaims, pubkey string) bool {
 // sprout ID). Then it changes nothing and logs: a second row naming an
 // accepted NKey, for example one a legacy PUT /pki/putnkey filed as
 // rejected under another ID, must never revoke the sprout that row
-// accepted (security review 2026-10, L12). A deleted or replaced sprout's
+// accepted (security review 2026-10, L12). The store already refuses
+// such a row ((tenant_id, nkey) is unique, I7: upsertNKeyRowTx), so this
+// is the second guard, for a table that somehow holds one. A deleted or replaced sprout's
 // NKey is still revoked through the tenant's revoked list
 // (applyRevokedNKeys), which this does not touch. It reports whether it
 // changed ac.
