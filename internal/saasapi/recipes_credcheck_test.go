@@ -3,7 +3,7 @@ package saasapi
 import (
 	"context"
 	"errors"
-	"net/http/httptest"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,10 +252,27 @@ func TestCheckRecipeCredentialScopeInconclusive(t *testing.T) {
 		t.Fatalf("job bucket rejected the credential: got %v", err)
 	}
 
-	dead := httptest.NewServer(nil)
+	// An endpoint that never answers: it accepts and drops every
+	// connection. The port stays held for the whole test, so another test
+	// process can't bind it and answer in its place (a closed
+	// httptest.Server's port could be reused, and the store then
+	// "reached").
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dead.Close() })
+	go func() {
+		for {
+			c, err := dead.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 	cfg := rs.Config()
-	cfg.Endpoint = strings.TrimPrefix(dead.URL, "http://")
-	dead.Close()
+	cfg.Endpoint = dead.Addr().String()
 	deadStore, err := objectstore.Open(cfg)
 	if err != nil {
 		t.Fatal(err)
