@@ -172,19 +172,32 @@ workflow for a Valkey service container, docs.
   that wrote it. DISCONNECT deletes it only when the stored CID is its own, in
   one atomic script (compare-and-delete). CONNECT is a plain write of the new CID.
   Test the interleaving with both orders, with CONNECT processed before the old
-  DISCONNECT (the failing order today).
+  DISCONNECT (the failing order today). (Correction, T3: a client ID is unique
+  on one bus node only, so the stored ID is the node's server ID and the client
+  ID, `heartbeat.ConnID`, both in every CONNECT/DISCONNECT event. The heartbeat
+  refresh wrote `1` over the key, which would defeat the compare; it now extends
+  an existing key and keeps its owner, and writes a missing one with the
+  connection ID the sprout sends as the heartbeat body.)
 - **Valkey.** The two-key refresh script and the compare-and-delete script use
   keys that share a hash slot (the `{tenant:sprout}` tag), and a test proves it
   against a real Valkey (standalone) and a real Valkey Cluster of 3 shards, run in
   CI from service containers. Tests read the address from an environment variable;
   CI sets it; a local run without Docker is the only case a test may report "not
-  configured", and CI fails if the variable is missing.
+  configured", and CI fails if the variable is missing. (Correction, T3: the
+  compare-and-delete script names one key. The standalone address is the
+  existing `SAASAPI_TEST_VALKEY_ADDR`, the cluster's `IMAS_TEST_VALKEY_CLUSTER_ADDR`;
+  CI sets `IMAS_REQUIRE_VALKEY=1`, which makes a missing one a failure. A service
+  container takes no command, so the three nodes get cluster mode through the
+  image's `VALKEY_EXTRA_FLAGS` and a CI step joins them.)
 - **Load test.** `tools/loadtest/fixture.go` takes the sprout permissions from
   the one shared definition in `internal/` (no second copy); load-test sprouts
   send heartbeats; a test fails if the two lists differ.
 - **JWT change.** A sprout uses a JWT that a later refresh changes without a
   restart: reconnect with the new JWT at the next heartbeat. UAT.13 checks the
-  full grant (heartbeat and the other subjects), not only the heartbeat one.
+  full grant (heartbeat and the other subjects), not only the heartbeat one. (Correction,
+  T3: this needs `internal/pki`'s `SproutBus` to present the JWT through a
+  callback, and `cmd/sprout`; both changed here. UAT.13's check is
+  `cmd/sprout`'s `refreshStaleUserJWT`, now against `pki.SproutUserJWTHasFullGrant`.)
 
 ## T4: deprovision and identity (L10, L11, I7)
 

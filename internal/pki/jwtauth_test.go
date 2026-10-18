@@ -203,7 +203,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	upub, _ := ukp.PublicKey()
 	path := filepath.Join(t.TempDir(), "sprout.jwt")
 
-	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT failed: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	}
 
 	// Calling again for the same pubkey should reuse the file, not re-mint.
-	minted, err = mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err = mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (reuse) failed: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestMintOrReuseUserJWT(t *testing.T) {
 	// A different pubkey at the same path must trigger a re-mint.
 	ukp2, _ := nkeys.CreateUser()
 	upub2, _ := ukp2.PublicKey()
-	minted, err = mintOrReuseUserJWTFile(path, upub2, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err = mintOrReuseUserJWTFile(path, upub2, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (rotate) failed: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestMintOrReuseUserJWT_RemintsOnPermissionDrift(t *testing.T) {
 	upub, _ := ukp.PublicKey()
 	path := filepath.Join(t.TempDir(), "sprout.jwt")
 
-	old := sproutPermissions("sprout01")
+	old := SproutPermissions("sprout01")
 	old.Pub.Allow.Remove(sproutLogPublishGrant("sprout01"))
 	if _, err := mintOrReuseUserJWTFile(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
 		t.Fatalf("mintOrReuseUserJWT (old permissions) failed: %v", err)
@@ -268,7 +268,7 @@ func TestMintOrReuseUserJWT_RemintsOnPermissionDrift(t *testing.T) {
 		t.Fatal("JWT minted without the log grant reports it")
 	}
 
-	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (current permissions) failed: %v", err)
 	}

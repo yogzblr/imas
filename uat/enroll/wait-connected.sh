@@ -11,9 +11,11 @@
 # (POST .../sprouts/{sprout_id}/asset-link: 201 new, 200 already linked),
 # then polls GET /v1/tenants/{tenant_id}/sprouts?asset_ids=... until every
 # sprout has key_state "accepted" and connected true. "connected" is farmer's
-# view: the Valkey heartbeat key farmer sets per (tenant_id, sprout_id) when
-# the bus reports the sprout's connection (internal/heartbeat), which saasapi
-# reads; it is never true when saasapi has no Valkey configured.
+# view: the Valkey heartbeat key farmer keeps per (tenant_id, sprout_id),
+# set when the bus reports the sprout's connection, refreshed by the
+# sprout's heartbeats and removed only by that same connection's DISCONNECT
+# (internal/heartbeat), which saasapi reads; it is never true when saasapi
+# has no Valkey configured.
 #
 # Writes, for the tests (no secrets):
 #   DIR/sprouts.json         {"<vm>": {"sprout_id", "asset_id"}}, the shape

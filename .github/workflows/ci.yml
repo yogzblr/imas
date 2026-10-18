@@ -42,13 +42,46 @@ jobs:
           --health-timeout 5s
           --health-retries 60
       # Valkey, the image version the farmer chart's valkey subchart
-      # (0.12.0) runs, for TestValkeyLimiterRealServer (internal/saasapi)
-      # and TestCheckEvictionRealServer (internal/valkeyconn), both through
+      # (0.12.0) runs, for TestValkeyLimiterRealServer (internal/saasapi),
+      # TestCheckEvictionRealServer (internal/valkeyconn) and the heartbeat
+      # presence tests (internal/heartbeat), all through
       # SAASAPI_TEST_VALKEY_ADDR.
       valkey:
         image: valkey/valkey:9.1.2
         ports:
           - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      # Three Valkey nodes in cluster mode (the image's entrypoint appends
+      # VALKEY_EXTRA_FLAGS), joined into a 3-shard Valkey Cluster by the
+      # "Create the Valkey Cluster" step, for internal/heartbeat's cluster
+      # tests (IMAS_TEST_VALKEY_CLUSTER_ADDR). The runner reaches the nodes
+      # at the addresses they announce, their container addresses.
+      valkey-c1:
+        image: valkey/valkey:9.1.2
+        env:
+          VALKEY_EXTRA_FLAGS: "--cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000"
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      valkey-c2:
+        image: valkey/valkey:9.1.2
+        env:
+          VALKEY_EXTRA_FLAGS: "--cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000"
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      valkey-c3:
+        image: valkey/valkey:9.1.2
+        env:
+          VALKEY_EXTRA_FLAGS: "--cluster-enabled yes --cluster-config-file nodes.conf --cluster-node-timeout 5000"
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 2s
@@ -160,18 +193,49 @@ jobs:
             echo "IMAS_TEST_SDB_OPENBAO_CACERT=$RUNNER_TEMP/bao-tls/vault-ca.pem"
           } >> "$GITHUB_ENV"
 
+      # Join the three cluster-mode nodes into one Valkey Cluster of three
+      # shards (no replicas), wait until it reports ok, and hand its first
+      # node's address to the tests.
+      - name: Create the Valkey Cluster
+        env:
+          C1: ${{ job.services.valkey-c1.id }}
+          C2: ${{ job.services.valkey-c2.id }}
+          C3: ${{ job.services.valkey-c3.id }}
+        run: |
+          set -euo pipefail
+          addrs=()
+          for c in "$C1" "$C2" "$C3"; do
+            ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$c")
+            test -n "$ip"
+            addrs+=("$ip:6379")
+          done
+          docker exec "$C1" valkey-cli --cluster create "${addrs[@]}" --cluster-replicas 0 --cluster-yes
+          for _ in $(seq 1 30); do
+            if docker exec "$C1" valkey-cli cluster info | grep -q '^cluster_state:ok'; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec "$C1" valkey-cli cluster info | grep '^cluster_state:ok'
+          docker exec "$C1" valkey-cli cluster info | grep '^cluster_size:3'
+          echo "IMAS_TEST_VALKEY_CLUSTER_ADDR=${addrs[0]}" >> "$GITHUB_ENV"
+
       # IMAS_REQUIRE_HELM=1 turns every chart-test skip (no helm, charts/
       # not populated, a missing tool) into a failure, so this job can't
       # pass without having rendered the charts. IMAS_TEST_MYSQL_ROOT_DSN
       # runs the MySQL tests against the pxc service; set, they fail rather
       # than skip if it does not answer. SAASAPI_TEST_VALKEY_ADDR runs the
-      # Valkey rate limiter test and the INFO memory check against the
-      # valkey service.
+      # Valkey rate limiter test, the INFO memory check and the heartbeat
+      # presence tests against the valkey service, and
+      # IMAS_TEST_VALKEY_CLUSTER_ADDR (set by the step above) the heartbeat
+      # tests against the cluster; IMAS_REQUIRE_VALKEY=1 makes those tests
+      # fail, not skip, when either address is missing.
       - name: Test with race detection and coverage
         env:
           IMAS_REQUIRE_HELM: "1"
           IMAS_TEST_MYSQL_ROOT_DSN: "root:imas-ci@tcp(127.0.0.1:3306)/"
           SAASAPI_TEST_VALKEY_ADDR: "127.0.0.1:6379"
+          IMAS_REQUIRE_VALKEY: "1"
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov

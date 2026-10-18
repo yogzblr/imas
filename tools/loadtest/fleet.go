@@ -5,7 +5,9 @@ package main
 // seed, enrolled addresses so discovered servers are ignored, unlimited
 // reconnects with internal/natsretry's full-jitter backoff), and once
 // connected does what natsInit does on the bus: announces itself,
-// publishes its facts, and subscribes to the same seven subjects.
+// publishes its facts, and subscribes to the same seven subjects; and,
+// as startHeartbeat does, publishes its heartbeat at connect and then
+// every heartbeat interval.
 //
 // Only test.ping and facts.request are answered (test.ping with the
 // sprout's own handler, internal/ingredients/test.SPing). The other
@@ -39,8 +41,10 @@ import (
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/heartbeat"
 	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/natsretry"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // sproutSubjects are the subjects cmd/sprout's natsInit subscribes to
@@ -71,6 +75,10 @@ type fleetOptions struct {
 	// facts.request; nil publishes none.
 	Facts   []byte
 	Workers int
+	// HeartbeatInterval is how often each sprout publishes its heartbeat
+	// (pki.SproutHeartbeatSubject, body heartbeat.ConnID), as
+	// heartbeat.RunSprout does every heartbeat.Interval; 0 sends none.
+	HeartbeatInterval time.Duration
 }
 
 // fleet is every simulated sprout of one generator.
@@ -103,6 +111,8 @@ type fleet struct {
 
 	// Messages handled.
 	pings, factsReqs, inert, slowConsumers atomic.Int64
+	// Heartbeats published, and publishes that failed.
+	heartbeats, heartbeatErrors atomic.Int64
 }
 
 func newFleet(creds []sproutCred, opts fleetOptions) *fleet {
@@ -268,6 +278,13 @@ func (f *fleet) connectOne(i int) error {
 			return err
 		}
 	}
+	// RunSprout's first heartbeat, at connect.
+	if f.opts.HeartbeatInterval > 0 {
+		if err := f.beat(nc, id); err != nil {
+			nc.Close()
+			return err
+		}
+	}
 	// Surface a permissions violation now rather than as a silent drop.
 	if err := nc.FlushTimeout(f.opts.ConnectTimeout); err != nil {
 		nc.Close()
@@ -282,6 +299,70 @@ func (f *fleet) connectOne(i int) error {
 	f.mu.Unlock()
 	f.setLive(i, true)
 	return nil
+}
+
+// beat publishes sprout id's heartbeat on nc, the way heartbeat.RunSprout
+// does: its own subject, the connection's ID as the body.
+func (f *fleet) beat(nc *nats.Conn, id string) error {
+	var body []byte
+	if cid, err := nc.GetClientID(); err == nil {
+		body = []byte(heartbeat.ConnID(nc.ConnectedServerId(), cid))
+	}
+	if err := nc.Publish(pki.SproutHeartbeatSubject(id), body); err != nil {
+		f.heartbeatErrors.Add(1)
+		return err
+	}
+	f.heartbeats.Add(1)
+	return nil
+}
+
+// heartbeatTick is how often startHeartbeats wakes to publish the next
+// share of the fleet's heartbeats.
+const heartbeatTick = 100 * time.Millisecond
+
+// startHeartbeats publishes every connected sprout's heartbeat once per
+// HeartbeatInterval until ctx is done, spread evenly over the interval
+// (each tick takes the heartbeats now due, round robin), so the bus
+// sees the steady rate a fleet that connected over time produces, not a
+// burst per interval. One goroutine for the fleet, not one per sprout,
+// for the reason the subscriptions share a channel. A sprout that is
+// disconnected is skipped, as RunSprout skips a tick; its reconnect is a
+// CONNECT for farmer. It does nothing when HeartbeatInterval is 0.
+func (f *fleet) startHeartbeats(ctx context.Context) {
+	if f.opts.HeartbeatInterval <= 0 || len(f.creds) == 0 {
+		return
+	}
+	tick := min(heartbeatTick, f.opts.HeartbeatInterval)
+	// The fleet's heartbeats per nanosecond: each sprout once per interval.
+	rate := float64(len(f.creds)) / float64(f.opts.HeartbeatInterval)
+	go func() {
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		start := time.Now()
+		next := 0
+		var sent int64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			// Publish what is due since start and not yet sent, so the
+			// rate holds whatever the fleet size (no per-tick minimum)
+			// and a tick the ticker dropped is made up on the next.
+			due := int64(rate * float64(time.Since(start)))
+			for ; sent < due; sent++ {
+				i := next
+				next = (next + 1) % len(f.creds)
+				if !f.live[i].Load() {
+					continue
+				}
+				if nc := f.conn(i); nc != nil {
+					_ = f.beat(nc, f.creds[i].ID)
+				}
+			}
+		}
+	}()
 }
 
 // connectResult is what the connect phase measured.

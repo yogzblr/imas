@@ -53,11 +53,12 @@ no seed is written):
   its own delegated signing key (as `ensureTenantAccountMaterial` builds a
   tenant Account);
 - one **User JWT per sprout**, signed by that signing key, naming the
-  Account as issuer, with the sprout's own grants (a copy of
-  `sproutPermissions`: publish its announce, facts, cook events, box key
-  submission and logs; subscribe to `imas.sprouts.<id>.>`);
-- one **core User** in the same Account with core's per-tenant grants (a
-  copy of `allowAllPermissions`), used by the requesters that play core;
+  Account as issuer, with the sprout's own grants (`pki.SproutPermissions`
+  itself, not a copy: publish its announce, facts, cook events, box key
+  submission, logs, shell frames and heartbeat; subscribe to
+  `imas.sprouts.<id>.>`);
+- one **core User** in the same Account with core's per-tenant grants
+  (`pki.AllowAllPermissions`), used by the requesters that play core;
 - the Account is pushed to the bus as core pushes it: a request on
   `$SYS.REQ.CLAIMS.UPDATE` from a SYS account user. The harness's SYS
   connection pushes it again whenever it reconnects, as core's
@@ -70,20 +71,26 @@ servers ignored, unlimited reconnects with the sprout's full-jitter backoff
 (`internal/natsretry`, same `busreconnectbase` and `busreconnectcap`
 defaults). On connect it does what `natsInit` does on the bus: publishes its
 announce and facts (this host's facts, collected once) and subscribes to the
-same seven subjects. It answers `test.ping` with the sprout's own handler
+same seven subjects. It sends its heartbeat as a sprout does
+(`internal/heartbeat`): on `imas.heartbeat.sprout.<id>` with its
+connection's ID as the body, once at connect and then every
+`-heartbeat-interval` (default `heartbeat.Interval`, one minute; `0` sends
+none). One scheduler spreads the fleet's heartbeats evenly over the
+interval, so the bus sees a steady rate; the report counts them and a run
+fails if none was sent. It answers `test.ping` with the sprout's own handler
 (`test.SPing`) and `facts.request` with the facts; the other five
 subscriptions only carry the bus-side interest, and anything farmer sends
 on them is counted and dropped.
 
 So per connection the bus does the same work as for an enrolled sprout: TLS
 handshake, JWT and nonce verification against the Account's signing key,
-permission load, seven subscriptions.
+permission load, seven subscriptions, and a heartbeat per interval.
 
-The harness checks the copied grants against `internal/pki`'s exported
-helpers in its tests, and a test checks the bus refuses a simulated sprout
-that subscribes to another sprout's subject. A grant added to
-`sproutPermissions` still has to be added to `tools/loadtest/fixture.go`
-by hand: the function is unexported.
+The grants come from the one definition in `internal/pki`
+(`pki.SproutPermissions`), so a grant added there reaches the simulated
+sprouts with no change to the harness; `TestSproutJWTShape` fails if a
+minted JWT's grant differs from it, and a test checks the bus refuses a
+simulated sprout that subscribes to another sprout's subject.
 
 ### Against a deployed bus: the enrolment path
 
@@ -152,15 +159,14 @@ with which probe ran.
 - **Core**: on a local bus no farmer process is in the loop. The
   requesters are a stand-in with core's User shape; core's API, RBAC, PXC
   reads and its queue group are not measured. Against a deployed bus
-  farmer receives the sprouts' announces, facts and CONNECT and DISCONNECT
-  events, but the harness does not measure how it handles them
-  (internal/heartbeat, Valkey).
+  farmer receives the sprouts' announces, facts, heartbeats and CONNECT
+  and DISCONNECT events, but the harness does not measure how it handles
+  them (internal/heartbeat, Valkey).
 - **A realistic tenant Account, on a local bus**: a real tenant's Account
   JWT carries a revocation entry per denied or rejected sprout; the
   fixture's load-test Account carries none, so it is smaller.
 - **Many tenants**: every simulated sprout of a generator is in one
   tenant. Requirement 1's tenant mix is not modelled.
-- **Heartbeats**: the simulated sprouts send none.
 - **Real sprout work**: no cook, `cmd.run`, shell, log shipping or
   self-update traffic. Only the startup publishes and `test.ping`.
 - **Real hosts and networks**: one generator process holds thousands of

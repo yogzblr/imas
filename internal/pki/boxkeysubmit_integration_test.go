@@ -85,7 +85,7 @@ func TestSproutJWT_BoxKeySubmitOwnSubjectOnly(t *testing.T) {
 	}
 }
 
-// A sprout's User JWT minted before sproutPermissions carried the
+// A sprout's User JWT minted before SproutPermissions carried the
 // boxkey.pub grant is re-minted with it on the next sync, which the
 // sprout then picks up through /v1/refresh.
 func TestMintOrReuseUserJWT_AddsBoxKeySubmitGrant(t *testing.T) {
@@ -106,7 +106,7 @@ func TestMintOrReuseUserJWT_AddsBoxKeySubmitGrant(t *testing.T) {
 		return uc.Pub.Allow.Contains(submit)
 	}
 
-	old := sproutPermissions("sprout01")
+	old := SproutPermissions("sprout01")
 	old.Pub.Allow.Remove(submit)
 	if _, err := mintOrReuseUserJWTFile(path, upub, "sprout01", old, mat.tenantPub, mat.tenantSigningKP); err != nil {
 		t.Fatalf("mintOrReuseUserJWT (old permissions) failed: %v", err)
@@ -114,7 +114,7 @@ func TestMintOrReuseUserJWT_AddsBoxKeySubmitGrant(t *testing.T) {
 	if grants() {
 		t.Fatal("JWT minted without the boxkey.pub grant has it")
 	}
-	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", sproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
+	minted, err := mintOrReuseUserJWTFile(path, upub, "sprout01", SproutPermissions("sprout01"), mat.tenantPub, mat.tenantSigningKP)
 	if err != nil {
 		t.Fatalf("mintOrReuseUserJWT (current permissions) failed: %v", err)
 	}
