@@ -7,7 +7,8 @@ that pins it. This document replaces the "Review findings re-checked" section
 that `docs/BUILD-STATUS.md` used to carry.
 
 **How it was checked.** Unit V3, 2026-10-18, against `main` at `798704e`
-(PR #285) plus this unit's change. Each row was verified by reading the code.
+(PR #285) plus this unit's change; the V1 rows (L16, I1, I8, I9, I12) again on
+`main` at `3769442`, after V1 (PR #286) and V3 (PR #287) merged. Each row was verified by reading the code.
 Earlier notes were not taken on trust. Every test named was found in the tree,
 and the whole of `go test ./...` passes with them. The reviews' line numbers
 have drifted, so places are named by file and function. "Ready for review"
@@ -16,9 +17,8 @@ until the human review (BUILD-STATUS P3) records it.
 
 **States.** **Fixed**: the code no longer has the problem. **Accepted**: the
 owner accepted the behaviour, and the row names where that is recorded.
-**Open**: the problem is still on `main`. The only open rows are L16, I1, I8,
-I9 and I12, which unit V1 fixes (brief `docs/briefs/V-leftovers.md`, built in
-parallel with this unit). When V1 merges, its status fragment updates them.
+**Open**: the problem is still on `main`. No row is open: the last ones (L16,
+I1, I8, I9, I12) were fixed by unit V1, PR #286.
 
 ## High and Medium (review 2026-10)
 
@@ -56,7 +56,7 @@ parallel with this unit). When V1 merges, its status fragment updates them.
 | L13 | The bus logged payloads at Trace and Debug | Fixed (ready for review) | T6, PR #277 | `internal/pki/nats.go` `baseNatsOptions`; `cmd/farmerbus/loglevel.go` `parseBusLogLevel` | `TestBusDefaultLogLevelLogsNoPayload`, `TestParseBusLogLevel` (`cmd/farmerbus/singlenode_test.go`); `TestBaseNatsOptionsNoTraceOrDebug` (`internal/pki/nats_loglevel_test.go`, V3) |
 | L14 | A single-node bus served before its SYS JWT; the SaaS API User JWT had no `exp` | Fixed (ready for review) | T6, PR #277 | `cmd/farmerbus/sysgate.go` `sysGate`; `internal/pki/saasapi_user.go` `DefaultSaaSAPIUserJWTTTL` | `TestSingleNodeServesOnlyAfterSysLoaded` (`cmd/farmerbus/singlenode_test.go`); `TestPublishSaaSAPICredential_ExpiresAndIsRefreshed` (`internal/pki/saasapi_publish_test.go`) |
 | L15 | The fence counted any routed peer; cluster size from local config | Fixed (ready for review) | U1, PR #280 | `cmd/farmerbus/fence.go` `memberPeers`, `peerRouteCounts`, `clusterSize` | `TestFenceMemberPeers`, `TestFenceSizeNeverBelowRoutes` (`cmd/farmerbus/fence_size_test.go`); `TestClusterScaleUpPartitionFences`, `TestClusterMixedSizeFences` (`cmd/farmerbus/cluster_integration_test.go`) |
-| L16 | A compromised bus node can plant a future-dated Account JWT that beats later pushes | Open; unit V1 fixes it | V1 (brief `V-leftovers.md`, in parallel) | `internal/accountrank/rank.go` `Rank` has no upper bound on `iat`; `cmd/farmerbus/fence.go` `rank`, `merge` | None for the fix yet: `TestClaimRank` (`cmd/farmerbus/cluster_test.go`) pins "newest `iat` wins"; V1 adds the year-3000 tests |
+| L16 | A compromised bus node can plant a future-dated Account JWT that beats later pushes | Fixed (ready for review) | V1, PR #286 (the bus holds no signing seed since P21, so no residual) | `internal/accountrank/rank.go` `CheckIssuedAt` (more than 5 minutes ahead is refused) in `Rank`, used by `cmd/farmerbus/fence.go`, `internal/accountloader` and `internal/pki/accountpublisher.go` | `TestRankRefusesFutureIssuedAt`, `TestCheckIssuedAt` (`internal/accountrank/rank_test.go`); `TestFenceMergeRefusesFutureDatedJWT` (`cmd/farmerbus/fence_future_test.go`); `TestFutureDatedJWTNotApplied`, `TestSampleCheckReplacesFutureDatedJWTOnNode` (`internal/accountloader/accountloader_test.go`); `TestFutureDatedAccountJWTNeverWins` (`internal/pki/accountpublisher_test.go`) |
 | L17 | OpenBao redirects carried the token and body to any host | Fixed (ready for review) | T5, PR #274 | `internal/openbao/guard.go` `PinTransport` | `TestRedirectToAnotherHostRefused` (`internal/openbao/redirect_test.go`, `internal/ingredients/sdb/openbao/guard_test.go`); `TestPinTransport` (`internal/openbao/guard_test.go`) |
 | L18 | The Kubernetes login client picked up ambient `BAO_NAMESPACE` | Fixed (ready for review) | T5, PR #274 | `internal/openbao/openbao.go` `NewFromEnv` (`newAPIClient`, no `Clone`) | `TestKubernetesLoginIgnoresAmbientVariables` (`internal/openbao/redirect_test.go`); `TestIgnoresAmbientBaoAndVaultVariables` (`internal/openbao/openbao_test.go`) |
 | L19 | An unfollowed 3xx counted as success | Fixed (ready for review) | T5, PR #274 | `internal/openbao/openbao.go` `send`; sprout `provider.go` `request` | `TestUnfollowedRedirectIsAnError` (`internal/openbao/redirect_test.go`); `TestTenantBoxWriteNeeds2xx` (`internal/pki/tenantbox_status_test.go`) |
@@ -71,18 +71,18 @@ parallel with this unit). When V1 merges, its status fragment updates them.
 
 | ID | Finding | State | Fixed in | Where | Pinning tests |
 |---|---|---|---|---|---|
-| I1 | The rollout lease is compared in the application clock; a non-UTC DSN `loc` only warns | Open; unit V1 fixes it | V1 (in parallel) | `internal/saasapi/outbox_lease.go` `claimRowLease`; `internal/saasapi/db.go` `checkDSN` (warns); `internal/pxc/db.go` `OpenDB` (no check) | `TestCheckDSN` (`internal/saasapi/db_test.go`) pins the warning; V1 changes it to a refusal |
+| I1 | The rollout lease is compared in the application clock; a non-UTC DSN `loc` only warns | Fixed (ready for review) | V1, PR #286, by the brief's second option: the lease clock stays the replaceable application clock (`outbox_lease.go`), and a non-UTC `loc` stops the service | `internal/mysqldsn` `RequireUTC`, called by `internal/pxc/db.go` `OpenDB` (farmer) and `internal/saasapi/db.go` `checkDSN`; the chart refuses a non-UTC `database.params` | `TestRequireUTC` (`internal/mysqldsn/mysqldsn_test.go`); `TestOpenDBRefusesNonUTCLoc` (`internal/pxc/db_test.go`); `TestCheckDSN` (`internal/saasapi/db_test.go`, now the refusal); `TestValidationFailures` (`deploy/helm/farmer/chart_test.go`, the "non-UTC loc" cases) |
 | I2 | `http://` OpenBao addresses were accepted | Fixed (ready for review) | T5, PR #274 | `internal/openbao/guard.go` `CheckAddr` (`*_OPENBAO_ALLOW_INSECURE`) | `TestInsecureAddrRefused` (`internal/openbao/redirect_test.go`, `internal/ingredients/sdb/openbao/guard_test.go`); `TestCheckAddr` (`internal/openbao/guard_test.go`) |
 | I3 | With an `https://` proxy, the OpenBao TLS config is used for the proxy session | Fixed (docs) | V3 | `docs/INSTALL.md` "An `https://` proxy and OpenBao" | None: a documentation change. The behaviour is Go's `http.Transport` (`TLSClientConfig` dials an `https` proxy) |
 | I4 | Loose bounds on a hostile repository | Fixed (ready for review) | T1, PR #273 | `internal/ingredients/selfupdate/limits.go`; `internal/config` `DefaultSproutUpdate*` | `TestApply_IndexLimit`, `TestApply_PackageLimits`, `TestApply_BudgetReleasesTheLock` (`internal/ingredients/selfupdate/limits_test.go`) |
 | I5 | Stale `artifact_url` and `no_self_update` text | Fixed | T1, PR #273 (the policy file went with P22, PR #205) | `.goreleaser.yaml`; `cmd/sprout/include.go` always links `selfupdate` | `TestNoSelfUpdateBuildTag` (`packaging/test/buildtags_test.go`, V3); `TestSproutLinksSelfUpdate` (`cmd/sprout/include_test.go`, V3) |
 | I6 | Removed CLI admin keys were never revoked | Fixed (ready for review) | U1, PR #280 | `internal/pki/cliadminkeys.go` `syncCLIAdminKeys`; farmer migration 00007 | `TestRemovedCLIAdminKeyIsRevoked`, `TestUnreadableConfigRevokesNoCLIAdminKey` (`internal/pki/cliadminkeys_test.go`) |
 | I7 | NKey lookup over a non-unique index; a database error spent a join-token use | Fixed (ready for review) | T4, PR #276 | `internal/pki/store.go` `SproutIDAndTenantForNKey`; farmer migration 00006 (`UNIQUE (tenant_id, nkey)`) | `TestEnroll_DatabaseErrorSpendsNoJoinToken` (`internal/pki/deprovisioned_test.go`); `TestMySQLTenantNKeyUnique` (`internal/migrations/farmer/tenant_nkey_unique_test.go`) |
-| I8 | A missing or undecodable Account or SYS JWT is re-minted without its revocations | Open; unit V1 fixes it | V1 (in parallel) | `internal/pki/tenant.go` `ensureTenantAccountMaterial`, `jwtauth.go` `ensureNatsAuth` (since P21 they read the held copy and the accounts bucket, then mint a minimal JWT) | None yet; V1 adds "delete, mint, the revoked sprout stays revoked" |
-| I9 | `PushAllAccounts` after a restore pushes without re-syncing revocations | Open; unit V1 fixes it | V1 (in parallel) | `internal/pki/pushall.go` `PushAllAccounts` (no `syncTenantSprouts`) | None yet; V1 adds the stale-JWT test |
+| I8 | A missing or undecodable Account or SYS JWT is re-minted without its revocations | Fixed (ready for review) | V1, PR #286 | `internal/pki/tenant.go` `applyStoredRevocations` (a minimal mint carries the database's revocations and fails closed naming the tenant); `jwtauth.go` `sysAccountJWTFromTrust` | `TestLostTenantAccountJWTRebuiltFromDatabase`, `TestLostLegacyAccountJWTRebuiltFromDatabase`, `TestLostSysAccountJWTRebuiltFromDatabase`, `TestLostSysAccountJWTStateTableNotYetMigrated` (`internal/pki/revocation_rebuild_test.go`) |
+| I9 | `PushAllAccounts` after a restore pushes without re-syncing revocations | Fixed (ready for review) | V1, PR #286 | `internal/pki/pushall.go` `PushAllAccounts` runs `syncTenantSprouts` for each tenant before it pushes | `TestPushAllAccounts_StaleJWTDoesNotReadmitRevokedSprout` (`internal/pki/pushall_test.go`) |
 | I10 | `JobRef{SproutID, JID}` carries no tenant | Fixed (mitigated by design) | F1, PR #227 (the job-status reader refuses a tenant-less lookup) | `internal/saasapi/job_status.go` `JobOutcomes` (refuses an empty tenant, filters and re-checks `tenant_id`); callers pass the batch's tenant | `TestFarmerJobStatusReader`, `TestFarmerJobStatusReader_RefusesEmptyTenant`, `TestGetSproutActionBatch_TwoTenantsSameSproutAndJID` (`internal/saasapi/job_status_test.go`); `TestFleetUpdate_JobStatusGateRollsOutInWaves` (`internal/saasapi/fleet_update_dispatch_test.go`) |
 | I11 | Route mTLS uses the general root CA | Accepted | In the review itself (mitigated by the SAN and route-password checks) | `cmd/farmerbus/cluster.go` `routeAuth.Check`, `minRoutePasswordLen` | `TestRouteAuth`, `TestRouteListenerRejectsUnauthenticated` (`cmd/farmerbus/cluster_test.go`) |
-| I12 | No body limit on `/v1/enroll`; no directory fsync after the atomic write; a stale comment | Open; unit V1 fixes it | V1 (in parallel) | `internal/api/handlers/enroll.go` (no `MaxBytesReader`); `internal/pki/enrollclient.go` `writeFileAtomic` | None yet; V1 adds them |
+| I12 | No body limit on `/v1/enroll`; no directory fsync after the atomic write; a stale comment | Fixed (ready for review) | V1, PR #286 | `internal/api/handlers/enroll.go` `maxEnrollRequestBytes` (64 KiB, 413 on excess); `internal/pki/enrollclient.go` atomic writes sync the directory after the rename; the `pushall.go` comment corrected | `TestEnroll_BodyLimit` (`internal/api/handlers/enroll_test.go`); `TestAtomicWritesSyncTheDirectory` (`internal/pki/atomicwrite_test.go`) |
 
 ## Review 2026-10-b
 
@@ -128,7 +128,7 @@ submodule), or the item needs a real release, the Azure run or another unit.
 | 7 | Release | `RELEASING.md` step 4 calls the `go-licenses` save a known failure | Done (V3) | `docs/RELEASING.md` step 4: the workflow must be green (it passes since LIC.1) |
 | 8 | Enrolment | Pre-CL.1 sprouts keep the unused `fleetsigningkeys` grant | Done | Farmer re-mints a JWT whose permissions differ from `pki.SproutPermissions`; `internal/pki/sproutjwt_isolation_integration_test.go` |
 | 9 | Enrolment | A sprout uses a changed JWT only after a restart | Done | T3, PR #275: `cmd/sprout` `heartbeatGate`, `pki.SproutBus.ReloadUserJWT` |
-| 10 | Enrolment | Run `syncTenantSprouts` for every tenant at farmer start | Out of scope | Unit V1, finding I9 (`PushAllAccounts` runs it per tenant before pushing) |
+| 10 | Enrolment | Run `syncTenantSprouts` for every tenant at farmer start | Done | V1, PR #286, finding I9: `PushAllAccounts`, which runs on every bus connect including farmer's start, runs it per tenant before pushing |
 | 11 | Deleted sprouts | User JWTs have no `exp`, so the revoked list only grows | Decided | Revocation is carried in each Account JWT (H1, SEC.3a). Rows of deleted sprouts are erased with the tenant (S6) |
 | 12 | Deleted sprouts | A deleted sprout's stored JWT stays behind | Done (V3) | `internal/pki` `DeleteNKey` now also deletes the sprout's stored User JWT row and its object (`forgetSproutUserJWT`) |
 | 13 | Deleted sprouts | Envoy can't see revocation; a retired host's gateway JWT costs farmer a lookup | Decided | Accepted in `docs/security-review-pack.md` 3.5 item 2 (P3 walkthrough, 2026-10-17); farmer refuses it (SEC.7c) |
@@ -185,7 +185,7 @@ batches:
 | L12 | `internal/api/handlers/pki_test.go` filed an unproven NKey | Changed (T6): `TestPutNKey_RefusesWithoutProofOfPossession` |
 | L20 | `rotation_test.go` dropped the token by hand | Changed (T5): `TestCertRotationWhileRunning` fails unless the reload drops it |
 | L22 | `TestTenantKeyContinuity_SkipsDeletedVersions` | Changed (U1): `TestTenantKeyContinuity_GapStopsTheWalk` and `_DeletingTheSeveringVersionKeepsTheCut` |
-| I1 | `TestCheckDSN` accepts a non-UTC `loc` with a warning | Unchanged on `main`: unit V1 makes it a refusal and changes the test |
+| I1 | `TestCheckDSN` accepts a non-UTC `loc` with a warning | Changed (V1, PR #286): `TestCheckDSN` requires the refusal; `TestOpenDBRefusesNonUTCLoc` and `TestRequireUTC` pin farmer's side |
 | I2 | Tests accepted `http://` | Changed (T5): they set `*_OPENBAO_ALLOW_INSECURE=true`, and `TestInsecureAddrRefused` pins the refusal |
 | Error codes | `TestItemErrorCodesDocumented` iterated only the message map | Closed (T2): it derives the stored codes from the source |
 | B4 | Nothing tested `maxRecipeIncludes` | Closed (S4): `internal/cook/cook_budget_test.go` |
@@ -196,5 +196,5 @@ batches:
 | P4 | Other re-signs could tie on `iat` | Closed (T2): `TestEveryAccountResignWaitsPastIssuedAt`, `TestEveryResignAdvancesIat` |
 | L13 | The test turned Trace and Debug off itself | Closed (T6): `TestBusDefaultLogLevelLogsNoPayload`. V3 adds `TestBaseNatsOptionsNoTraceOrDebug` for the bus defaults |
 
-Gaps left: none that a test can close. The findings without a pinning test
-are documentation changes (L7, I3), or are V1's (L16, I1, I8, I9, I12).
+Gaps left: none that a test can close. The only findings without a pinning
+test are documentation changes (L7, I3).
