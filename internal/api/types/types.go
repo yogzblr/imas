@@ -33,6 +33,12 @@ type (
 		// StreamTopic, when set, enables live output streaming over NATS.
 		// Each chunk of stdout/stderr is published to this topic as JSON.
 		StreamTopic string `json:"stream_topic,omitempty"`
+		// NoOutput asks the sprout to leave Stdout and Stderr out of its
+		// sealed reply: only the exit code and duration come back.
+		// Farmer sets it for internal.sprout.action, whose caller (the
+		// SaaS API) reads only the exit code (security review 2026-10,
+		// L9); the CLI's cmd.run never sets it.
+		NoOutput bool `json:"no_output,omitempty"`
 
 		Stdout   string        `json:"stdout"`
 		Stderr   string        `json:"stderr"`

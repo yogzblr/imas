@@ -376,12 +376,18 @@ func TestSproutAction_CmdRunThroughRealHandler(t *testing.T) {
 	if reply.Status != controlplane.StatusCompleted || reply.ErrorCode != "" || reply.Result == nil {
 		t.Fatalf("unexpected reply %+v", reply)
 	}
-	if *reply.Result != (controlplane.CmdRunResult{Stdout: "up 3 days", Stderr: "warn", ExitCode: 3, Duration: time.Second}) {
+	// The exit code and duration only (L9): the stub answers with output
+	// as a sprout too old for NoOutput would, and none of it reaches the
+	// reply.
+	if *reply.Result != (controlplane.CmdRunResult{ExitCode: 3, Duration: time.Second}) {
 		t.Fatalf("result = %+v", *reply.Result)
 	}
+	if b, _ := json.Marshal(reply); strings.Contains(string(b), "up 3 days") || strings.Contains(string(b), "warn") {
+		t.Fatalf("the reply carries the command's output: %s", b)
+	}
 	gotMu.Lock()
-	if got.Command != "uptime" || len(got.Args) != 1 || got.Args[0] != "-p" {
-		t.Fatalf("sprout received %+v", got)
+	if got.Command != "uptime" || len(got.Args) != 1 || got.Args[0] != "-p" || !got.NoOutput {
+		t.Fatalf("sprout received %+v; want the command with NoOutput set", got)
 	}
 	gotMu.Unlock()
 

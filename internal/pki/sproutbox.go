@@ -120,8 +120,9 @@ var ErrSproutBoxKeyRotationTooSoon = errors.New("pki: the previous box key rotat
 // that promoted the new key was issued after farmer recorded it and at
 // most DefaultMaxSkew ahead of the sprout's clock at promotion, so
 // anything sealed to the old key is stale within 2*DefaultMaxSkew of
-// promotion. (A continuity proof in a refresh response carries no
-// IssuedAt, but is opened as soon as the HTTP response arrives.)
+// promotion. (A continuity proof in a refresh response carries an
+// IssuedAt like any farmer payload, and is refused outside the same
+// window and as a replay, verifyTenantKeyContinuity.)
 //
 // The default, config.DefaultSproutBoxKeyPrevGrace, is one more
 // DefaultMaxSkew, as margin for farmer replicas' clocks disagreeing with
@@ -716,9 +717,16 @@ func reconcileTenantKeyPin(sproutID, pub string, continuity json.RawMessage) err
 }
 
 // verifyTenantKeyContinuity opens proof under the pinned tenant key and
-// this sprout's box keys and checks it names pub. Farmer seals the proof
-// to the sprout's active box key, which may be the pending one; a proof
-// that opens under it promotes it, as any farmer payload would.
+// this sprout's box keys and checks it names pub, and that it is fresh and
+// not a replay: its IssuedAt inside payloadbox.DefaultMaxSkew of the
+// sprout's clock, the window every other sealed farmer message gets, and
+// its ID accepted by the persisted replay guard (sproutGuard). Farmer
+// mints a proof per refresh response, so an honest one always passes. An
+// old proof (say K1 to K2, recorded before K2 leaked and farmer severed
+// it) replayed in a forged refresh response is refused, and the sprout
+// stays pinned where it is (security review 2026-10, L23). Farmer seals
+// the proof to the sprout's active box key, which may be the pending one;
+// a proof that opens under it promotes it, as any farmer payload would.
 func verifyTenantKeyContinuity(sproutID, pub string, proof json.RawMessage) error {
 	msg, pendingPub, err := openAsSprout(sproutID, payloadbox.PurposeTenantKeyContinuity, proof)
 	if err != nil {
@@ -732,7 +740,7 @@ func verifyTenantKeyContinuity(sproutID, pub string, proof json.RawMessage) erro
 	if body.To != pub {
 		return errors.New("proof names a different tenant key")
 	}
-	return nil
+	return sproutGuard().Accept(msg)
 }
 
 // enrollProofBody is the body of an enrollment proof of possession

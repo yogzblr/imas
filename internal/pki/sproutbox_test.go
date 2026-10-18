@@ -301,6 +301,81 @@ func TestReconcileTenantKeyPin_RejectsBadProofs(t *testing.T) {
 	}
 }
 
+// A continuity proof is accepted only inside the freshness window of every
+// other sealed farmer message, and once (security review 2026-10, L23).
+// The attack: a sprout pinned to K1 is offline while the tenant rotates to
+// K2; someone records the genuine K1-to-K2 proof; K2 leaks and is severed
+// (K3). Replayed in a forged refresh response when the sprout comes back,
+// the old proof must not re-pin it to the leaked K2.
+func TestReconcileTenantKeyPin_RefusesStaleAndReplayedProofs(t *testing.T) {
+	enrollForTest(t)
+	k1 := pinnedTenantKey(t)
+	sproutPub, err := EnsureSproutBoxKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp, _ := DecodeBoxPubKey(sproutPub)
+	k2, err := RotateTenantX25519Keypair("t_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := loadTenantKeySet("t_1")
+	if err != nil || len(set.previous) != 1 {
+		t.Fatalf("key set after one rotation: %+v, %v", set, err)
+	}
+	k1Priv := set.previous[0].priv
+	// The proof farmer handed out for K1 -> K2, issued at the given time.
+	proofAt := func(issued time.Time) json.RawMessage {
+		t.Helper()
+		msg, err := payloadbox.NewMessage(payloadbox.PurposeTenantKeyContinuity, "t_1", "web-01", "", tenantKeyContinuityBody{To: k2.Pub})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg.IssuedAt = issued.Unix()
+		data, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: sp, Priv: k1Priv}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	recorded := proofAt(time.Now().Add(-payloadbox.DefaultMaxSkew - time.Minute))
+	if _, err := RotateTenantX25519Keypair("t_1", true); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, proof := range map[string]json.RawMessage{
+		"recorded before the sever": recorded,
+		"issued in the future":      proofAt(time.Now().Add(payloadbox.DefaultMaxSkew + time.Minute)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := reconcileTenantKeyPin("web-01", k2.Pub, proof); !errors.Is(err, ErrTenantKeyMismatch) {
+				t.Errorf("reconcileTenantKeyPin = %v, want ErrTenantKeyMismatch", err)
+			}
+			if pinnedTenantKey(t) != k1 {
+				t.Error("the pin moved to the severed key")
+			}
+		})
+	}
+
+	// A fresh proof moves the pin once; the same proof again is a replay.
+	fresh := proofAt(time.Now())
+	if err := reconcileTenantKeyPin("web-01", k2.Pub, fresh); err != nil {
+		t.Fatalf("a fresh proof was refused: %v", err)
+	}
+	if pinnedTenantKey(t) != k2.Pub {
+		t.Fatal("a fresh proof didn't move the pin")
+	}
+	if err := os.WriteFile(config.SproutTenantX25519PubFile, []byte(k1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileTenantKeyPin("web-01", k2.Pub, fresh); !errors.Is(err, ErrTenantKeyMismatch) {
+		t.Errorf("replayed proof: reconcileTenantKeyPin = %v, want ErrTenantKeyMismatch", err)
+	}
+	if pinnedTenantKey(t) != k1 {
+		t.Error("a replayed proof moved the pin")
+	}
+}
+
 // The sprout's seal/open against farmer's: a request farmer seals opens
 // once on the sprout and never again; the sprout's reply opens on farmer.
 func TestSproutBox_RoundTripWithFarmer(t *testing.T) {

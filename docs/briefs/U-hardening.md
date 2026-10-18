@@ -61,6 +61,31 @@ Scope: `cmd/farmerbus` (fence), `internal/pki` (`tenantbox.go`, `sproutbox.go`,
 - **I6.** Removing a CLI admin key revokes it (its NKey is rejected and the
   Account is re-signed), with a test.
 
+Brief corrections (U1, as built):
+
+- L9: the `internal.sprout.action` reply has been sealed to the SaaS API
+  since J.4 (`f2a.sprout.action`), so the output was sent for nothing, not
+  in plaintext. `controlplane.CmdRunResult` drops its `Stdout` and
+  `Stderr` fields rather than leaving them empty, and farmer asks the
+  sprout to leave the output out (`no_output`), so it never leaves the
+  host on this path.
+- L15: `Routes` are URLs and a routed peer is known by its server ID and
+  name, so "a peer in the configured Routes" is a peer whose server name
+  is the first DNS label of one of the route hosts (the chart's pod name
+  and per-pod headless name). farmerbus now refuses IP route hosts, two
+  hosts sharing a first label, and a server name none of its routes
+  carries. A peer's cluster size is its configured route count, read from
+  its `VARZ`, which every nats-server answers.
+- L22: recording the boundary in KV `custom_metadata` needs `update` on
+  `<kvPath>/tenants/+` metadata in farmer's `imas-farmer-tenantbox`
+  policy (`deploy/helm/farmer`), not only `internal/pki`.
+- I6: since J.3 the CLI's admins are `users.admin` entries (the legacy
+  `pubkeys.admin` list no longer works for the CLI), so both count as CLI
+  admin keys. Remembering which keys were granted needs a table: farmer
+  migration 00007 (`pki_cli_admin_keys`, `internal/migrations`), added to
+  the tenant erasure inventory (`internal/tenantpurge`), and two helpers
+  in `internal/auth` (`ConfigAdminKeys`, `IsCurrentUser`).
+
 ## U2: tenant key fingerprint in the join token (L24)
 
 Scope: `internal/pki` enrolment (server side, `enrollclient.go`), the join-token

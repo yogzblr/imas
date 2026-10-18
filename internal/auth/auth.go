@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/nats-io/nkeys"
@@ -385,6 +386,98 @@ func extractStringSlice(v any) []string {
 	default:
 		return nil
 	}
+}
+
+// ConfigAdminKeys re-reads farmer's config file and returns every NKey it
+// names as an admin (AdminRoleName): the legacy pubkeys.admin list and
+// the users.admin entries, plain or {pubkey: ...}, each once, sorted. An
+// error means the file couldn't be read or an admin entry doesn't parse;
+// a config with no admin at all is (nil, nil). internal/pki grants these
+// on the tenant Account and revokes one that leaves the list (security
+// review 2026-10, I6).
+func ConfigAdminKeys() ([]string, error) {
+	if err := jety.ReadInConfig(); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	if v, ok := jety.GetStringMap("pubkeys")[AdminRoleName]; ok {
+		switch k := v.(type) {
+		case string:
+			seen[k] = true
+		case []any:
+			for _, item := range k {
+				str, ok := item.(string)
+				if !ok {
+					return nil, ErrInvalidPubkey
+				}
+				seen[str] = true
+			}
+		default:
+			return nil, ErrInvalidPubkey
+		}
+	}
+	if v, ok := jety.GetStringMap("users")[AdminRoleName]; ok {
+		items, ok := v.([]any)
+		if !ok {
+			return nil, ErrInvalidPubkey
+		}
+		for _, it := range items {
+			switch e := it.(type) {
+			case string:
+				seen[e] = true
+			case map[string]any:
+				pk, _ := e["pubkey"].(string)
+				if pk == "" {
+					return nil, ErrInvalidPubkey
+				}
+				seen[pk] = true
+			default:
+				return nil, ErrInvalidPubkey
+			}
+		}
+	}
+	delete(seen, "")
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys, nil
+}
+
+// IsCurrentUser reports whether pubkey is a user as farmer's config reads
+// now, under any role (the users section, plain or {pubkey: ...}
+// entries, or the legacy pubkeys section), or as the users store holds
+// it. Unlike UserIdentity it doesn't go through the policy loaded at
+// start, so a key taken out of the config before a SIGHUP is no user
+// here (internal/pki's CLI admin key revocation, security review
+// 2026-10, I6). The caller re-reads the config first (ConfigAdminKeys).
+func IsCurrentUser(pubkey string) (bool, error) {
+	for _, v := range jety.GetStringMap("pubkeys") {
+		if containsKey(extractStringSlice(v), pubkey) {
+			return true, nil
+		}
+	}
+	for _, v := range jety.GetStringMap("users") {
+		items, _ := v.([]any)
+		for _, it := range items {
+			switch e := it.(type) {
+			case string:
+				if e == pubkey {
+					return true, nil
+				}
+			case map[string]any:
+				if pk, _ := e["pubkey"].(string); pk == pubkey {
+					return true, nil
+				}
+			}
+		}
+	}
+	if db == nil {
+		return false, nil
+	}
+	_, _, found, err := RegisteredUser(usersTenantID(), pubkey)
+	return found, err
 }
 
 // ListAllUsers returns all configured users as a map of pubkey → role name.

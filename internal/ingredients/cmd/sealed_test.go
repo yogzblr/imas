@@ -207,6 +207,30 @@ func TestSealedCmdRun_RoundTripHidesCommandAndOutputFromTheBus(t *testing.T) {
 	}
 }
 
+// NoOutput (farmer's internal.sprout.action, security review 2026-10,
+// L9): the sprout runs the command and sends back its exit code, never
+// its stdout or stderr; the CLI's request, without it, gets the output.
+func TestSealedCmdRun_NoOutputLeavesTheOutputOnTheSprout(t *testing.T) {
+	e := setupSealed(t, "t_sealed_noout")
+	run := func(noOutput bool) apitypes.CmdRun {
+		t.Helper()
+		res, err := FRun(e.tenant, pki.KeyManager{SproutID: e.sproutID}, apitypes.CmdRun{
+			Command: "sh", Args: []string{"-c", "echo out-7d1a; echo err-7d1a >&2; exit 3"},
+			Timeout: 5 * time.Second, NoOutput: noOutput,
+		})
+		if err != nil {
+			t.Fatalf("FRun(NoOutput=%t): %v", noOutput, err)
+		}
+		return res
+	}
+	if res := run(true); res.Stdout != "" || res.Stderr != "" || res.ErrCode != 3 {
+		t.Fatalf("with NoOutput: %+v; want exit code 3 and no output", res)
+	}
+	if res := run(false); strings.TrimSpace(res.Stdout) != "out-7d1a" || strings.TrimSpace(res.Stderr) != "err-7d1a" || res.ErrCode != 3 {
+		t.Fatalf("without NoOutput: %+v; want the output and exit code 3", res)
+	}
+}
+
 func TestSealedCmdRun_SproutRefusesPlaintext(t *testing.T) {
 	e := setupSealed(t, "t_sealed_plain")
 	marker := filepath.Join(e.dir, "ran")

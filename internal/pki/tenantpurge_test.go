@@ -131,6 +131,9 @@ func TestPurgeTenant_ErasesOneTenantOnly(t *testing.T) {
 		if err := db.Exec("INSERT INTO pki_revoked_nkeys (tenant_id, nkey, sprout_id, revoked_at) VALUES (?, 'UOLD', 'web-01', 1)", tenant).Error; err != nil {
 			t.Fatal(err)
 		}
+		if err := db.Exec("INSERT INTO pki_cli_admin_keys (tenant_id, nkey, granted_at) VALUES (?, 'UADMIN', 1)", tenant).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	jwtB, _ := sproutUserJWTForTest("t_b", "web-01")
 	before := tenantRows(t, "t_b")

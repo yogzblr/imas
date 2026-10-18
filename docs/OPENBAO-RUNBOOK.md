@@ -197,8 +197,10 @@ Just before the Transit keys, farmer deletes the tenant's
 payload-encryption keypair in KV v2 (`internal/pki`
 `PurgeTenantBoxKeys`), every version and its metadata, with its
 tenantbox token, which has `delete` on that
-metadata path and nothing else there (`farmer.openbao.tenantBox` mount
-and path; the defaults shown):
+metadata path, and `update` there for the sever boundary a severing
+rotation records in `custom_metadata` (`imas_sever_floor`), and nothing
+else there (`farmer.openbao.tenantBox` mount and path; the defaults
+shown):
 
 ```sh
 bao kv metadata delete -mount=secret imas/tenant-x25519/tenants/<tenant_id>   # 204, also when already gone

@@ -400,9 +400,12 @@ type SproutActionReply struct {
 // CmdRunResult is what a sprout reported for a cmd.run. A non-zero
 // ExitCode is still StatusCompleted: the action ran; whether the command
 // succeeded is the caller's call.
+//
+// It carries no stdout or stderr: the SaaS API reads only the exit code,
+// so farmer asks the sprout to leave the output out of its sealed reply
+// (apitypes.CmdRun.NoOutput) and copies none of it here (security review
+// 2026-10, L9). However much a command prints, this reply stays small.
 type CmdRunResult struct {
-	Stdout   string        `json:"stdout"`
-	Stderr   string        `json:"stderr"`
 	ExitCode int           `json:"exit_code"`
 	Duration time.Duration `json:"duration"`
 }

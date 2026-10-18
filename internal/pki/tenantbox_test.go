@@ -358,28 +358,179 @@ func TestRotateTenantX25519Keypair_SeverCutsGraceAndContinuity(t *testing.T) {
 	}
 }
 
-// Deleting a version in OpenBao retires it: no continuity from it.
-func TestTenantKeyContinuity_SkipsDeletedVersions(t *testing.T) {
+// Deleting a version in OpenBao retires it and every version before it:
+// a gap in the chain stops the continuity walk (security review 2026-10,
+// L22). It used to be skipped, so v1 still signed a proof past a deleted
+// v2.
+func TestTenantKeyContinuity_GapStopsTheWalk(t *testing.T) {
 	srv := setupTenantBoxOpenBao(t)
 	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
 
 	v1, _ := GetTenantX25519PublicKey("t_1")
 	v2, _ := RotateTenantX25519Keypair("t_1", false)
 	v3, _ := RotateTenantX25519Keypair("t_1", false)
+	v4, _ := RotateTenantX25519Keypair("t_1", false)
 	srv.Delete(tenantboxtest.TenantPath("t_1"), 2)
 	resetTenantX25519KeypairCache()
 
 	proof, err := TenantKeyContinuity("t_1", "web-01", b64(sproutPub))
+	if err != nil || proof == nil {
+		t.Fatalf("continuity from v3: %s, %v", proof, err)
+	}
+	v3Pub, _ := DecodeBoxPubKey(v3.Pub)
+	if to, err := openContinuity(t, proof, v3Pub, sproutPriv, "web-01"); err != nil || to != v4.Pub {
+		t.Errorf("continuity from v3, after the gap: %q, %v; want %q", to, err, v4.Pub)
+	}
+	for name, pub := range map[string]string{"the deleted v2": v2.Pub, "v1, before the gap": v1} {
+		k, _ := DecodeBoxPubKey(pub)
+		if _, err := openContinuity(t, proof, k, sproutPriv, "web-01"); err == nil {
+			t.Errorf("continuity from %s", name)
+		}
+	}
+}
+
+// The review's scenario: v1 leaks, v2 is written with sever, v3 is an
+// ordinary rotation, and the operator deletes v2. v1 must stay cut off:
+// it signs no proof, and it isn't among the keys farmer opens with.
+func TestTenantKeyContinuity_DeletingTheSeveringVersionKeepsTheCut(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	withTenantBoxGrace(t, time.Hour)
+	path := tenantboxtest.TenantPath("t_1")
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+
+	v1, _ := GetTenantX25519PublicKey("t_1")
+	if _, err := RotateTenantX25519Keypair("t_1", true); err != nil {
+		t.Fatal(err)
+	}
+	v3, err := RotateTenantX25519Keypair("t_1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	v1Pub, _ := DecodeBoxPubKey(v1)
-	if to, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-01"); err != nil || to != v3.Pub {
-		t.Errorf("continuity from v1 past a deleted v2: %q, %v", to, err)
+	versions := srv.Versions(path)
+	if versions[1].Data[tenantBoxSeverFloorField] != "2" || versions[2].Data[tenantBoxSeverFloorField] != "2" {
+		t.Fatalf("sever_floor in v2, v3 = %q, %q; want 2 in both (the boundary is carried forward)",
+			versions[1].Data[tenantBoxSeverFloorField], versions[2].Data[tenantBoxSeverFloorField])
 	}
-	v2Pub, _ := DecodeBoxPubKey(v2.Pub)
-	if _, err := openContinuity(t, proof, v2Pub, sproutPriv, "web-01"); err == nil {
-		t.Error("continuity from a deleted version")
+	if got := srv.CustomMetadata(path)[tenantBoxSeverFloorMeta]; got != "2" {
+		t.Fatalf("custom_metadata %s = %q, want 2", tenantBoxSeverFloorMeta, got)
+	}
+
+	srv.Delete(path, 2)
+	resetTenantX25519KeypairCache()
+	set, err := loadTenantKeySet("t_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range set.previous {
+		if b64(p.pub) == v1 {
+			t.Fatal("v1 is a predecessor again after the severing version was deleted")
+		}
+	}
+	proof, err := TenantKeyContinuity("t_1", "web-01", b64(sproutPub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof != nil {
+		v1Pub, _ := DecodeBoxPubKey(v1)
+		if _, err := openContinuity(t, proof, v1Pub, sproutPriv, "web-01"); err == nil {
+			t.Fatal("continuity from the leaked v1 after deleting the severing v2")
+		}
+	}
+	keys, _ := TenantBoxKeys("t_1")
+	if len(keys) != 1 || b64(keys[0].Pub) != v3.Pub {
+		t.Errorf("TenantBoxKeys = %+v, want only v3", keys)
+	}
+}
+
+// Each copy of the boundary holds on its own. Data: a severing version
+// that somehow lost its severed mark is still the floor the current
+// version records. custom_metadata: a current version written by hand,
+// without the field, still stops at the floor in the metadata.
+func TestTenantKeyContinuity_RecordedFloorStopsTheWalk(t *testing.T) {
+	path := tenantboxtest.TenantPath("t_1")
+	for name, tc := range map[string]struct {
+		currentData map[string]string
+		meta        map[string]string
+	}{
+		"in the current version's data": {currentData: map[string]string{tenantBoxSeverFloorField: "2"}},
+		"in custom_metadata":            {meta: map[string]string{tenantBoxSeverFloorMeta: "2"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := setupTenantBoxOpenBao(t)
+			v1, _ := srv.SeedKeypair(t, path, nil)
+			v2, _ := srv.SeedKeypair(t, path, nil)
+			srv.SeedKeypair(t, path, tc.currentData)
+			if tc.meta != nil {
+				srv.SetCustomMetadata(path, tc.meta)
+			}
+			set, err := loadTenantKeySet("t_1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(set.previous) != 1 || *set.previous[0].pub != *v2 {
+				t.Fatalf("previous = %d keys; want only v2, the recorded floor", len(set.previous))
+			}
+			for _, p := range set.previous {
+				if *p.pub == *v1 {
+					t.Fatal("the walk went below the recorded floor")
+				}
+			}
+		})
+	}
+}
+
+// A boundary that doesn't parse fails the read, rather than reading as
+// "never severed".
+func TestTenantKeySet_DamagedFloorFailsClosed(t *testing.T) {
+	path := tenantboxtest.TenantPath("t_1")
+	srv := setupTenantBoxOpenBao(t)
+	srv.SeedKeypair(t, path, map[string]string{tenantBoxSeverFloorField: "two"})
+	if _, err := loadTenantKeySet("t_1"); !errors.Is(err, ErrTenantBoxReadFailed) {
+		t.Errorf("damaged sever_floor: %v, want ErrTenantBoxReadFailed", err)
+	}
+	resetTenantX25519KeypairCache()
+	srv.SeedKeypair(t, path, nil)
+	srv.SetCustomMetadata(path, map[string]string{tenantBoxSeverFloorMeta: "-1"})
+	if _, err := loadTenantKeySet("t_1"); !errors.Is(err, ErrTenantBoxReadFailed) {
+		t.Errorf("damaged custom_metadata floor: %v, want ErrTenantBoxReadFailed", err)
+	}
+}
+
+// The custom_metadata copy keeps the secret's other custom_metadata, and
+// a failed write doesn't fail the rotation (the new version's data holds
+// the boundary) and is written by the next rotation.
+func TestRotateTenantX25519Keypair_SeverFloorMetadata(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	path := tenantboxtest.TenantPath("t_1")
+	if _, err := GetTenantX25519PublicKey("t_1"); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetCustomMetadata(path, map[string]string{"owner": "team-a"})
+	resetTenantX25519KeypairCache()
+
+	srv.FailMetadataWrites = 1
+	if _, err := RotateTenantX25519Keypair("t_1", true); err != nil {
+		t.Fatalf("a severing rotation whose metadata write failed: %v", err)
+	}
+	if got := srv.Versions(path)[1].Data[tenantBoxSeverFloorField]; got != "2" {
+		t.Fatalf("v2 sever_floor = %q, want 2", got)
+	}
+	if _, ok := srv.CustomMetadata(path)[tenantBoxSeverFloorMeta]; ok {
+		t.Fatal("the failed metadata write was recorded")
+	}
+	if _, err := RotateTenantX25519Keypair("t_1", false); err != nil {
+		t.Fatal(err)
+	}
+	meta := srv.CustomMetadata(path)
+	if meta[tenantBoxSeverFloorMeta] != "2" || meta["owner"] != "team-a" {
+		t.Fatalf("custom_metadata after the next rotation = %v; want the floor 2 and the owner kept", meta)
+	}
+	writes := srv.MetadataWrites
+	if _, err := RotateTenantX25519Keypair("t_1", false); err != nil {
+		t.Fatal(err)
+	}
+	if srv.MetadataWrites != writes {
+		t.Error("a rotation rewrote custom_metadata that already held the floor")
 	}
 }
 

@@ -785,3 +785,51 @@ func TestConfigAdminRoleNotReplaced(t *testing.T) {
 		t.Error("the config file's own admin role was replaced by the built-in one")
 	}
 }
+
+// --- IsCurrentUser ---
+
+// IsCurrentUser reads the config as it is now, under any role and in
+// either section, and the users store.
+func TestIsCurrentUser(t *testing.T) {
+	setupJetyForTest(t)
+	defer clearJetyKeys(t)
+
+	jety.Set("pubkeys", map[string]interface{}{"operator": []interface{}{"ULEGACY"}})
+	jety.Set("users", map[string]interface{}{"admin": []interface{}{"UPLAIN", map[string]interface{}{"pubkey": "UMAP", "username": "ops"}}})
+	if err := registerUser(usersTenantID(), "UREGISTERED", "admin", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]bool{"ULEGACY": true, "UPLAIN": true, "UMAP": true, "UREGISTERED": true, "UGONE": false} {
+		if got, err := IsCurrentUser(key); err != nil || got != want {
+			t.Errorf("IsCurrentUser(%s) = %v, %v; want %v", key, got, err, want)
+		}
+	}
+}
+
+// --- ConfigAdminKeys ---
+
+func TestConfigAdminKeys(t *testing.T) {
+	setupJetyForTest(t)
+	defer clearJetyKeys(t)
+
+	if keys, err := ConfigAdminKeys(); err != nil || len(keys) != 0 {
+		t.Fatalf("no admins: %v, %v; want none and no error", keys, err)
+	}
+	jety.Set("pubkeys", map[string]interface{}{"admin": []interface{}{"UB", "UA"}, "operator": []interface{}{"UOP"}})
+	jety.Set("users", map[string]interface{}{
+		"admin":    []interface{}{"UC", map[string]interface{}{"pubkey": "UA", "boxpub": "x"}},
+		"operator": []interface{}{"UOP2"},
+	})
+	keys, err := ConfigAdminKeys()
+	if err != nil || strings.Join(keys, ",") != "UA,UB,UC" {
+		t.Fatalf("ConfigAdminKeys = %v, %v; want UA,UB,UC", keys, err)
+	}
+	jety.Set("users", map[string]interface{}{"admin": []interface{}{map[string]interface{}{"username": "no key"}}})
+	if _, err := ConfigAdminKeys(); !errors.Is(err, ErrInvalidPubkey) {
+		t.Errorf("an admin entry without a pubkey: %v, want ErrInvalidPubkey", err)
+	}
+	jety.SetConfigFile(filepath.Join(t.TempDir(), "missing.toml"))
+	if _, err := ConfigAdminKeys(); err == nil {
+		t.Error("an unreadable config read as no admins")
+	}
+}

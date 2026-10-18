@@ -221,7 +221,11 @@ Accepted, Fix needed (with a note) or Not applicable.
    destroy another client's Transit key"); farmer's object store user can
    delete in the sprout JWT bucket; farmer's tenantbox policy can delete a
    tenant's KV keypair whole (`delete` on `<kvPath>/tenants/+` metadata
-   only, never the platform keypair). FLAG FOR SECURITY REVIEW.
+   only, never the platform keypair), and since U1 update that metadata
+   (`update`: the sever boundary in `custom_metadata`; it also lets
+   farmer change the secret's `max_versions` and `delete_version_after`,
+   but can't create metadata for a tenant with no keypair). FLAG FOR
+   SECURITY REVIEW.
 4. The fence in the clustered bus fails closed (SCALE.2).
 
 ### 3.7 UAT and Azure credentials (UAT.1, UAT.6, UAT.12, UAT.13, R1, H1 to H6)

@@ -226,7 +226,7 @@ func startBus(opts nats_server.Options, setup busSetup) (*busNode, error) {
 			return nil, err
 		}
 		size := newClusterSize(cl.Size(), os.Getenv(envClusterSizeFile), os.ReadFile)
-		f = newFence(size.get, setup.Timing)
+		f = newFence(size.get, newFenceMembers(cl.Members, cl.Size()), setup.Timing)
 		if err := f.install(&opts); err != nil {
 			return nil, err
 		}

@@ -88,7 +88,8 @@ func (tenantRow) TableName() string { return "pki_tenants" }
 
 // revokedNKeyRow is the `pki_revoked_nkeys` table: every sprout NKey a
 // tenant has revoked for good by deleting or replacing its sprout
-// (retireSproutTx). FLAG FOR SECURITY REVIEW (security review 2026-10,
+// (retireSproutTx), and every CLI admin NKey removed from farmer's config
+// (revokeCLIAdminKey, sprout_id empty; security review 2026-10, I6). FLAG FOR SECURITY REVIEW (security review 2026-10,
 // H1). Account revocations used to be rebuilt only from pki_nkeys rows in
 // unaccepted, denied or rejected, so a deleted row was never revoked and
 // its User JWT, which has no exp, stayed valid. This list remembers what
@@ -114,7 +115,8 @@ func (revokedNKeyRow) TableName() string { return "pki_revoked_nkeys" }
 // Models returns the GORM models this package owns, for callers assembling
 // a single AutoMigrate call across the whole farmer schema (see
 // cmd/farmer/main.go and internal/pxc). sproutBoxKeyRow is workstream J's
-// (boxkeys.go); tenantRow is this workstream's; revokedNKeyRow is SEC.3a's.
+// (boxkeys.go); tenantRow is this workstream's; revokedNKeyRow is SEC.3a's;
+// cliAdminKeyRow is U1's (cliadminkeys.go).
 // The schema itself comes from internal/migrations' farmer set, whose
 // tests check it against these models.
 //
@@ -123,7 +125,7 @@ func (revokedNKeyRow) TableName() string { return "pki_revoked_nkeys" }
 // internal/pxc's Models, which farmer's tests and the migration parity
 // test use. SetDB installs auth's handle for the same reason.
 func Models() []any {
-	return append([]any{&nkeyRow{}, &tenantRow{}, &sproutBoxKeyRow{}, &revokedNKeyRow{}}, auth.Models()...)
+	return append([]any{&nkeyRow{}, &tenantRow{}, &sproutBoxKeyRow{}, &revokedNKeyRow{}, &cliAdminKeyRow{}}, auth.Models()...)
 }
 
 // db is the shared farmer-schema GORM handle. Nil until SetDB is called.

@@ -409,6 +409,12 @@ two nodes would stop both. When `replicaCount > 1` the chart renders:
   `IMAS_BUS_CLUSTER_ROUTES` changes. `kubectl scale` and an HPA are
   unsupported (the routes would not follow) but fail closed.
 
+Each route host must be a DNS name whose first label is that node's
+server name (`IMAS_BUS_SERVER_NAME`), as the chart renders them: the fence
+counts a routed peer only if its server name is one of its own routes'
+first labels, and farmerbus refuses to start with an IP route, two hosts
+sharing a first label, or a server name none of its routes carries.
+
 The shape follows `docs/design/imas-1m-scale-plan.md` Phase 2: a
 full-mesh core-NATS cluster with the "full" account resolver. Nothing
 here claims a throughput or connection figure; none has been measured.
@@ -505,11 +511,17 @@ every TLS handshake, and disconnects every client it holds, unless all of
 these hold:
 
 1. it routes directly to a strict majority of the configured nodes,
-   itself included;
-2. no peer reports a route to a node it doesn't route to itself (a
+   itself included, counting only peers its own routes name (a peer
+   whose server name is not one of its routes' first labels, such as a
+   node a resize added, counts for nothing);
+2. every peer it routes to has the same number of routes configured as
+   it has (read from the peer's `VARZ`): a peer that doesn't is on
+   another cluster size, and both fence (see
+   [Resizing the cluster](#resizing-the-cluster));
+3. no peer reports a route to a node it doesn't route to itself (a
    partial mesh, where a push landing on that node would miss this one),
    sustained beyond a 3 s grace;
-3. since it last fenced, it has pulled every Account JWT from every
+4. since it last fenced, it has pulled every Account JWT from every
    direct peer.
 
 `/readyz` on `bus.ports.health` is 503 while fenced, so the Service also
@@ -538,6 +550,53 @@ cover limits or revocations.
 before a push (the fence's 1 s tick plus the 3 s partial-mesh grace) can
 let that one push miss a node until the next pull. A lock-out is still
 applied cluster-wide once a pull runs.
+
+### Resizing the cluster
+
+Every node of the cluster must run the same route list. During a resize
+a mixed set of nodes, some configured for the old size and some for the
+new, **fences by design** (security review 2026-10, L15): otherwise an
+old node cut off with one new node during a 3-to-5 scale-up would see
+"2 of 3" and keep serving next to a majority that doesn't see it. So a
+plain rolling update of a resize stalls: the first pod it rolls sees a
+peer on the other size and stays fenced, its peers fence too, and the
+StatefulSet waits for that pod to become Ready, which it never does.
+
+Grow (or shrink) the configuration on every pod in one rollout instead:
+
+1. Reissue the bus certificate first if it doesn't already name every
+   new pod's headless DNS name (see "Certificate" above).
+2. Upgrade with the new size and the `OnDelete` update strategy, so
+   nothing rolls yet:
+
+   ```sh
+   helm upgrade imas-dmz deploy/helm/nats -n imas-dmz --reuse-values \
+     --set bus.replicaCount=5 --set bus.updateStrategy.type=OnDelete
+   ```
+
+   On a scale-up the new pods start at once (`podManagementPolicy:
+   Parallel`) and stay fenced, and so do the old ones as soon as a new
+   pod routes to them: the bus is unavailable from here until step 4. On
+   a scale-down the removed pods go, and the others keep serving on the
+   old configuration until step 3.
+3. Delete every bus pod together, so they all come back on the new
+   configuration:
+
+   ```sh
+   kubectl -n imas-dmz delete pod -l app.kubernetes.io/component=bus,app.kubernetes.io/instance=imas-dmz
+   ```
+
+4. Wait until every bus pod is Ready (each loader refills its node from
+   the accounts bucket, and the fence lifts once the nodes see each
+   other). Sprouts and core reconnect on their own.
+5. Set `bus.updateStrategy.type` back to `RollingUpdate` on the next
+   upgrade (or now: the strategy is not in the pod template, so changing
+   it restarts nothing).
+
+Plan for a short bus outage: no node serves from the moment a pod on
+the new size routes to one on the old size until step 4.
+An upgrade that keeps the size (a new image, a values change) rolls as
+before: every node has the same route count, so nothing fences.
 
 ## Envoy and `jwt_authn`
 

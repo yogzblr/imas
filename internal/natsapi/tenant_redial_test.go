@@ -199,7 +199,7 @@ func TestIdleClosedTenantRedialsOnUse(t *testing.T) {
 	bus.idleClose(t, tenant)
 	before := bus.dialCount()
 	reply := requestSproutAction(t, saas, cmdRunRequest(tenant, "web-01"))
-	if reply.Status != controlplane.StatusCompleted || reply.Result == nil || reply.Result.Stdout != "up" {
+	if reply.Status != controlplane.StatusCompleted || reply.Result == nil || reply.Result.ExitCode != 0 {
 		t.Fatalf("cmd.run after idle close: reply %+v", reply)
 	}
 	if got := bus.dialCount(); got != before+1 {

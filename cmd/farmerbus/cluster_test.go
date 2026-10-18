@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,9 @@ func TestClusterConfigFromEnv(t *testing.T) {
 	if c.Routes[1].Host != "b-1.h.ns.svc.cluster.local:6222" || c.Routes[1].User != nil {
 		t.Fatalf("route 1 = %v", c.Routes[1])
 	}
+	if !slices.Equal(c.Members, []string{"b-0", "b-1", "b-2"}) {
+		t.Fatalf("members = %v, want each route host's first label", c.Members)
+	}
 
 	if c, err := clusterConfigFromEnv(envOf(nil), pwFile("")); c != nil || err != nil {
 		t.Fatalf("unset env: got %v, %v; want single-node (nil, nil)", c, err)
@@ -77,6 +81,9 @@ func TestClusterConfigFromEnv(t *testing.T) {
 		"duplicate route":       {with(envClusterRoutes, "tls://b-0:6222,tls://b-0:6222"), testRoutePassword, "twice"},
 		"bad advertise":         {with(envClusterAdvertise, "b-0"), testRoutePassword, "host:port"},
 		"routes only separator": {with(envClusterRoutes, " , "), testRoutePassword, "no routes"},
+		"IP route":              {with(envClusterRoutes, "tls://b-0.h:6222,tls://10.0.0.2:6222"), testRoutePassword, "is an IP address"},
+		"shared first label":    {with(envClusterRoutes, "tls://b-0.h:6222,tls://b-0.other:6222"), testRoutePassword, "two route hosts start with"},
+		"not a member":          {with(envServerName, "b-9"), testRoutePassword, "is not the first label of any host"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := clusterConfigFromEnv(envOf(tc.env), pwFile(tc.pw))
