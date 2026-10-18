@@ -643,6 +643,24 @@ Job, put the platform OpenBao's host (the host in `*_OPENBAO_ADDR`) in
 the proxy variables go in `farmer.extraEnv` or `saasapi.extraEnv`; the
 charts set none of them themselves.
 
+### An `https://` proxy and OpenBao
+
+With `HTTPS_PROXY=https://…` (a proxy reached over TLS, not the usual
+`http://`), Go dials the proxy with the OpenBao client's own TLS settings
+(security review 2026-10, I3). This applies to the sprout's `sdb://openbao`
+provider and to the platform's OpenBao clients:
+
+- the proxy's certificate is checked against the OpenBao CA
+  (`*_OPENBAO_CACERT`), not the system roots, so a proxy whose certificate
+  that CA did not sign is refused;
+- the sprout also offers its OpenBao client certificate to the proxy, so the
+  proxy learns the sprout's certificate (not its key, the login token or a
+  secret, which travel inside the tunnel's own TLS session to OpenBao).
+
+If that is not wanted, use an `http://` proxy for OpenBao (the CONNECT tunnel
+still carries end-to-end TLS to OpenBao), or put the OpenBao host in
+`NO_PROXY`.
+
 ## The imas CLI
 
 The CLI is optional for SaaS operation and is for operators only. Every

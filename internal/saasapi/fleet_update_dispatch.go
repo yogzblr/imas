@@ -207,7 +207,7 @@ const (
 	errCodeRolloutHalted = "rollout_halted"
 	// errCodeRolloutWindowClosed: the tenant's rollout window ended before
 	// this item's wave was due, so it was never sent.
-	errCodeRolloutWindowClosed = "rollout_window_closed"
+	errCodeRolloutWindowClosed = string(controlplane.ErrorRolloutWindowClosed)
 	// errCodeApprovalWithdrawn: the tenant's approved_version stopped being
 	// this rollout's target before this item's wave was due, so it was
 	// never sent.

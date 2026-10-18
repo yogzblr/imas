@@ -23,7 +23,7 @@ import (
 // ReenrollRequiredCode is the stable error code for a request farmer
 // refused to send because the sprout has no box key on record. It appears
 // in ReenrollRequiredError's message, and internal/natsapi replies to
-// internal.sprout.action with it (ErrorSproutReenrollRequired).
+// internal.sprout.action with it (controlplane.ErrorSproutReenrollRequired).
 const ReenrollRequiredCode = "sprout_reenroll_required"
 
 // ErrSproutReenrollRequired matches (errors.Is) every
