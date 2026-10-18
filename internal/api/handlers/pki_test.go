@@ -63,6 +63,9 @@ func setupPKIDirs(t *testing.T) string {
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 	// Sprout User JWTs live in a bucket (pki.MintOrReuseUserJWT).
 	sproutJWTs, err := objectstore.Open(objectstoretest.NewServer(t).Config())
 	if err != nil {

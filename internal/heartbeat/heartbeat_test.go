@@ -42,6 +42,9 @@ func newTestPKIDB(t *testing.T) {
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 
 	dir := t.TempDir()
 	pkitest.Farmer(t) // the NATS trust chain in a fake Transit

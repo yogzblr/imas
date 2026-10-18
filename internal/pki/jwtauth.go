@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/config"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 const natsAuthSubdir = "nats-auth"
@@ -134,12 +135,53 @@ func ensurePlatformAuthLocked(ctx context.Context) (*natsAuthMaterial, error) {
 		return nil, err
 	}
 	if mat.sysAccountJWT == "" {
-		if err := holdAccountJWT(trust.SysAccountJWT, false); err != nil {
+		j, err := sysAccountJWTFromTrust(ctx, mat, trust.SysAccountJWT)
+		if err != nil {
 			return nil, err
 		}
-		mat.sysAccountJWT = trust.SysAccountJWT
+		if err := holdAccountJWT(j, false); err != nil {
+			return nil, err
+		}
+		mat.sysAccountJWT = j
 	}
 	return mat, nil
+}
+
+// sysAccountJWTFromTrust is the SYS Account JWT a process starts from
+// when neither it nor the accounts bucket holds one: the trust's, which
+// the bootstrap Job signed before any revocation existed, with the SYS
+// account's revocations as the database has them put back first
+// (security review 2026-10, I8): the SaaS API key saasapi_credential_state
+// names as rotated out (prev_pub), the one revocation farmer makes on the
+// SYS account (EnsureSaaSAPICredential). A failed read is returned, never
+// taken for no revocation. Without a database (the SaaS API credential
+// publish Job) there is no rotation state, and the trust's JWT is used
+// as it is.
+func sysAccountJWTFromTrust(ctx context.Context, mat *natsAuthMaterial, trustJWT string) (string, error) {
+	if db == nil {
+		return trustJWT, nil
+	}
+	state, err := readSaaSAPICredentialState(ctx)
+	if err != nil {
+		return "", fmt.Errorf("pki: SYS account %s: rebuilding its revocations from the database (%s) before using the trust's SYS Account JWT: %w", mat.sysAccountPub, saasAPICredentialStateTable, err)
+	}
+	if state == nil || state.PrevPub == "" || state.PrevPub == state.CurrentPub {
+		return trustJWT, nil
+	}
+	ac, err := jwt.DecodeAccountClaims(trustJWT)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s: %v", ErrTrustInvalid, TrustSysAccountJWT, err)
+	}
+	if !ensureUserRevoked(ac, state.PrevPub) {
+		return trustJWT, nil
+	}
+	waitPastIssuedAt(ac.IssuedAt)
+	signed, err := ac.Encode(mat.operatorSigningKP)
+	if err != nil {
+		return "", fmt.Errorf("pki: SYS account %s: re-signing the trust's SYS Account JWT with its revocations: %w", mat.sysAccountPub, err)
+	}
+	log.Infof("No SYS Account JWT held or in the accounts bucket; using the trust's with rotated-out SaaS API key %s revoked.", state.PrevPub)
+	return signed, nil
 }
 
 // ensureSysUserLocked loads the SYSTEM user into mat: the identity
@@ -204,9 +246,10 @@ func ensureSysUserLocked(mat *natsAuthMaterial) error {
 // tenant's keys are never retired.
 //
 // Its Account JWT is the one this process holds, or else the accounts
-// bucket's, or else a minimal one minted here (tenantMinted), which
-// syncNatsAuth re-signs with the tenant's revocations before it is
-// published.
+// bucket's, or else a minimal one minted here (tenantMinted) with the
+// tenant's revocations as the database has them (applyStoredRevocations;
+// a database error fails the call), which syncNatsAuth re-signs with any
+// grant before it is published.
 func ensureNatsAuth() (*natsAuthMaterial, error) {
 	authMu.Lock()
 	defer authMu.Unlock()
@@ -253,6 +296,9 @@ func ensureNatsAuth() (*natsAuthMaterial, error) {
 		ac := jwt.NewAccountClaims(mat.tenantPub)
 		ac.Name = mat.tenantName
 		ac.SigningKeys.Add(tenantSigningPub)
+		if err := applyStoredRevocations(ac, currentTenantID()); err != nil {
+			return nil, err
+		}
 		if j, err = ac.Encode(mat.operatorSigningKP); err != nil {
 			return nil, err
 		}

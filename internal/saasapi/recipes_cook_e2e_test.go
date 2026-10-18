@@ -128,6 +128,9 @@ func TestRecipeUploadCooksOnSameTenantOnly(t *testing.T) {
 	}
 	pki.SetDB(pkiDB)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 	tenantboxtest.Start(t)
 	for _, tenant := range []string{e.tA, e.tB} {
 		pki.InvalidateTenantBoxKeys(tenant)

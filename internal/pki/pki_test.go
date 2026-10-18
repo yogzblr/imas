@@ -1230,6 +1230,11 @@ func TestConfigureNats_ValidConfig(t *testing.T) {
 	config.KeyFile = leafKeyFile
 	config.FarmerPKI = filepath.Join(tmpDir, "pki") + "/"
 	pkitest.Farmer(t)
+	// The legacy tenant's first Account JWT carries its revocations from
+	// the database (applyStoredRevocations).
+	newTestDB(t)
+	forgetHeldJWTs()
+	t.Cleanup(forgetHeldJWTs)
 
 	opts := ConfigureNats()
 
