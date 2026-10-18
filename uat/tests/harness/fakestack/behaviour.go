@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/yogzblr/imas/internal/cook"
 )
 
 // --- recipes --------------------------------------------------------------------
@@ -166,6 +168,10 @@ func checkRecipe(body string) (string, string) {
 	var m map[string]any
 	if yaml.Unmarshal([]byte(out), &m) != nil || m == nil {
 		return "recipe_yaml_invalid", "the rendered recipe isn't a YAML mapping"
+	}
+	// The chart's default include cap (S4, farmer.cook.maxIncludes).
+	if inc, ok := m["include"].([]any); ok && len(inc) > cook.DefaultMaxRecipeIncludes {
+		return "recipe_too_many_includes", "the recipe includes more recipes than the cap allows"
 	}
 	return "", ""
 }
