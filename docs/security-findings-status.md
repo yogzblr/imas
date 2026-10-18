@@ -128,7 +128,7 @@ submodule), or the item needs a real release, the Azure run or another unit.
 | 7 | Release | `RELEASING.md` step 4 calls the `go-licenses` save a known failure | Done (V3) | `docs/RELEASING.md` step 4: the workflow must be green (it passes since LIC.1) |
 | 8 | Enrolment | Pre-CL.1 sprouts keep the unused `fleetsigningkeys` grant | Done | Farmer re-mints a JWT whose permissions differ from `pki.SproutPermissions`; `internal/pki/sproutjwt_isolation_integration_test.go` |
 | 9 | Enrolment | A sprout uses a changed JWT only after a restart | Done | T3, PR #275: `cmd/sprout` `heartbeatGate`, `pki.SproutBus.ReloadUserJWT` |
-| 10 | Enrolment | Run `syncTenantSprouts` for every tenant at farmer start | Done | V1, PR #286, finding I9: `PushAllAccounts`, which runs on every bus connect including farmer's start, runs it per tenant before pushing |
+| 10 | Enrolment | Re-sync every tenant's revocations at farmer start | Done | V1, PR #286, finding I9: `PushAllAccounts`, which runs on every bus connect including farmer's start, runs `syncNatsAuth` for the legacy tenant and `syncTenantSprouts` for each live tenant before pushing |
 | 11 | Deleted sprouts | User JWTs have no `exp`, so the revoked list only grows | Decided | Revocation is carried in each Account JWT (H1, SEC.3a). Rows of deleted sprouts are erased with the tenant (S6) |
 | 12 | Deleted sprouts | A deleted sprout's stored JWT stays behind | Done (V3) | `internal/pki` `DeleteNKey` now also deletes the sprout's stored User JWT row and its object (`forgetSproutUserJWT`) |
 | 13 | Deleted sprouts | Envoy can't see revocation; a retired host's gateway JWT costs farmer a lookup | Decided | Accepted in `docs/security-review-pack.md` 3.5 item 2 (P3 walkthrough, 2026-10-17); farmer refuses it (SEC.7c) |
