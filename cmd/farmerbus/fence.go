@@ -598,8 +598,11 @@ type listReply struct {
 
 // pull fetches every Account JWT every direct peer holds and merges each
 // into the local resolver, newest issued-at winning (the same rule as the
-// resolver's own sync). Merging a newer JWT for a loaded account applies
-// it at once: a lock-out closes the account's connections here.
+// resolver's own sync) among the JWTs accountrank.Rank accepts: one issued
+// more than accountrank.MaxFutureSkew ahead never wins, and one this node
+// holds is replaced (security review 2026-10, L16). Merging a newer JWT
+// for a loaded account applies it at once: a lock-out closes the
+// account's connections here.
 func (f *fence) pull(peers map[string]bool) error {
 	want := len(peers) + 1
 	replies, err := f.gather(claimsListSubj, want)
@@ -686,7 +689,14 @@ func (f *fence) merge(id string, cands []string) error {
 		return nil
 	}
 	if local, err := f.resolver.LoadAcc(id); err == nil && local != "" {
-		if lr, err := f.rank(id, local); err == nil && (lr.raw == best.raw || !best.beats(lr)) {
+		lr, err := f.rank(id, local)
+		switch {
+		case err != nil:
+			// A JWT this node holds that fails the rank (for example one
+			// issued in the future, security review 2026-10, L16) never
+			// outranks a valid one.
+			log.Warnf("farmerbus fence: replacing this node's JWT for account %s: %v", id, err)
+		case lr.raw == best.raw || !best.beats(lr):
 			return nil
 		}
 	}

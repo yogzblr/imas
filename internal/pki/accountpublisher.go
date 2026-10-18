@@ -478,6 +478,12 @@ func (p *s3AccountPublisher) ReconcileAll(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
+		if err := accountrank.CheckIssuedAt(ac.IssuedAt, time.Now()); err != nil {
+			// Never written over the bucket's copy: it would outrank
+			// every later JWT (security review 2026-10, L16).
+			log.Warnf("not reconciling Account %s into the accounts bucket: %v", ac.Subject, err)
+			continue
+		}
 		c := claimOf(ac, j)
 		if old, ok := best[ac.Subject]; !ok || accountrank.Better(c, old) {
 			best[ac.Subject] = c

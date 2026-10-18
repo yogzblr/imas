@@ -5,11 +5,33 @@
 package accountrank
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/nats-io/jwt/v2"
 )
+
+// MaxFutureSkew is how far ahead of this process's clock an Account
+// JWT's issued-at may be (security review 2026-10, L16). Replica clocks
+// agree to well within it; a JWT issued further ahead was not signed by
+// a farmer with a sane clock. Such a JWT would outrank every later push
+// (Better compares issued-at first), so Rank refuses it.
+const MaxFutureSkew = 5 * time.Minute
+
+// ErrFutureIssuedAt is an Account JWT issued more than MaxFutureSkew
+// ahead of now.
+var ErrFutureIssuedAt = errors.New("issued-at is in the future")
+
+// CheckIssuedAt returns ErrFutureIssuedAt, wrapped with both times, when
+// iat is more than MaxFutureSkew ahead of t.
+func CheckIssuedAt(iat int64, t time.Time) error {
+	if limit := t.Add(MaxFutureSkew).Unix(); iat > limit {
+		return fmt.Errorf("%w: issued at %d, more than %s after now (%d)", ErrFutureIssuedAt, iat, MaxFutureSkew, t.Unix())
+	}
+	return nil
+}
 
 // Claim is the part of an Account JWT that decides which of two JWTs for
 // one account wins.
@@ -21,8 +43,12 @@ type Claim struct {
 }
 
 // Rank decodes theJWT (which verifies its signature) and checks that its
-// subject is wantSub and its issuer is one of trusted (the operator and
-// its signing keys). It returns the fields Better compares.
+// subject is wantSub, its issuer is one of trusted (the operator and its
+// signing keys) and its issued-at is not more than MaxFutureSkew ahead of
+// now (CheckIssuedAt). It returns the fields Better compares. Every
+// component that ranks or merges Account JWTs from outside its own
+// process (the bus fence, the account loader, farmer's accounts bucket
+// reader) goes through Rank, so a future-dated JWT never takes part.
 func Rank(theJWT string, trusted []string, wantSub string) (iat int64, jti string, lockedOut bool, err error) {
 	ac, err := jwt.DecodeAccountClaims(theJWT)
 	if err != nil {
@@ -33,6 +59,9 @@ func Rank(theJWT string, trusted []string, wantSub string) (iat int64, jti strin
 	}
 	if !slices.Contains(trusted, ac.Issuer) {
 		return 0, "", false, fmt.Errorf("issuer %s is not the trusted operator", ac.Issuer)
+	}
+	if err := CheckIssuedAt(ac.IssuedAt, time.Now()); err != nil {
+		return 0, "", false, err
 	}
 	return ac.IssuedAt, ac.ID, ac.Limits.Conn == 0, nil
 }

@@ -1,11 +1,15 @@
 package accountrank
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
+
+	"github.com/yogzblr/imas/internal/accountrank/accountranktest"
 )
 
 func newKP(t *testing.T, create func() (nkeys.KeyPair, error)) (nkeys.KeyPair, string) {
@@ -90,5 +94,55 @@ func TestBetter(t *testing.T) {
 	}
 	if Better(x, x) {
 		t.Error("a claim must not beat itself")
+	}
+}
+
+// L16: an Account JWT issued more than MaxFutureSkew ahead of now is
+// refused, so it can never outrank a JWT signed later; one inside the
+// window is accepted.
+func TestRankRefusesFutureIssuedAt(t *testing.T) {
+	op, opPub := newKP(t, nkeys.CreateOperator)
+	_, acct := newKP(t, nkeys.CreateAccount)
+	trusted := []string{opPub}
+	at := func(iat int64) string {
+		t.Helper()
+		ac := jwt.NewAccountClaims(acct)
+		ac.Limits.Conn = 0
+		s, err := accountranktest.EncodeAt(ac, op, iat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	n := time.Now()
+	for name, tc := range map[string]struct {
+		iat  int64
+		want bool
+	}{
+		"year 3000":            {accountranktest.Year3000, false},
+		"just past the window": {n.Add(MaxFutureSkew + time.Minute).Unix(), false},
+		"inside the window":    {n.Add(MaxFutureSkew - time.Minute).Unix(), true},
+		"an hour ago":          {n.Add(-time.Hour).Unix(), true},
+	} {
+		_, _, _, err := Rank(at(tc.iat), trusted, acct)
+		if tc.want && err != nil {
+			t.Errorf("%s: refused: %v", name, err)
+		}
+		if !tc.want && !errors.Is(err, ErrFutureIssuedAt) {
+			t.Errorf("%s: err = %v, want ErrFutureIssuedAt", name, err)
+		}
+	}
+}
+
+func TestCheckIssuedAt(t *testing.T) {
+	n := time.Unix(1_000_000, 0)
+	if err := CheckIssuedAt(n.Add(MaxFutureSkew).Unix(), n); err != nil {
+		t.Errorf("exactly MaxFutureSkew ahead: %v", err)
+	}
+	if err := CheckIssuedAt(n.Add(MaxFutureSkew).Unix()+1, n); !errors.Is(err, ErrFutureIssuedAt) {
+		t.Errorf("one second past the window: %v", err)
+	}
+	if MaxFutureSkew != 5*time.Minute {
+		t.Errorf("MaxFutureSkew = %s, the brief's skew window is 5 minutes", MaxFutureSkew)
 	}
 }

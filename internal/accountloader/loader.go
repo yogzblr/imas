@@ -942,8 +942,8 @@ func (l *Loader) recheck(ctx context.Context) {
 // sampleCheck looks up SampleSize applied accounts on the node (and the
 // nodes routed to it) and repairs any that hold something other than
 // what was applied (brief §5.6): a better JWT there means the bucket has
-// it too, so the object is re-read; a worse one or none is overwritten by
-// pushing again.
+// it too, so the object is re-read; a worse one, an invalid one (a
+// future-dated JWT among them) or none is overwritten by pushing again.
 func (l *Loader) sampleCheck(ctx context.Context) {
 	l.mu.Lock()
 	all := slices.Sorted(maps.Keys(l.applied))
@@ -992,6 +992,12 @@ func (l *Loader) checkOne(ctx context.Context, pub string) {
 		}
 		c, err := l.validate(pub, a)
 		if err != nil {
+			// A node holds a JWT that fails validation, for example one
+			// issued in the future that would outrank every later push
+			// (security review 2026-10, L16): overwrite it. A claims
+			// update replaces whatever the node holds.
+			log.Warnf("accountloader: a node holds an invalid JWT for %s (%v); pushing the applied one again", pub, err)
+			behind = true
 			continue
 		}
 		if accountrank.Better(c, cur) {
