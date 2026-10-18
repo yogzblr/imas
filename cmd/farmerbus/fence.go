@@ -259,17 +259,19 @@ func (f *fence) directPeers() (map[string]bool, map[string]string, error) {
 	return peers, names, nil
 }
 
-// memberPeers counts the direct peers that are configured members of
-// this node's cluster (L15): a routed server this node's routes don't
-// name (a new node of a resize, or a stray) doesn't make a majority.
-func (f *fence) memberPeers(names map[string]string) int {
-	n := 0
+// memberPeers counts the configured members of this node's cluster
+// (other than self) that it has a direct route to (L15): a routed server
+// this node's routes don't name (a new node of a resize, or a stray)
+// doesn't make a majority, and two routed servers announcing one name (a
+// node restarted under a new server ID, or an impostor) count once.
+func (m fenceMembers) memberPeers(self string, names map[string]string) int {
+	seen := map[string]bool{}
 	for _, name := range names {
-		if name != "" && name != f.srv.Name() && f.members.names[name] {
-			n++
+		if name != "" && name != self && m.names[name] {
+			seen[name] = true
 		}
 	}
-	return n
+	return len(seen)
 }
 
 func (f *fence) evaluate() {
@@ -282,7 +284,7 @@ func (f *fence) evaluate() {
 		return
 	}
 	size := f.size()
-	members := f.memberPeers(names)
+	members := f.members.memberPeers(f.srv.Name(), names)
 	if (members+1)*2 <= size {
 		f.fence(fmt.Sprintf("routed to %d of %d configured nodes (incl. itself), no majority", members+1, size))
 		return

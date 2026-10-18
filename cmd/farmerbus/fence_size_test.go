@@ -102,3 +102,22 @@ func TestObservedServers(t *testing.T) {
 		t.Fatalf("alone: observed = %d, want 1", got)
 	}
 }
+
+// memberPeers counts each configured member once, never this node, and
+// nothing its routes don't name (L15).
+func TestFenceMemberPeers(t *testing.T) {
+	m := newFenceMembers([]string{"bus-0", "bus-1", "bus-2"}, 3)
+	for name, tc := range map[string]struct {
+		names map[string]string
+		want  int
+	}{
+		"two members":            {map[string]string{"A": "bus-1", "B": "bus-2"}, 2},
+		"one name under two IDs": {map[string]string{"A": "bus-1", "B": "bus-1"}, 1},
+		"self and unnamed":       {map[string]string{"A": "bus-0", "B": ""}, 0},
+		"a node the routes omit": {map[string]string{"A": "bus-3", "B": "bus-1"}, 1},
+	} {
+		if got := m.memberPeers("bus-0", tc.names); got != tc.want {
+			t.Errorf("%s: memberPeers = %d, want %d", name, got, tc.want)
+		}
+	}
+}
