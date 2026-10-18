@@ -1,3 +1,4 @@
 change: V2 (P10) closed: chart signatures pinned to publish-packages.yml at the release tag (checksums and images to release.yml at the tag), exact identities from packaging/release/cosign-identity.sh; publish-packages.yml runs only on refs/tags/<tag>, never re-pushes a chart version and checks each chart anonymously (pull, signed digest, package linked to the repo) with packaging/helm/ghcr-chart.sh, failing with the owner step; release.yml refuses a moved tag (packaging/release/check-release-tag.sh, GoReleaser records target_commitish); uat/README.md item 8 and the imas_sprout defaults point charts at GHCR; snapshot.yml repaired (workflow_dispatch, release.yml's build, no publish).
+pr: 289
 item: P10
 action: close
