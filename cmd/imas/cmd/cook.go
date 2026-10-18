@@ -64,7 +64,7 @@ var cmdCook = &cobra.Command{
 		// (jobs.follow): sprouts seal them to the tenant key, which this
 		// CLI doesn't hold. Followed before the trigger, so no event is
 		// missed; farmer's follow ends once it has been idle for as long
-		// as this command waits.
+		// as this command waits (at most client.MaxFollow).
 		stream, err := client.FollowJobs(nc, jid, client.FollowOptions{Idle: time.Duration(cookTimeout) * time.Second})
 		if err != nil {
 			log.Fatalf("Failed to follow job %s: %v", jid, err)

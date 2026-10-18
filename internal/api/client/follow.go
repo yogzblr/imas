@@ -30,10 +30,16 @@ const MethodJobsFollow = "jobs.follow"
 
 // FollowOptions bound a follow. Idle ends it after that long without an
 // event (0 for no idle limit); Max ends it in any case (0 for farmer's
-// maximum, 35 minutes).
+// maximum, MaxFollow). FollowJobs clamps both to MaxFollow, which farmer
+// refuses to exceed.
 type FollowOptions struct {
 	Idle, Max time.Duration
 }
+
+// MaxFollow is the longest follow farmer runs (internal/natsapi's
+// MaxFollowSeconds): a recipe times out on its sprout after
+// cook.DefaultCookTimeout.
+const MaxFollow = cook.DefaultCookTimeout + 5*time.Minute
 
 // StepStream is a running follow. Events delivers each step event once,
 // in the order farmer forwarded it; it is closed by Stop.
@@ -78,7 +84,7 @@ func FollowJobs(nc *nats.Conn, jid string, opts FollowOptions) (*StepStream, err
 		return nil, err
 	}
 	params := map[string]any{"jid": jid, "stream": stream,
-		"idle_seconds": int(opts.Idle / time.Second), "max_seconds": int(opts.Max / time.Second)}
+		"idle_seconds": int(min(opts.Idle, MaxFollow) / time.Second), "max_seconds": int(min(opts.Max, MaxFollow) / time.Second)}
 	_, reqID, err := sealedRequest(nc, payloadbox.PurposeCLIRequest, MethodJobsFollow, params, NatsRequestTimeout)
 	if err != nil {
 		_ = sub.Unsubscribe()

@@ -165,7 +165,7 @@ store and `imas serve`'s log stream get them from farmer instead:
    The result is `{"stream", "expires_at"}`, sent once farmer is
    subscribed, so a cook triggered after it misses no event.
 3. Farmer forwards each step event that opens, is fresh, isn't a replay
-   and comes from a sprout you may view, as an `f2c.cook.step` message on
+   and comes from a sprout you may view (checked again every 60 seconds), as an `f2c.cook.step` message on
    the stream, sealed to your CLI box key, naming the `jobs.follow`
    request's ID (`ReplyTo`) and carrying `{stream, sid, jid, eid, step}`.
    The CLI drops anything that doesn't open under its key, names another

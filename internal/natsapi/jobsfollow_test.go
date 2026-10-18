@@ -264,3 +264,57 @@ func TestJobsFollowEnds(t *testing.T) {
 		t.Fatal("the idle follow did not end")
 	}
 }
+
+// Timeouts above farmer's maximum are clamped by the client, not refused:
+// imas cook --cook-timeout 3600 still follows its job.
+func TestJobsFollowClampsLongTimeouts(t *testing.T) {
+	f := startSealedFarmer(t)
+	newSealedCLIUser(t)
+	stream, err := client.FollowJobs(f.nc, "job-long", client.FollowOptions{Idle: 2 * time.Hour, Max: 3 * time.Hour})
+	if err != nil {
+		t.Fatalf("FollowJobs with timeouts over the maximum: %v", err)
+	}
+	stream.Stop()
+	if client.MaxFollow != time.Duration(MaxFollowSeconds)*time.Second {
+		t.Fatalf("client.MaxFollow %s, farmer's maximum %ds", client.MaxFollow, MaxFollowSeconds)
+	}
+}
+
+// A role change reaches a running follow: once the user loses view on a
+// sprout, its events stop within viewRecheck.
+func TestJobsFollowRechecksView(t *testing.T) {
+	f := startSealedFarmer(t)
+	u := newSealedCLIUser(t)
+	web := newFollowSprout(t, "web-01")
+	acceptFollowSprout(t, "web-01")
+	acceptFollowSprout(t, "db-01")
+	rs := intauth.CurrentPolicy().Roles
+	for _, r := range []*rbac.Role{
+		{Name: "web-viewer", Rules: []rbac.Rule{{Action: rbac.ActionView, Scope: "sprout:web-01"}}},
+		{Name: "db-viewer", Rules: []rbac.Rule{{Action: rbac.ActionView, Scope: "sprout:db-01"}}},
+	} {
+		if err := rs.Register(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	intauth.CurrentPolicy().Users.Set(u.id, "web-viewer")
+	orig := viewRecheck
+	viewRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { viewRecheck = orig })
+
+	stream, err := client.FollowJobs(f.nc, "", client.FollowOptions{Max: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Stop()
+	_ = f.nc.PublishMsg(web.event("job-a", cook.StepCompletion{ID: "w1"}, web.priv))
+	if _, ok := next(stream, 5*time.Second); !ok {
+		t.Fatal("no event while the user may view the sprout")
+	}
+	intauth.CurrentPolicy().Users.Set(u.id, "db-viewer")
+	time.Sleep(2 * viewRecheck)
+	_ = f.nc.PublishMsg(web.event("job-a", cook.StepCompletion{ID: "w2"}, web.priv))
+	if ev, ok := next(stream, 500*time.Millisecond); ok {
+		t.Fatalf("an event reached the user after they lost view on its sprout: %+v", ev)
+	}
+}

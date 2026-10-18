@@ -71,8 +71,15 @@ type JobsFollowResponse struct {
 
 // MaxFollowSeconds bounds a follow's lifetime: a recipe times out on its
 // sprout after cook.DefaultCookTimeout, and a client that wants longer
-// follows again.
+// follows again. internal/api/client's MaxFollow is the same bound.
 const MaxFollowSeconds = int((cook.DefaultCookTimeout + 5*time.Minute) / time.Second)
+
+// viewRecheck is how long a follow trusts its answer to "may this user
+// view this sprout": after it, the next event from the sprout checks the
+// user's role again, so a role change reaches a running follow within it
+// (as the shell re-checks a session's grant). A variable so tests can
+// shorten it.
+var viewRecheck = 60 * time.Second
 
 // maxFollows bounds how many follows one replica runs at once.
 const maxFollows = 1024
@@ -118,8 +125,8 @@ func handleJobsFollow(c apiCaller, params json.RawMessage) (any, error) {
 	}
 	f := &follow{
 		tenantID: c.TenantID, userID: c.UserID, reqID: c.req.ID, subject: cook.FollowSubject(p.Stream),
-		nc: nc, guard: &payloadbox.ReplayGuard{MaxSkew: payloadbox.DefaultMaxSkew, MaxEntries: 1 << 14},
-		allowed: map[string]bool{}, events: make(chan struct{}, 1),
+		nc: nc, guard: payloadbox.NewKeyedReplayGuard(),
+		allowed: map[string]viewGrant{}, recheck: viewRecheck, events: make(chan struct{}, 1),
 	}
 	jid := p.JID
 	if jid == "" {
@@ -146,14 +153,26 @@ type follow struct {
 	tenantID, userID, reqID, subject string
 	nc                               *nats.Conn
 	sub                              *nats.Subscription
-	guard                            *payloadbox.ReplayGuard
+	// guard drops a replayed event, keyed on (sprout, message ID).
+	// Sharded (payloadbox.KeyedReplayGuard), so an every-job follow of a
+	// busy tenant has room for every event in the window.
+	guard *payloadbox.KeyedReplayGuard
 
 	// events gets a token for each forwarded event, resetting the idle
 	// timer.
 	events chan struct{}
 
+	// recheck is viewRecheck as the follow started.
+	recheck time.Duration
+
 	mu      sync.Mutex
-	allowed map[string]bool // sprout ID -> the user may view it
+	allowed map[string]viewGrant // sprout ID -> the user may view it, as of checked
+}
+
+// viewGrant is a follow's cached answer for one sprout.
+type viewGrant struct {
+	ok      bool
+	checked time.Time
 }
 
 // run ends the follow at its idle or maximum time.
@@ -189,18 +208,18 @@ func (f *follow) run(idle, max time.Duration) {
 	}
 }
 
-// mayView reports, once per sprout per follow, whether the user may view
-// sproutID.
+// mayView reports whether the user may view sproutID, checking the
+// user's role at most once per viewRecheck per sprout.
 func (f *follow) mayView(sproutID string) bool {
 	f.mu.Lock()
-	ok, seen := f.allowed[sproutID]
+	g, seen := f.allowed[sproutID]
 	f.mu.Unlock()
-	if seen {
-		return ok
+	if seen && time.Since(g.checked) < f.recheck {
+		return g.ok
 	}
-	ok = checkScopedAccess(f.tenantID, f.userID, rbac.ActionView, []string{sproutID}) == nil
+	ok := checkScopedAccess(f.tenantID, f.userID, rbac.ActionView, []string{sproutID}) == nil
 	f.mu.Lock()
-	f.allowed[sproutID] = ok
+	f.allowed[sproutID] = viewGrant{ok: ok, checked: time.Now()}
 	f.mu.Unlock()
 	return ok
 }
@@ -217,7 +236,11 @@ func (f *follow) handle(m *nats.Msg) {
 	if !f.mayView(ev.SproutID) {
 		return
 	}
-	if err := f.guard.Accept(ev.Message()); err != nil {
+	if err := f.guard.Accept(ev.Message(), ev.SproutID); err != nil {
+		if errors.Is(err, payloadbox.ErrReplayGuardFull) {
+			log.Warnf("jobs.follow: dropping an event of job %s for %s: the follow's replay guard is full", ev.JobID, f.userID)
+			return
+		}
 		log.Debugf("jobs.follow: not forwarding an event on %s: %v", m.Subject, err)
 		return
 	}
