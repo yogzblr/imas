@@ -409,6 +409,19 @@ var readSaaSAPICredentialState = func(ctx context.Context) (*SaaSAPICredentialSt
 	return loadSaaSAPICredentialState(ctx, db, saasAPICredentialStateTable)
 }
 
+// UseSaaSAPICredentialState makes farmer read st (nil: saasapi has
+// recorded no credential yet) as the saas.saasapi_credential_state row
+// until the returned function restores the reader. For tests outside
+// this package that install a SQLite database (SetDB): it has no saas
+// schema, and the SYS Account JWT a process starts from when none is held
+// is rebuilt from that row, failing closed when it can't be read
+// (sysAccountJWTFromTrust). Never called outside tests.
+func UseSaaSAPICredentialState(st *SaaSAPICredentialState) (restore func()) {
+	orig := readSaaSAPICredentialState
+	readSaaSAPICredentialState = func(context.Context) (*SaaSAPICredentialState, error) { return st, nil }
+	return func() { readSaaSAPICredentialState = orig }
+}
+
 // SaaSAPICredentialRecorder is saasapi's writer of the credential state,
 // on saasapi's own database (the saas schema).
 type SaaSAPICredentialRecorder struct {

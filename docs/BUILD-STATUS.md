@@ -147,31 +147,9 @@ Leftovers, documentation and tidying.
 |---|---|---|---|
 | P7 | **SaaS API §1.7** (caller API keys, teams, webhooks, billing and metering) | **Red** | Never designed. Needs a design pass before any build. |
 
-## Review findings re-checked (2026-10-09)
+## Review findings re-checked
 
-The deferred Lows and Infos of `docs/security-review-2026-10.md` (and Info
-I1, I2, I6 of `-b`) were re-read against the code on `main` by a read-only
-pass: code only, no builds, no tests (tests may cover some of these). 31 were
-checked. **Fixed or accepted, no longer tracked:** L25 (plaintext never
-accepted for `cmd.run` and `cook`), I11 (route mTLS on the general CA, accepted
-in the review), -b I6 (URL redaction), -b I1 (by design), -b I2 (holds).
-**Still open or partly fixed (the rest), by theme.** Suggested order within the Lows: P18 first, then deprovision and identity (L10, L11), the OpenBao client (L17 to L19, L21), the bus (L12 to L14), sealing (L22 to L24), the rest.
-
-| Theme | Findings (review rating) | State |
-|---|---|---|
-| **Before dispatch is enabled** | **L5** (Low) is now P18 (S1). L3 (Low): the staging directory and keyring are checked by mode, not owner or symlink (`internal/fleetsign/keyring.go`, `selfupdate.go`). L6 (Low): one tenant can clear the shared manifest cache. L7 (Low, docs): the signer/saasapi split is still described as a barrier. I4, I5 (Info): loose bounds on a hostile repository; stale `artifact_url` and `no_self_update` text. | Open |
-| **Deprovision and identity** | L10 (Low), **partly fixed** (the `/files/` middleware refuses a deleted tenant, SEC.7c; `SproutIDAndTenantForNKey`, `reissueExistingIdentity` and the sealed refresh path do not). L11 (Low): a failed re-check leaves a deprovisioned tenant live, no retry or periodic relock. I6 (Info): removed CLI admin keys are never revoked. I7 (Info): NKey lookup over a non-unique index, and a database error spends a join-token use. I8, I9 (Info): an Account JWT file that is missing or undecodable is re-minted without its revocations; `PushAllAccounts` after a PVC restore pushes without re-syncing them. I10 (Info), mitigated: `JobRef` has no tenant, callers pass it. | Open |
-| **OpenBao client** | L17 (Low): redirects carry the token and body to any host. L18 (Low): the login client can pick up an ambient `BAO_NAMESPACE`. L19 (Low), **partly fixed** (the sprout rejects non-2xx; farmer's `send` does not, so a 3xx can report `written=true`). L20 (Low): a cached token survives certificate rotation. L21 (Low): an `sdb://openbao` ref can reach any path (no `..` check). I2 (Info): `http://` addresses accepted. I3 (Info, docs). | Open |
-| **Bus and cluster** | L12 (Low): unauthenticated `PUT /pki/putnkey` can reject legacy sprouts. L13 (Low): the bus logs at Trace and Debug (`internal/pki/nats.go`, `cmd/farmerbus/main.go`); whether that logs payloads was not confirmed. L14 (Low): a single-node bus serves before its SYS JWT; the SaaS API user JWT has no `exp`. L15 (Low): the fence counts any routed peer; cluster size comes from local config (a partial-mesh check exists; whether it covers a 3-to-5 scale-up was not decided). L16 (Low): a future-dated Account `iat` survives cleanup. | Open |
-| **Sealing** | L22 (Low): deleting a severing tenant-key version rejoins the chain. L23 (Low): the continuity proof has no freshness check. L24 (Low, design): the tenant pin is trust-on-first-use against the DMZ Envoy. | Open |
-| **Other** | L9 (Low): `cmd.run` stdout and stderr are still sent on the unsealed `internal.*` bus, and saasapi reads only the exit code. I1 (Info): the rollout lease is compared in the application clock; a non-UTC `loc` only warns. I12 (Info): no body limit on `/v1/enroll`, and the directory is not fsynced after the atomic write. | Open |
-
-**Test coverage of the open findings (tests read 2026-10-09; none run).**
-No open finding has a test proving it fixed. The rest by state:
-- **Partly covered:** L3 (mode bits only, not owner or symlink), L5 (a sprout with an empty keyring fails closed, but the package is not checked), L6 (the size bound, not that other tenants' entries survive a `clear`), L10 (the `/files/` middleware, not the enroll-replay, `reissueExistingIdentity` or sealed-refresh paths), L11 (many provision/deprovision interleavings, not a failed re-check or a redelivered provision), L15 (partial mesh, not a 3-to-5 scale-up), L18 (the static-token path, not the Kubernetes login client), L24 (a mismatch after the pin, not a substituted first response), I4 (the zstd window, not the index and package caps), I9 (a fresh bus, not a restore from older JWTs).
-- **Tests pin the current behaviour:** L9, L12, L20, L22, I1, I2 (see P17).
-- **No test at all:** L7, L13 (the test turns Trace and Debug off itself), L14, L16, L17, L19, L21, L23, I3, I5, I6, I7, I8, I10, I12.
-- **Fixed, with tests:** L25 (`internal/ingredients/cmd/sealed_test.go`; no matching test was found for `internal/cook/sealed.go`), -b I6 (`internal/ingredients/selfupdate/pkgmeta_test.go`).
+Moved to [`security-findings-status.md`](security-findings-status.md): one row per finding of both 2026-10 reviews, with its state on `main` and the test that pins it.
 
 ## In flight
 

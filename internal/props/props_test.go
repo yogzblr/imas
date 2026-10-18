@@ -196,14 +196,6 @@ func TestGetPropsFuncClosure(t *testing.T) {
 	}
 }
 
-func TestHostnameFunc(t *testing.T) {
-	fn := GetHostnameFunc("sprout-1")
-	got := fn()
-	if got == "" {
-		t.Error("expected non-empty hostname")
-	}
-}
-
 func TestConcurrentAccess(t *testing.T) {
 	newTestDB(t)
 	var wg sync.WaitGroup

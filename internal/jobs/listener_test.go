@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,10 @@ import (
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
+
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
 
 // eventually polls cond until it returns true or timeout passes, and
 // reports whether it did.
@@ -545,7 +550,7 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 // dispatch itself is sealed to the sprout and can't be read off the bus.
 func TestRegisterNatsConn_RecordsDispatchedJobs(t *testing.T) {
 	obj := useTestObjStore(t)
-	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

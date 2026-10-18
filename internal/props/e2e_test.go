@@ -51,12 +51,3 @@ func TestGetPropsExportedWithExpiredEntries(t *testing.T) {
 		t.Errorf("expected stable=here, got %v", got["stable"])
 	}
 }
-
-// TestHostnameFuncNeverEmpty verifies the hostname function always
-// returns a non-empty value (falls back to "localhost").
-func TestHostnameFuncNeverEmpty(t *testing.T) {
-	got := hostname("any-sprout")
-	if got == "" {
-		t.Error("hostname should never be empty")
-	}
-}

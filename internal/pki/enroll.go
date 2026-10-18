@@ -111,6 +111,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/nats-io/nkeys"
@@ -217,9 +218,13 @@ func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
 // (internal/api/handlers): the production store's cross-schema MySQL
 // can't run on their SQLite database, and since SEC.7b a sprout's first
 // box key can only be recorded through the join token path, so those tests
-// can no longer start from a sprout accepted outside it. Never called
-// outside tests.
+// can no longer start from a sprout accepted outside it. It panics unless
+// testing.Testing reports a test binary, so a production build cannot
+// swap the join token store out.
 func UseInMemoryJoinToken(joinToken, tenantID string, maxUses int) (restore func()) {
+	if !testing.Testing() {
+		panic("pki: UseInMemoryJoinToken outside a test")
+	}
 	tok, err := jointoken.Parse(joinToken)
 	if err != nil {
 		panic("pki: UseInMemoryJoinToken: malformed join token")

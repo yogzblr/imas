@@ -28,7 +28,7 @@ type sealedFacts struct {
 // usePKIDB gives pki an in-memory store of its own for t.
 func usePKIDB(t *testing.T) {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-pki?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-pki-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +37,9 @@ func usePKIDB(t *testing.T) {
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 }
 
 // newSealedFacts starts the mock OpenBao. pki's store must be set

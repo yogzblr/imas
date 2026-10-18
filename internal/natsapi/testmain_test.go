@@ -61,6 +61,9 @@ func TestMain(m *testing.M) {
 	}
 	sharedPKIDB = pkiDB
 	pki.SetDB(pkiDB)
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState), for every test of the package.
+	pki.UseSaaSAPICredentialState(nil)
 
 	// Recipes now read through internal/objectstore instead of local disk
 	// (see internal/cook/store.go) — wire a fake S3 backend into

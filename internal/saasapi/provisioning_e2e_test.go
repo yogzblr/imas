@@ -102,6 +102,9 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	}
 	pki.SetDB(pkiDB)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 	env.farmerDB = pkiDB
 
 	// Farmer's TLS material and NKey — the config values

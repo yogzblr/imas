@@ -791,8 +791,10 @@ Each OpenBao client runs under its own role and gets exactly one policy.
   it as `X-Vault-Namespace` on every request, logins included; when it is
   unset, no namespace header is sent. The chart sets none of them. To use
   a namespace, add the variables to `farmer.extraEnv` (farmer's three
-  clients). saasapi has no OpenBao client. The publish Job has no `extraEnv`, so the chart can't set
-  `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE`, and the `bao` CLI steps (the
+  clients) and `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` (its KV client) and
+  `IMAS_NATSSIGN_OPENBAO_NAMESPACE` (its signer) to
+  `credentialPublisher.extraEnv` (the publish Job and its refresh
+  CronJob). saasapi has no OpenBao client. The `bao` CLI steps (the
   bootstrap Job and saasapi's `fetch-bus-ca` init container) don't set a
   namespace either. `docs/INSTALL.md` has the full `<prefix>OPENBAO_*` set.
 
@@ -804,7 +806,13 @@ Each OpenBao client runs under its own role and gets exactly one policy.
     once (kept across upgrades with `lookup`) into `<release>-farmer-db`.
   - External: `database.existingSecret` holds both full DSNs.
   - saasapi refuses to start unless its DSN sets `parseTime=true` (the
-    `database.params` default does), and warns if `loc` isn't UTC.
+    `database.params` default does).
+  - farmer and saasapi both refuse to start when their DSN's `loc` is not
+    `UTC` (an absent `loc` is the driver's default, UTC), and the chart
+    refuses a `database.params` that sets another: the row leases and the
+    DATETIME columns the two services share are written and compared as
+    UTC times (security review 2026-10, I1). For `database.existingSecret`
+    DSNs, set `loc=UTC` or leave `loc` out.
 - **Schemas, users and grants** are the migrate Job's; see
   [Migrations](#migrations).
 - **Declarative `users` isn't used.** The operator's `users` field applies
@@ -1776,7 +1784,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `openbaoClient.authMethod` | `kubernetes` | Or `token`, which uses `tokenSecretName` with per-client keys. |
 | `openbaoClient.k8sMount` / `k8sAudience` | `kubernetes` / `openbao` | Kubernetes auth mount, and the projected token's audience. |
 | `openbaoTools.image` | `quay.io/openbao/openbao:2.7.1` | The bao CLI, for the bootstrap Job and the CA fetch. |
-| `database.host` / `port` / `params` | `""` / `3306` / `parseTime=true&charset=utf8mb4&loc=UTC` | PXC. Empty host with `pxc.enabled`: its HAProxy Service. |
+| `database.host` / `port` / `params` | `""` / `3306` / `parseTime=true&charset=utf8mb4&loc=UTC` | PXC. Empty host with `pxc.enabled`: its HAProxy Service. `params` must keep `loc=UTC` (or no `loc`): farmer and saasapi refuse any other. |
 | `database.farmer.*` / `database.saasapi.*` | `farmer`/`farmer_svc`, `saas`/`saas_svc` | Schemas and users. |
 | `database.existingSecret` | `""` | Both DSNs (`existingSecretKeys`). Required without `pxc.enabled`. |
 | `database.migrate.image.*` | `ghcr.io/yogzblr/imas-migrate`, tag `appVersion` | `cmd/migrate`. Keep it at farmer's and saasapi's version. |
@@ -1851,7 +1859,9 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `saasapi.recipes.writeRateLimit.*` | `1` / `10` | `SAASAPI_RECIPES_WRITE_RATE_LIMIT` / `_BURST`: PUT and DELETE per tenant. |
 | `saasapi.recipes.credentialCheck` | `true` | `SAASAPI_RECIPES_CREDENTIAL_CHECK`: saasapi refuses to start unless the object store denies its recipe credential outside `tenants/`, on `sprouts/`, creating and deleting under the platform recipe prefix (farmer's `recipedir`, default `/srv/imas/recipes/prod/`), and put, get, delete and list (of `jobs/` and of the bucket root) in the job bucket. Requires `objectStore.jobBucket`, passed as `SAASAPI_RECIPES_JOB_BUCKET`; the chart refuses to render without it while this is on. `false` turns it off; NOTES warns. See [Tenant recipe upload](#tenant-recipe-upload). |
 | `saasapi.extraEnv` | `[]` | Extra env vars for saasapi, e.g. `HTTPS_PROXY`/`NO_PROXY`. |
+| `saasapi.pdb.enabled` / `maxUnavailable` | `true` / `1` | saasapi's PodDisruptionBudget; only with `replicaCount` > 1 (saasapi has no HPA). `maxUnavailable` is a whole number from 1 to `replicaCount` - 1, or a percentage above `0%` and below `100%`: the render fails on a value that would block every drain or protect nothing. |
 | `credentialPublisher.*` | enabled, `platform/imas/saasapi-nats-user` | The publish Job, and its refresh CronJob. |
+| `credentialPublisher.extraEnv` | `[]` | Extra env vars for the publish container of the Job and the refresh CronJob, e.g. `IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE` (see [OpenBao](#openbao)) or `HTTPS_PROXY`/`NO_PROXY`. `IMAS_NATSSIGN_OPENBAO_NAMESPACE` sets the signer's namespace. Any other `IMAS_*` name, or an entry without a name, fails the render (the chart sets the publisher's own). The publisher's NetworkPolicy allows egress to OpenBao and DNS only, so a proxy needs a NetworkPolicy of your own that lets its pods reach the proxy. |
 | `credentialPublisher.userJWTTTL` | `24h` | `IMAS_SAASAPI_USER_JWT_TTL`: the SaaS API User JWT's lifetime (its `exp`), hours and minutes, 1h to 720h, more than 3 x (`refresh.everyHours` + the CronJob's start delay and run time). A run writes a new JWT once a third of it is left. |
 | `credentialPublisher.refresh.everyHours` | `4` | The refresh CronJob (`<release>-farmer-saasapi-credential-refresh`): the publish run every this many hours (1, 2, 3, 4, 6, 8 or 12), so the JWT is renewed before it expires. The render fails unless `userJWTTTL` is more than 3 times this plus `refresh.startingDeadlineSeconds` and `activeDeadlineSeconds` (12h45m with the defaults): the renewing run may start late and take time to publish. |
 | `credentialPublisher.refresh.minute` | `17` | The minute of the hour it runs at: schedule `<minute> */<everyHours> * * *`. |

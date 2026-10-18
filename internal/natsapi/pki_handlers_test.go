@@ -13,7 +13,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +30,10 @@ import (
 	"github.com/yogzblr/imas/internal/tenantconn"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // setupNatsAPIPKI wires up an in-memory PKI store (see
 // internal/pki/store.go) plus the same TLS/NKey scaffolding pki_test.go's
 // setupTestPKI uses, so PKI handlers can manipulate sprout keys during
@@ -36,7 +42,7 @@ import (
 func setupNatsAPIPKI(t *testing.T) string {
 	t.Helper()
 
-	dsn := "file:" + t.Name() + "-pki?mode=memory&cache=shared"
+	dsn := "file:" + t.Name() + "-pki-" + strconv.FormatInt(memDBSeq.Add(1), 10) + "?mode=memory&cache=shared"
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)

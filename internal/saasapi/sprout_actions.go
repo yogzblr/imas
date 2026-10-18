@@ -135,42 +135,14 @@ const (
 	// because the sprout has no payload-encryption key on record (FIX.1:
 	// sealed only, never plaintext). It never ran, and it isn't sent again:
 	// it would be refused the same way until the sprout is re-enrolled.
-	// The same string farmer replies with (farmerCodeSproutReenrollRequired).
-	errCodeSproutReenrollRequired = "sprout_reenroll_required"
+	// The same string farmer replies with (controlplane.ErrorSproutReenrollRequired).
+	errCodeSproutReenrollRequired = string(controlplane.ErrorSproutReenrollRequired)
 	// errCodeSelfUpdateDisabled: farmer's self-update switch
 	// (IMAS_SELF_UPDATE_ENABLED) is off, so it refused the update unrun. It
 	// never ran, and it isn't sent again: farmer refuses every update until
 	// an operator turns the switch on. The same string farmer replies with
-	// (farmerCodeSelfUpdateDisabled).
-	errCodeSelfUpdateDisabled = "self_update_disabled"
-)
-
-// Codes farmer's internal.sprout.action replies with besides
-// controlplane's (internal/natsapi, sprout_action.go, which pins the same
-// strings). They belong in internal/controlplane, which was outside
-// SEC.5's scope.
-const (
-	// farmerCodeSelfUpdateDisabled: farmer's IMAS_SELF_UPDATE_ENABLED is
-	// off, so it refused the self_update unrun. Stored as
-	// errCodeSelfUpdateDisabled, the same string (documented in
-	// docs/api/saasapi.md and the OpenAPI enum, which
-	// TestItemErrorCodesDocumented checks).
-	farmerCodeSelfUpdateDisabled = errCodeSelfUpdateDisabled
-	// farmerCodeRolloutWindowClosed: farmer found now outside the
-	// tenant's rollout window and refused the self_update unrun. The same
-	// string as errCodeRolloutWindowClosed.
-	farmerCodeRolloutWindowClosed = errCodeRolloutWindowClosed
-	// farmerCodeBusy: farmer's per-tenant cap or pool was full, so it
-	// refused the request unrun. Never stored: the item goes back to
-	// queued (replyUpdate).
-	farmerCodeBusy = "farmer_busy"
-	// farmerCodeSproutReenrollRequired: the sprout has no
-	// payload-encryption key on record, so farmer refused to send it
-	// anything (FIX.1: sealed only, never plaintext); it must be
-	// re-enrolled. Not sent again: it would be refused the same way until
-	// then. Stored as errCodeSproutReenrollRequired, the same string
-	// (FIX.5; FIX.1 stored internal_error until the code was documented).
-	farmerCodeSproutReenrollRequired = errCodeSproutReenrollRequired
+	// (controlplane.ErrorSelfUpdateDisabled).
+	errCodeSelfUpdateDisabled = string(controlplane.ErrorSelfUpdateDisabled)
 )
 
 // actionErrorMessages is the only text ever shown for an item's error
@@ -222,7 +194,7 @@ func farmerErrorCode(code controlplane.ErrorCode) string {
 	switch code {
 	case controlplane.ErrorInvalidRequest, controlplane.ErrorUnsupportedAction,
 		controlplane.ErrorSproutNotFound, controlplane.ErrorSproutUnreachable,
-		farmerCodeRolloutWindowClosed:
+		controlplane.ErrorRolloutWindowClosed:
 		return string(code)
 	}
 	return string(controlplane.ErrorInternal)
@@ -1032,15 +1004,15 @@ func replyUpdate(batch AssetActionBatch, item AssetActionItem, data []byte) map[
 	}
 
 	switch {
-	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeBusy:
+	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == controlplane.ErrorFarmerBusy:
 		log.Warnf("saasapi: farmer was busy (its pool or tenant %s's cap full) and refused batch %s asset %s unrun; left queued",
 			batch.TenantID, batch.ID, item.AssetID)
 		return requeueUpdate()
-	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSelfUpdateDisabled:
+	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == controlplane.ErrorSelfUpdateDisabled:
 		log.Errorf("saasapi: farmer refused batch %s asset %s (tenant %s): self_update is disabled on farmer (IMAS_SELF_UPDATE_ENABLED); recorded as %s",
 			batch.ID, item.AssetID, batch.TenantID, errCodeSelfUpdateDisabled)
 		return failedUpdate(errCodeSelfUpdateDisabled)
-	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == farmerCodeSproutReenrollRequired:
+	case reply.Status == controlplane.StatusFailed && reply.ErrorCode == controlplane.ErrorSproutReenrollRequired:
 		log.Warnf("saasapi: farmer refused batch %s asset %s (tenant %s): sprout %s has no payload-encryption key on record and must be re-enrolled; nothing was sent; recorded as %s",
 			batch.ID, item.AssetID, batch.TenantID, item.SproutID, errCodeSproutReenrollRequired)
 		return failedUpdate(errCodeSproutReenrollRequired)

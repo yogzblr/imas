@@ -49,9 +49,15 @@ import (
 //     release wrote), which the rollout sweep treats differently.
 //
 // Times are on each replica's own clock (outboxNow), UTC at lease_until's
-// millisecond precision. The design assumes replica clocks agree to well
-// within the lease TTL (NTP keeps them within milliseconds); a replica
-// whose clock runs ahead by more than that could claim a row early.
+// millisecond precision, not the database's NOW(3): the clock is
+// replaceable, and the tests drive it over sqlite, which has no NOW(3).
+// Every replica of farmer and saasapi therefore writes and compares them
+// in UTC: both refuse to start on a DSN whose loc is not UTC
+// (internal/mysqldsn, security review 2026-10, I1), since the driver
+// converts each time with that loc. The design assumes replica clocks
+// agree to well within the lease TTL (NTP keeps them within
+// milliseconds); a replica whose clock runs ahead by more than that could
+// claim a row early.
 //
 // The token is this replica's name plus a fresh random suffix per claim,
 // so two leases taken by one process (its request handler's and its own

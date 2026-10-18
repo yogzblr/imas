@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yogzblr/imas/internal/accountrank"
+	"github.com/yogzblr/imas/internal/accountrank/accountranktest"
 	"github.com/yogzblr/imas/internal/objectstore"
 )
 
@@ -653,5 +655,45 @@ func TestStoreSourceReopensAfterFailure(t *testing.T) {
 	}
 	if opens.Load() != 2 {
 		t.Errorf("store opened %d times, want a re-open after the failure", opens.Load())
+	}
+}
+
+// Security review 2026-10, L16: an object issued in the year 3000 is
+// rejected and never applied, so the current JWT the node holds stays, and
+// a later current JWT is still pushed.
+func TestFutureDatedJWTNotApplied(t *testing.T) {
+	tr, b, node, _, l, pubs := ready(t, 1)
+	p := pubs[0]
+	current := node.holds(p)
+	b.putAccount(t, p, tr.jwt(t, p, accountranktest.Year3000))
+	b.bumpIndex(t, "T1")
+	l.HandleEvent([]byte(`{"v":1,"token":"T1"}`))
+	waitFor(t, "the future-dated object rejected", func() bool { return l.Status().Counters[CounterInvalid] == 1 })
+	if node.holds(p) != current {
+		t.Fatal("a year-3000 JWT replaced the current one on the node")
+	}
+	if inv := l.Status().Invalid; len(inv) != 1 || inv[0].Key != AccountKey(p) || !strings.Contains(inv[0].Reason, accountrank.ErrFutureIssuedAt.Error()) {
+		t.Errorf("invalid objects %+v, want %s rejected for its future issued-at", inv, AccountKey(p))
+	}
+
+	later := tr.jwt(t, p, time.Now().Unix())
+	b.putAccount(t, p, later)
+	b.bumpIndex(t, "T2")
+	l.HandleEvent([]byte(`{"v":1,"token":"T2"}`))
+	waitFor(t, "the later JWT pushed", func() bool { return node.holds(p) == later })
+}
+
+// L16: a node that holds a planted year-3000 JWT is overwritten with the
+// JWT the loader applied by the sample check.
+func TestSampleCheckReplacesFutureDatedJWTOnNode(t *testing.T) {
+	tr, _, node, _, l, pubs := ready(t, 1)
+	p := pubs[0]
+	want := node.holds(p)
+	node.mu.Lock()
+	node.held[p] = tr.jwt(t, p, accountranktest.Year3000)
+	node.mu.Unlock()
+	l.sampleCheck(context.Background())
+	if node.holds(p) != want {
+		t.Error("sample check left the year-3000 JWT on the node")
 	}
 }

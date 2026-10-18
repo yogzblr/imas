@@ -25,6 +25,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/payloadbox/sealedwiretest"
 )
 
 // setupSproutFiles points every sprout-side path this client reads or
@@ -485,8 +486,8 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 	}
 	// The sealed request is exactly an envelope: nothing of it, the NKey
 	// included, is readable without a box key.
-	if sealed, _ := json.Marshal(body["sealed"]); checkSealedEnvelope(sealed) != nil {
-		t.Errorf("the sealed refresh request is not exactly a sealed envelope: %v", checkSealedEnvelope(sealed))
+	if sealed, _ := json.Marshal(body["sealed"]); sealedwiretest.CheckSealedEnvelope(sealed) != nil {
+		t.Errorf("the sealed refresh request is not exactly a sealed envelope: %v", sealedwiretest.CheckSealedEnvelope(sealed))
 	}
 	if store.rows["ek_1"].UsedCount != 1 {
 		t.Errorf("used_count = %d after refresh, want 1", store.rows["ek_1"].UsedCount)

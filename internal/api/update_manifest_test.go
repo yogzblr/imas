@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ func newManifestFixture(t *testing.T) *manifestFixture {
 // per-connection.
 func newSaasTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "-" + strconv.FormatInt(memDBSeq.Add(1), 10)
 	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)

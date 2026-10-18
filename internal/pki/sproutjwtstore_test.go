@@ -453,6 +453,14 @@ func TestSproutJWTReuseAndRemint(t *testing.T) {
 		sum := sha256.Sum256([]byte(signed))
 		hexSum := hex.EncodeToString(sum[:])
 		key := sproutJWTObjectKey("t1", "web-1", hexSum)
+		// The row names one object at a time: drop the one it names now,
+		// as a re-mint would have, so the planted stale JWT is the only
+		// object a later re-mint supersedes.
+		if old := e.row(t, "t1", "web-1").ObjectKey; old != nil {
+			if err := e.objects.Delete(ctx, *old); err != nil {
+				t.Fatal(err)
+			}
+		}
 		e.srv.Set(key, signed)
 		if err := e.db.Model(&sproutUserJWTRow{}).Where("tenant_id = ? AND sprout_id = ?", "t1", "web-1").
 			Updates(map[string]any{"object_key": key, "jwt_sha256": hexSum}).Error; err != nil {

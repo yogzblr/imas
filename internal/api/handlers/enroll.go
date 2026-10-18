@@ -16,6 +16,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -111,6 +112,12 @@ type enrollErrorResponse struct {
 // through the handler.
 var pkiEnroll = pki.Enroll
 
+// maxEnrollRequestBytes caps a /v1/enroll body (security review 2026-10,
+// I12): a real one is a join token, keys, a hostname and two sealed
+// proofs, well under 8 KiB. A larger body is refused with 413 (and the
+// generic failure body) before it is read further.
+const maxEnrollRequestBytes = 64 << 10
+
 // enrollBusyRetryAfter is the Retry-After a busy answer carries: the time
 // pki waits for another replica's mint before giving up with
 // pki.ErrSproutJWTBusy (sproutJWTPollWait), by which the winner has
@@ -125,11 +132,30 @@ const enrollBusyRetryAfter = 5 * time.Second
 // attacker a free oracle for enumerating key_ids or timing a race against
 // expiry. The one exception is a failure that wraps pki.ErrSproutJWTBusy
 // (another farmer replica holds the sprout's User JWT mint lease): it is
-// retryable, so it answers 503 with a Retry-After (writeEnrollError).
+// retryable, so it answers 503 with a Retry-After (writeEnrollError). A
+// body over maxEnrollRequestBytes answers 413, with the same body.
 func Enroll(w http.ResponseWriter, r *http.Request) {
 	var req enrollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEnrollRequestBytes))
+	err := dec.Decode(&req)
+	if err == nil {
+		// The whole body is read before anything is acted on: a second
+		// value, or trailing bytes past the limit after a complete object
+		// (which Decode alone would not reach), fails the request.
+		if extra := dec.Decode(&struct{}{}); extra != io.EOF {
+			err = extra
+			if err == nil {
+				err = errors.New("more than one JSON value")
+			}
+		}
+	}
+	if err != nil {
 		log.Warnf("enroll: invalid request body: %v", err)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeEnrollFailure(w, http.StatusRequestEntityTooLarge)
+			return
+		}
 		writeEnrollFailed(w)
 		return
 	}

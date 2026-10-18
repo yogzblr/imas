@@ -6,17 +6,23 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // openTestPXC returns a real *gorm.DB (in-memory SQLite, standing in for
 // PXC the way internal/heartbeat's and internal/pki's tests do).
 func openTestPXC(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening test db: %v", err)
 	}

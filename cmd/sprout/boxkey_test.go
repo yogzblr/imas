@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +37,10 @@ import (
 	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // boxKeyEnv is farmer (its real NATS API, internal/natsapi.Subscribe,
 // including handleBoxKeySubmit) and one enrolled sprout, on one bus.
 type boxKeyEnv struct {
@@ -45,7 +51,7 @@ type boxKeyEnv struct {
 
 func setupBoxKeyEnv(t *testing.T) *boxKeyEnv {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +318,7 @@ func sealedCLIAdmin(t *testing.T, tenantID string) {
 	}
 	// An admin role, since dangerously_allow_root no longer bypasses
 	// RBAC on the NATS path.
-	rdb, err := gorm.Open(sqlite.Open("file:rbac_"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	rdb, err := gorm.Open(sqlite.Open("file:rbac_"+t.Name()+"-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

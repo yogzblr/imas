@@ -19,6 +19,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/payloadbox/sealedwiretest"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -89,19 +90,19 @@ func TestRefresh_AnswersOnlySealed(t *testing.T) {
 	var resp struct {
 		Sealed json.RawMessage `json:"sealed"`
 	}
-	if err := decodeStrict(w.Body.Bytes(), &resp); err != nil {
+	if err := sealedwiretest.DecodeStrict(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("the response is not exactly {sealed}: %v: %s", err, w.Body)
 	}
-	if err := checkSealedEnvelope(resp.Sealed); err != nil {
+	if err := sealedwiretest.CheckSealedEnvelope(resp.Sealed); err != nil {
 		t.Fatalf("the response's sealed field: %v", err)
 	}
-	if jwt, found, err := jwtInJSON(w.Body.Bytes()); err != nil || found {
+	if jwt, found, err := sealedwiretest.JWTInJSON(w.Body.Bytes()); err != nil || found {
 		t.Errorf("the response carries a JWT in the clear: %q (%v)", jwt, err)
 	}
 
 	res := openRefreshReply(t, resp.Sealed, msgID)
 	for name, v := range map[string]string{"gateway_jwt": res.GatewayJWT, "jwt": res.JWT} {
-		if _, ok := findJWT(v); !ok {
+		if _, ok := sealedwiretest.FindJWT(v); !ok {
 			t.Errorf("sealed %s %q is not recognized as a JWT, so the check above proves nothing", name, v)
 		}
 		if strings.Contains(w.Body.String(), v) {
@@ -149,13 +150,13 @@ func TestRefresh_SealedCheckIgnoresCiphertextThatLooksLikeJWT(t *testing.T) {
 	var resp struct {
 		Sealed json.RawMessage `json:"sealed"`
 	}
-	if err := decodeStrict(body, &resp); err != nil {
+	if err := sealedwiretest.DecodeStrict(body, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkSealedEnvelope(resp.Sealed); err != nil {
+	if err := sealedwiretest.CheckSealedEnvelope(resp.Sealed); err != nil {
 		t.Errorf("crafted ciphertext refused: %v", err)
 	}
-	if jwt, found, err := jwtInJSON(body); err != nil || found {
+	if jwt, found, err := sealedwiretest.JWTInJSON(body); err != nil || found {
 		t.Errorf("crafted ciphertext read as a JWT: %q (%v)", jwt, err)
 	}
 
@@ -169,18 +170,18 @@ func TestRefresh_SealedCheckIgnoresCiphertextThatLooksLikeJWT(t *testing.T) {
 		"as a key":       `{"sealed":` + string(sealed) + `,"` + jwt + `":1}`,
 		"unpadded sig":   `{"x":"` + strings.TrimSuffix(jwt, "c2ln") + `"}`,
 	} {
-		if _, found, err := jwtInJSON([]byte(leaky)); err != nil || !found {
+		if _, found, err := sealedwiretest.JWTInJSON([]byte(leaky)); err != nil || !found {
 			t.Errorf("%s: JWT not found (%v)", name, err)
 		}
 	}
 	// And an extra plaintext field fails the shape check whatever it holds.
-	if err := decodeStrict([]byte(`{"sealed":`+string(sealed)+`,"web-01":1}`), &resp); err == nil {
+	if err := sealedwiretest.DecodeStrict([]byte(`{"sealed":`+string(sealed)+`,"web-01":1}`), &resp); err == nil {
 		t.Error("an extra plaintext field passed the shape check")
 	}
 	// Not a JWT: dots between non-header parts, or base64 with no header.
 	for _, s := range []string{"a.b.c", "web-01.example.com", "eyJ", "eyJhYmMi.x.y"} {
-		if _, ok := findJWT(s); ok {
-			t.Errorf("findJWT(%q) matched", s)
+		if _, ok := sealedwiretest.FindJWT(s); ok {
+			t.Errorf("sealedwiretest.FindJWT(%q) matched", s)
 		}
 	}
 }

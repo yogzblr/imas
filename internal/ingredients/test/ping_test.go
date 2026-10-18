@@ -42,23 +42,6 @@ func startTestNATS(t *testing.T) (*nats.Conn, func()) {
 	}
 }
 
-func TestRegisterNatsConn(t *testing.T) {
-	conn, cleanup := startTestNATS(t)
-	defer cleanup()
-
-	// Verify the package-level nc is set.
-	RegisterNatsConn(conn)
-	if nc != conn {
-		t.Error("RegisterNatsConn did not set the package-level connection")
-	}
-
-	// Clean up.
-	RegisterNatsConn(nil)
-	if nc != nil {
-		t.Error("RegisterNatsConn(nil) did not clear the connection")
-	}
-}
-
 func TestFPingSuccess(t *testing.T) {
 	conn, cleanup := startTestNATS(t)
 	defer cleanup()

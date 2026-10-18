@@ -58,6 +58,27 @@ Scope: `cmd/farmerbus` (fence), `internal/accountrank`, `internal/pki`
   is not UTC, with a message naming the setting (today they only warn). Update the
   chart default and docs. Test both.
 
+Corrections made while building V1 (by the decision order in
+`ORCHESTRATOR.md` rule 6):
+
+- I8: since E3 there is no Account or SYS JWT file. Farmer holds the JWTs
+  in memory and reads the accounts bucket; "file missing or undecodable"
+  is "neither held nor in the bucket", where a minimal JWT is minted
+  (`ensureTenantAccountMaterial`, `ensureNatsAuth`) or the trust's SYS
+  Account JWT is used (`ensurePlatformAuth`). For the SYS account the
+  revocations come from `saas.saasapi_credential_state` (the rotated-out
+  SaaS API key, `EnsureSaaSAPICredential`'s rule), not from
+  `syncTenantSprouts`, which covers tenant Accounts only.
+- L16: the bus holds no signing seed after P21 (`internal/pki/busauth.go`),
+  so there is no residual to record; the design doc says so.
+- I12: the review's `pushall.go:177-180` drifted; the stale comments are the
+  `PushAllAccounts` doc ("learns the Accounts only from core") and the SYS
+  push's "epoch-dated bootstrap".
+- I1: the leases are compared in the application's clock because the tests
+  drive that clock over sqlite, which has no `NOW(3)`; so the fallback
+  applies (refuse a non-UTC `loc`). The chart default already sets
+  `loc=UTC`; the chart now also refuses a `database.params` with another.
+
 ## V2: release and chart publishing (P10)
 
 Scope: `.github/workflows` (`release.yml`, `publish-packages.yml`,
@@ -143,3 +164,20 @@ Scope: `docs/`, small code moves named below, GitHub issues.
 - **P17 leftovers.** After the batches S, T and U, list in the findings document
   which of the "tests that pin current behaviour" are now changed, and which gaps
   remain; fix any remaining gap that is a missing test.
+
+### Brief corrections (V3, 2026-10-18)
+
+- **Codes.** "`self_update_disabled` and the two other codes" are four
+  farmer-only `internal.sprout.action` codes on `main`:
+  `self_update_disabled`, `rollout_window_closed`, `farmer_busy` and
+  `sprout_reenroll_required`. All four moved into `internal/controlplane`.
+- **Issues.** #138, #139 and #142 were already closed on GitHub, by #169,
+  #272 and #238. V3 checked each fix and its test on `main` and added the
+  comment naming the PR. The state stayed closed.
+- **Carry-over list.** `docs/claude-code-parallel-build-plan.md` has no
+  list of its own; it only cites Open item 10 of the archive.
+- **REC.1.** S6 (purge of `tenants/<id>/`) and U4 (audit retention)
+  already cover REC.1's audit and deprovision follow-ups. What was left
+  is recorded in `docs/security-findings-status.md` (P11 rows 41 to 44).
+- **Info-only noise.** Of review -b's Info notes, bI3 and bI5 only confirm
+  H2 and M7. They have rows in the table, marked "As H2" and "As M7".

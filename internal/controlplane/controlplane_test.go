@@ -3,6 +3,7 @@ package controlplane
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -122,6 +123,22 @@ func TestPublicErrorMessage_SproutActionCodesHaveFixedMessages(t *testing.T) {
 	}
 }
 
+// The internal.sprout.action codes the SaaS API keeps verbatim
+// (internal/saasapi, replyUpdate and farmerErrorCode) and farmer sends
+// (internal/natsapi). Changing one is a wire change on both sides.
+func TestSproutActionErrorCodeValues(t *testing.T) {
+	for code, want := range map[ErrorCode]string{
+		ErrorSelfUpdateDisabled:     "self_update_disabled",
+		ErrorRolloutWindowClosed:    "rollout_window_closed",
+		ErrorFarmerBusy:             "farmer_busy",
+		ErrorSproutReenrollRequired: "sprout_reenroll_required",
+	} {
+		if string(code) != want {
+			t.Errorf("%s, want %s", code, want)
+		}
+	}
+}
+
 // TestDecodeSelfUpdateParams: exactly {"version": ...}. A caller still
 // sending the pre-FU.7 artifact_url, checksum_sha256 or signature is
 // refused rather than having them dropped.
@@ -209,5 +226,19 @@ func TestPurgeValidators(t *testing.T) {
 		if PublicErrorMessage(code) == PublicErrorMessage(ErrorInternal) {
 			t.Errorf("%s has no public message of its own", code)
 		}
+	}
+}
+
+// A cmd.run's output never crosses internal.sprout.action (security review
+// 2026-10, L9): the result carries only the exit code and duration, so a
+// field added for output fails here before it reaches the unsealed bus.
+func TestCmdRunResultCarriesNoOutput(t *testing.T) {
+	typ := reflect.TypeOf(CmdRunResult{})
+	var got []string
+	for i := range typ.NumField() {
+		got = append(got, typ.Field(i).Name)
+	}
+	if want := []string{"ExitCode", "Duration"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("CmdRunResult fields %v, want %v", got, want)
 	}
 }

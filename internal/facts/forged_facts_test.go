@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -168,7 +169,11 @@ func TestHandleFactsMsg_SealedOnly(t *testing.T) {
 // A plaintext report marks the sprout as needing an upgrade, and the next
 // sealed report clears it (heartbeat's upgrade marker).
 func TestHandleFactsMsg_PlaintextMarksUpgradeRequired(t *testing.T) {
-	const tenant, sid = "t_p6_up", "old-sprout"
+	// The props store is one database for the whole test binary
+	// (TestMain), so a fresh sprout ID per run keeps -count=N's later
+	// runs from seeing the first run's sealed report.
+	const tenant = "t_p6_up"
+	sid := "old-sprout-" + strconv.FormatInt(memDBSeq.Add(1), 10)
 	usePKIDB(t)
 	keys := newSealedFacts(t, tenant)
 	keys.enroll(tenant, sid)
@@ -203,7 +208,7 @@ func TestHandleFactsMsg_ForgedFactMovesNoSproutIntoACohort(t *testing.T) {
 	keys := newSealedFacts(t, tenant)
 	keys.enroll(tenant, "lin-01")
 	keys.enroll(tenant, "win-01")
-	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-rbac?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open("file:"+t.Name()+"-rbac-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

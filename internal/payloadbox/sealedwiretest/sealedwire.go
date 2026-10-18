@@ -1,4 +1,7 @@
-package handlers
+// Package sealedwiretest holds test helpers that check what a sealed
+// answer on the wire may and may not show (T.1). It is for tests only:
+// no non-test code may import it.
+package sealedwiretest
 
 // What a sealed answer on the wire may and may not show (T.1). Checking
 // a sealed body for a substring such as "eyJ" is wrong: it is random
@@ -31,9 +34,9 @@ type sealedWireEnvelope struct {
 	} `json:"s"`
 }
 
-// decodeStrict decodes data into v, refusing unknown fields and trailing
+// DecodeStrict decodes data into v, refusing unknown fields and trailing
 // data.
-func decodeStrict(data []byte, v any) error {
+func DecodeStrict(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -45,12 +48,12 @@ func decodeStrict(data []byte, v any) error {
 	return nil
 }
 
-// checkSealedEnvelope reports whether raw is exactly a payloadbox
+// CheckSealedEnvelope reports whether raw is exactly a payloadbox
 // envelope: version, and copies of a 24-byte nonce and a box no shorter
 // than its tag, with no other field.
-func checkSealedEnvelope(raw []byte) error {
+func CheckSealedEnvelope(raw []byte) error {
 	var env sealedWireEnvelope
-	if err := decodeStrict(raw, &env); err != nil {
+	if err := DecodeStrict(raw, &env); err != nil {
 		return fmt.Errorf("not a sealed envelope: %w", err)
 	}
 	if env.V != payloadbox.Version || len(env.Copies) == 0 || len(env.Copies) > payloadbox.MaxCopies {
@@ -64,9 +67,9 @@ func checkSealedEnvelope(raw []byte) error {
 	return nil
 }
 
-// jsonKeysAndStrings returns every object key and string value in data,
+// JSONKeysAndStrings returns every object key and string value in data,
 // in order and including duplicated keys, which a map would drop.
-func jsonKeysAndStrings(data []byte) ([]string, error) {
+func JSONKeysAndStrings(data []byte) ([]string, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	var out []string
 	for {
@@ -83,11 +86,11 @@ func jsonKeysAndStrings(data []byte) ([]string, error) {
 	}
 }
 
-// findJWT returns the first JWT in s: three dot-separated base64url parts
+// FindJWT returns the first JWT in s: three dot-separated base64url parts
 // (a JWS; a JWE's first three parts match too) whose first part decodes
 // to a JSON object, its header. Standard base64 has no '.', so ciphertext
 // never matches by chance.
-func findJWT(s string) (string, bool) {
+func FindJWT(s string) (string, bool) {
 	isPart := func(r rune) bool {
 		return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '='
 	}
@@ -107,14 +110,14 @@ func findJWT(s string) (string, bool) {
 	return "", false
 }
 
-// jwtInJSON returns the first JWT in any key or string value of data.
-func jwtInJSON(data []byte) (string, bool, error) {
-	strs, err := jsonKeysAndStrings(data)
+// JWTInJSON returns the first JWT in any key or string value of data.
+func JWTInJSON(data []byte) (string, bool, error) {
+	strs, err := JSONKeysAndStrings(data)
 	if err != nil {
 		return "", false, err
 	}
 	for _, s := range strs {
-		if jwt, ok := findJWT(s); ok {
+		if jwt, ok := FindJWT(s); ok {
 			return jwt, true, nil
 		}
 	}

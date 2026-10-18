@@ -80,6 +80,9 @@ var tenantAuthMu sync.Mutex
 // ensureTenantAccountMaterial loads tenantID's Account keys from Transit
 // and its Account JWT (the one this process holds, or else the accounts
 // bucket's), minting a minimal one and holding it if neither has one —
+// with the tenant's revocations as the database has them
+// (applyStoredRevocations), so a lost Account JWT never comes back
+// without them —
 // idempotent, but relies on the caller already holding
 // tenantAuthMu (every call site in this file does, via
 // ensureTenantAccountLocked or loadTenantAccountMaterial) for safety
@@ -123,6 +126,9 @@ func ensureTenantAccountMaterial(mat *natsAuthMaterial, tenantID, name string, c
 	ac := jwt.NewAccountClaims(tam.pub)
 	ac.Name = name
 	ac.SigningKeys.Add(signingPub)
+	if err := applyStoredRevocations(ac, tenantID); err != nil {
+		return nil, false, err
+	}
 	signed, err := ac.Encode(mat.operatorSigningKP)
 	if err != nil {
 		return nil, false, err
@@ -767,6 +773,49 @@ func syncTenantSprouts(mat *natsAuthMaterial, tam *tenantAccountMaterial, tenant
 		}
 	}
 	return changed, nil
+}
+
+// applyStoredRevocations puts tenantID's revocations, as the database
+// has them, on ac, the minimal Account JWT about to be minted because
+// neither this process nor the accounts bucket has one (security review
+// 2026-10, I8): every NKey on the tenant's revoked list, and the NKey of
+// every unaccepted, denied or rejected sprout that no accepted sprout of
+// the tenant uses. These are syncTenantSprouts' (and syncNatsAuth's)
+// revocation rules; it grants nothing, since a new Account revokes
+// nothing else. Any database error is returned naming the tenant, and
+// nothing is minted: a JWT without the revocations would re-admit every
+// revoked sprout until the next sync.
+func applyStoredRevocations(ac *jwt.AccountClaims, tenantID string) error {
+	fail := func(err error) error {
+		return fmt.Errorf("pki: tenant %q: rebuilding its Account revocations from the database before minting its Account JWT: %w", tenantID, err)
+	}
+	if db == nil {
+		return fail(errors.New("no database installed"))
+	}
+	revoked, err := revokedNKeys(tenantID)
+	if err != nil {
+		return fail(err)
+	}
+	var rows []nkeyRow
+	if err := db.Where("tenant_id = ?", tenantID).Find(&rows).Error; err != nil {
+		return fail(err)
+	}
+	accepted := map[string]string{}
+	for _, r := range rows {
+		if r.TenantID == tenantID && r.State == stateAccepted {
+			accepted[r.NKey] = r.SproutID
+		}
+	}
+	for _, r := range rows {
+		switch r.State {
+		case stateUnaccepted, stateDenied, stateRejected:
+			if r.TenantID == tenantID {
+				revokeUnlessAccepted(ac, tenantID, r.SproutID, r.State, r.NKey, accepted)
+			}
+		}
+	}
+	applyRevokedNKeys(ac, revoked)
+	return nil
 }
 
 // ReloadNKeysForTenant is ReloadNKeys (nats.go) scoped to a single explicit

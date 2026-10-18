@@ -73,7 +73,7 @@ The core needs these before farmer can enroll a single sprout:
 
 | Service | Used by | Required? |
 |---|---|---|
-| **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
+| **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. Both DSNs must set `loc=UTC` (or no `loc`); farmer and saasapi refuse any other. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
 | **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit key, but `POST /v1/enroll` fails closed until it is configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
 | **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. Both authenticate with a password (a file from Secret `imas-valkey-auth`, generated into OpenBao by the core chart's bootstrap Job), can use TLS (`valkey.tls.*`, expected for a production Valkey), and warn if Valkey may evict keys: run it with `maxmemory-policy noeviction`. See [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "Valkey". |
 | **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. For Azure Blob, the core chart can run Versity Gateway in front of it (`versity.enabled`), which then is the S3 endpoint and creates the buckets and their users. |
@@ -183,7 +183,7 @@ farmerinterface: 0.0.0.0              # bind address only
 farmerapiport: 5405
 farmerbusurl: tls://bus.example.internal:5406   # where farmer dials farmerbus
 farmerorganization: <your org>         # must match the bus's
-pxcdsn: farmer_svc:<pw>@tcp(pxc:3306)/farmer?parseTime=true
+pxcdsn: farmer_svc:<pw>@tcp(pxc:3306)/farmer?parseTime=true&loc=UTC   # loc must be UTC or absent
 valkeyaddrs: valkey:6379
 s3endpoint: s3.example.internal
 s3bucket: imas-recipes
@@ -631,7 +631,9 @@ client certificate never reach it.
 
 The provider ignores `VAULT_*` and `BAO_*` variables, so a
 `VAULT_HTTP_PROXY` or `BAO_HTTP_PROXY` set for other tools has no effect on
-it.
+it. It sends no namespace header either: a server namespace (Vault
+Enterprise, or an OpenBao namespace) is not supported for `sdb://openbao`,
+so point it at a mount in the root namespace.
 
 ### farmer and saasapi
 
@@ -641,8 +643,26 @@ follow `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and ignore
 environment of farmer, saasapi or the credential publish
 Job, put the platform OpenBao's host (the host in `*_OPENBAO_ADDR`) in
 `NO_PROXY`, unless the proxy is meant to reach it. With the Helm charts,
-the proxy variables go in `farmer.extraEnv` or `saasapi.extraEnv`; the
-charts set none of them themselves.
+the proxy variables go in `farmer.extraEnv`, `saasapi.extraEnv` or
+`credentialPublisher.extraEnv`; the charts set none of them themselves.
+
+### An `https://` proxy and OpenBao
+
+With `HTTPS_PROXY=https://…` (a proxy reached over TLS, not the usual
+`http://`), Go dials the proxy with the OpenBao client's own TLS settings
+(security review 2026-10, I3). This applies to the sprout's `sdb://openbao`
+provider and to the platform's OpenBao clients:
+
+- the proxy's certificate is checked against the OpenBao CA
+  (`*_OPENBAO_CACERT`), not the system roots, so a proxy whose certificate
+  that CA did not sign is refused;
+- the sprout also offers its OpenBao client certificate to the proxy, so the
+  proxy learns the sprout's certificate (not its key, the login token or a
+  secret, which travel inside the tunnel's own TLS session to OpenBao).
+
+If that is not wanted, use an `http://` proxy for OpenBao (the CONNECT tunnel
+still carries end-to-end TLS to OpenBao), or put the OpenBao host in
+`NO_PROXY`.
 
 ## The imas CLI
 

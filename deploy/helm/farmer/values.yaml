@@ -200,7 +200,9 @@ database:
   # otherwise.
   host: ""
   port: 3306
-  # go-sql-driver DSN parameters, shared by both DSNs.
+  # go-sql-driver DSN parameters, shared by both DSNs. loc must be UTC
+  # (or absent, the driver's default): farmer and saasapi refuse to start
+  # with any other, and so does this chart.
   params: "parseTime=true&charset=utf8mb4&loc=UTC"
   farmer:
     name: farmer
@@ -1080,6 +1082,10 @@ saasapi:
     create: true
     name: ""
     annotations: {}
+  # Rendered only with replicaCount > 1 (saasapi has no HPA, so
+  # replicaCount is the bound). maxUnavailable is a whole number from 1 to
+  # replicaCount - 1, or a percentage above 0% and below 100%; the render
+  # fails on anything that would block every drain or protect nothing.
   pdb:
     enabled: true
     maxUnavailable: 1
@@ -1135,6 +1141,15 @@ credentialPublisher:
   backoffLimit: 3
   activeDeadlineSeconds: 300
   ttlSecondsAfterFinished: 3600
+  # Extra env vars for the publish container, in the Job and the refresh
+  # CronJob alike, e.g. IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE (README.md,
+  # "OpenBao"), IMAS_NATSSIGN_OPENBAO_NAMESPACE (the signer's) or
+  # HTTPS_PROXY/NO_PROXY. Every entry needs a name; any other IMAS_* name is
+  # refused at render: the chart sets the publisher's own. The publisher's NetworkPolicy allows egress
+  # to OpenBao and DNS only, and has no extraEgress, so a proxy is
+  # unreachable until you add a NetworkPolicy of your own that lets the
+  # publisher's pods reach it.
+  extraEnv: []
   resources:
     requests: { cpu: 10m, memory: 32Mi }
     limits: { memory: 128Mi }

@@ -29,9 +29,10 @@ by `config.FarmerOrganization`).** Concretely:
   tenant.
 - `internal/natsapi.Subscribe(nc)` registers every `imas.api.>` handler,
   and every ingredient package's `RegisterNatsConn(nc)`
-  (`internal/cook`, `internal/cmd`, `internal/test`, `internal/jobs`,
-  `internal/facts`) registers its sprout-facing subscriptions, all on
-  that one connection.
+  (`internal/cook`, `internal/jobs`, `internal/facts`) registers its
+  sprout-facing subscriptions, all on that one connection. (When this
+  was written the `cmd` and `test` ingredients had one too; nothing used
+  their connection, and V3 removed both.)
 - `internal/pki/tenant.go`'s `ProvisionTenant` mints a *new*, distinct
   Account (`tenantAccountMaterial.pub`, keyed by `tenantID`, disjoint
   from `mat.tenantPub`) for every dynamically-provisioned tenant, and
@@ -115,7 +116,7 @@ runtime; a deprovisioned tenant's connection is closed. Keeps
 `subjects.go` completely unprefixed, exactly as
 `imas-nats-jwt-auth-design.md` recommends. Cost: connection lifecycle
 management in `cmd/farmer/main.go`, and every `RegisterNatsConn`-style
-registration (`cook`, `cmd`, `test`, `jobs`, `facts`, `natsapi.Subscribe`
+registration (`cook`, `jobs`, `facts`, `natsapi.Subscribe`
 itself) needs to run once per tenant connection instead of once per
 process.
 
@@ -147,8 +148,7 @@ concentrated in `cmd/farmer/main.go`'s connection lifecycle and
 file scope (`internal/pki`, `internal/natsapi/crypto.go`,
 `internal/props`, `internal/rbac`, `internal/heartbeat`) and touching
 every ingredient package that calls `RegisterNatsConn`
-(`internal/cook`, `internal/cmd`, `internal/test`, `internal/jobs`,
-`internal/facts`) besides. Per this repo's file-scope convention
+(`internal/cook`, `internal/jobs`, `internal/facts`) besides. Per this repo's file-scope convention
 (CLAUDE.md: "stop and say why" rather than silently expanding), this PR
 does **not** implement Option A — it's flagged here as the concrete,
 recommended next workstream, sized at roughly the same order of effort as

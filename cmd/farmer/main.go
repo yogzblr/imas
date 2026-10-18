@@ -220,7 +220,12 @@ func main() {
 	jobStore := initJobStore()
 	initGatewaySigner()
 	initValkeyClient()
-	props.LoadStaticProps(config.StaticProps())
+	props.LoadStaticProps(staticPropsWithoutFacts(config.StaticProps()))
+	// A reserved name an older farmer loaded from config stays until
+	// dropped: static props never expire on their own.
+	if n := props.DropStaticProps(staticPropNameRefused); n > 0 {
+		log.Warnf("props.static: dropped %d stored static prop(s) with a reserved fact name", n)
+	}
 	loadCohortRegistry()
 	requireConfigRoot()
 	initAuditLogger()
@@ -873,7 +878,7 @@ func handleSIGHUP(ctx context.Context, done chan<- struct{}) {
 		// Reload config before restarting the API server
 		config.LoadConfig("farmer")
 		props.ClearStaticProps()
-		props.LoadStaticProps(config.StaticProps())
+		props.LoadStaticProps(staticPropsWithoutFacts(config.StaticProps()))
 		loadCohortRegistry()
 		loadAuthPolicy()
 		// Don't restart the API server if shutdown was requested while we
@@ -1366,4 +1371,49 @@ func endShellSessions(timeout time.Duration) {
 	case <-time.After(timeout):
 		log.Warnf("timed out after %s waiting for shell sessions to end", timeout)
 	}
+}
+
+// staticPropNameRefused reports whether props.static may not hold name:
+// a reserved fact name, or one outside props.ValidName, which PXC's
+// collation could fold onto a reserved row.
+func staticPropNameRefused(name string) bool {
+	return facts.IsReservedPropName(name) || !props.ValidName(name)
+}
+
+// staticPropsWithoutFacts returns cfg, the "props.static" config section
+// (sprout ID to a map of prop names to values), without any prop whose
+// name is a reserved fact name (facts.IsReservedPropName): those props
+// are written only from what the sprout itself reports, and config must
+// not override them. Each dropped prop is logged as an error. cfg is not
+// modified. An entry whose value is not a map is kept as it is, for
+// props.LoadStaticProps to report.
+func staticPropsWithoutFacts(cfg map[string]any) map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]any, len(cfg))
+	for sproutID, propsI := range cfg {
+		propsMap, ok := propsI.(map[string]any)
+		if !ok {
+			out[sproutID] = propsI
+			continue
+		}
+		kept := make(map[string]any, len(propsMap))
+		for k, v := range propsMap {
+			if facts.IsReservedPropName(k) {
+				log.Errorf("props.static: ignoring %q for sprout %q: it is a reserved fact name, set only from the sprout's own facts", k, sproutID)
+				continue
+			}
+			if !props.ValidName(k) {
+				// PXC's collation folds accents and some control
+				// characters, so "hóstname" would address the reserved
+				// "hostname" row (props.ValidName).
+				log.Errorf("props.static: ignoring %q for sprout %q: a prop name must be 1-%d ASCII letters, digits, '_', '-', '.' or ':'", k, sproutID, props.MaxNameLen)
+				continue
+			}
+			kept[k] = v
+		}
+		out[sproutID] = kept
+	}
+	return out
 }

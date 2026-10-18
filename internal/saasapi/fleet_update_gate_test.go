@@ -6,8 +6,10 @@ package saasapi
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,10 @@ import (
 	"github.com/yogzblr/imas/internal/props"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // propWriteTime's arithmetic is internal/props' own: a fact stored the way
 // farmer's facts listener stores it (props.SetPropForTenant) reads back,
 // through the reader the gate uses, with the time it was written. If props
@@ -26,7 +32,7 @@ import (
 // of the gate silently accepting older rows.
 func TestPropWriteTimeMatchesProps(t *testing.T) {
 	gdb := newUpdateTestDB(t)
-	pdb, err := gorm.Open(sqlite.Open("file:saasapi_props_ttl?mode=memory&cache=shared"), &gorm.Config{})
+	pdb, err := gorm.Open(sqlite.Open("file:saasapi_props_ttl-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
