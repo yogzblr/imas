@@ -58,6 +58,27 @@ Scope: `cmd/farmerbus` (fence), `internal/accountrank`, `internal/pki`
   is not UTC, with a message naming the setting (today they only warn). Update the
   chart default and docs. Test both.
 
+Corrections made while building V1 (by the decision order in
+`ORCHESTRATOR.md` rule 6):
+
+- I8: since E3 there is no Account or SYS JWT file. Farmer holds the JWTs
+  in memory and reads the accounts bucket; "file missing or undecodable"
+  is "neither held nor in the bucket", where a minimal JWT is minted
+  (`ensureTenantAccountMaterial`, `ensureNatsAuth`) or the trust's SYS
+  Account JWT is used (`ensurePlatformAuth`). For the SYS account the
+  revocations come from `saas.saasapi_credential_state` (the rotated-out
+  SaaS API key, `EnsureSaaSAPICredential`'s rule), not from
+  `syncTenantSprouts`, which covers tenant Accounts only.
+- L16: the bus holds no signing seed after P21 (`internal/pki/busauth.go`),
+  so there is no residual to record; the design doc says so.
+- I12: the review's `pushall.go:177-180` drifted; the stale comments are the
+  `PushAllAccounts` doc ("learns the Accounts only from core") and the SYS
+  push's "epoch-dated bootstrap".
+- I1: the leases are compared in the application's clock because the tests
+  drive that clock over sqlite, which has no `NOW(3)`; so the fallback
+  applies (refuse a non-UTC `loc`). The chart default already sets
+  `loc=UTC`; the chart now also refuses a `database.params` with another.
+
 ## V2: release and chart publishing (P10)
 
 Scope: `.github/workflows` (`release.yml`, `publish-packages.yml`,
