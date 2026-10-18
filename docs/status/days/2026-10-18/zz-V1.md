@@ -1,8 +1,10 @@
 change: V1 (P4): security review 2026-10 L16, I8, I9, I12 and I1 fixed with tests. An Account JWT issued more than 5 minutes ahead is rejected wherever Account JWTs are ranked or merged (`accountrank.Rank`: the fence, the loader, farmer's bucket reader and `ReconcileAll`); a minimal Account or SYS Account JWT is minted with the database's revocations, failing closed naming the tenant; `PushAllAccounts` re-syncs each tenant before pushing; `/v1/enroll` caps its body at 64 KiB (413); the sprout's atomic writes fsync the directory; farmer and saasapi refuse a DSN whose `loc` is not UTC, and so does the chart. Ready for security review.
+pr: 286
 item: P4
 action: update
 next-append: **V1 built (2026-10-18):** L16 (`internal/accountrank`, `cmd/farmerbus/fence.go`, `internal/accountloader`, `internal/pki/accountpublisher.go`; the bus holds no signing seed, so no residual), I8 (`applyStoredRevocations`, `sysAccountJWTFromTrust`), I9 (`PushAllAccounts`), I12 (`maxEnrollRequestBytes`, `syncDir`) and I1 (`internal/mysqldsn`, `internal/pxc`, `internal/saasapi/db.go`, chart `database.params` check) fixed with tests; their rows in "Review findings re-checked" below are superseded. Waits on the security review (P3).
 ---
+pr: 286
 item: P17
 action: update
 next-append: **V1 (2026-10-18):** the I1 test that pinned the warning (`internal/saasapi/db_test.go` `TestCheckDSN`) now requires the refusal, and `TestEnsureSaaSAPICredential_StateReadErrorStillMints` holds the SYS Account JWT first (a lost one fails closed, `TestLostSysAccountJWTRebuiltFromDatabase`). L16, I8 and I12 have tests (`TestFenceMergeRefusesFutureDatedJWT`, `TestFutureDatedJWTNotApplied`, `TestLost*AccountJWTRebuiltFromDatabase`, `TestEnroll_BodyLimit`, `TestAtomicWritesSyncTheDirectory`), and I9 is tested on a restore from older JWTs (`TestPushAllAccounts_StaleJWTDoesNotReadmitRevokedSprout`).
