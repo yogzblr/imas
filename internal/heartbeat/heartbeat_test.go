@@ -13,8 +13,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -25,6 +27,10 @@ import (
 	"github.com/yogzblr/imas/internal/pki/pkitest"
 )
 
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
+
 // newTestPKIDB wires up an in-memory PKI store, plus the minimal config
 // pki.ReloadNKeys/ReloadNKeysForTenant (called via defer by
 // AcceptNKey/UnacceptNKey) needs to fail fast rather than fatally — a
@@ -32,7 +38,7 @@ import (
 // internal/pki's own test setup.
 func newTestPKIDB(t *testing.T) {
 	t.Helper()
-	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "-pki?mode=memory&cache=shared"
+	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "-pki-" + strconv.FormatInt(memDBSeq.Add(1), 10) + "?mode=memory&cache=shared"
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening pki test db: %v", err)

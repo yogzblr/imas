@@ -134,32 +134,6 @@ func selfUpdateEnabledFromEnv() bool {
 	return on
 }
 
-// Error codes internal.sprout.action replies with in addition to
-// controlplane's. saasapi (internal/saasapi, farmerErrorCode) keeps exactly
-// these strings; TestSproutActionErrorCodeValues pins them. They belong in
-// internal/controlplane, which was outside SEC.5's scope.
-const (
-	// ErrorSelfUpdateDisabled: IMAS_SELF_UPDATE_ENABLED is off, so the
-	// self_update was refused without being looked at.
-	ErrorSelfUpdateDisabled controlplane.ErrorCode = "self_update_disabled"
-	// ErrorRolloutWindowClosed: now is outside the tenant's rollout
-	// window (saas.tenant_update_policy), so the self_update was refused.
-	// The same string saasapi records for an item its own window check
-	// stopped.
-	ErrorRolloutWindowClosed controlplane.ErrorCode = "rollout_window_closed"
-	// ErrorFarmerBusy: the tenant's concurrency cap or the action's pool
-	// was full, so the request was refused unrun. Nothing was dispatched;
-	// it is safe to send again.
-	ErrorFarmerBusy controlplane.ErrorCode = "farmer_busy"
-	// ErrorSproutReenrollRequired: the sprout has no payload-encryption
-	// (box) key on record, so farmer refused to send it the cmd.run, cook
-	// or self_update (FIX.1: sealed only, never plaintext). Nothing was
-	// sent; the sprout must be re-enrolled before anything can be. The
-	// same string as cook.ReenrollRequiredCode, which farmer's errors to
-	// the CLI carry.
-	ErrorSproutReenrollRequired controlplane.ErrorCode = "sprout_reenroll_required"
-)
-
 // sendErrorCode classifies err, a failure to send an action to the
 // sprout or to get its answer: sprout_reenroll_required if farmer
 // refused to send to a sprout with no box key (cook.ErrSproutReenrollRequired),
@@ -167,7 +141,7 @@ const (
 func sendErrorCode(err error) controlplane.ErrorCode {
 	switch {
 	case errors.Is(err, cook.ErrSproutReenrollRequired):
-		return ErrorSproutReenrollRequired
+		return controlplane.ErrorSproutReenrollRequired
 	case errors.Is(err, nats.ErrTimeout), errors.Is(err, nats.ErrNoResponders):
 		return controlplane.ErrorSproutUnreachable
 	}
@@ -399,7 +373,7 @@ func respondSproutAction(msg *nats.Msg, req *sealedRequest, reply controlplane.S
 // farmer_busy, with nothing run.
 func refuseBusy(req controlplane.SproutActionRequest, data []byte, why string) controlplane.SproutActionReply {
 	reply := controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
-		Status: controlplane.StatusFailed, ErrorCode: ErrorFarmerBusy}
+		Status: controlplane.StatusFailed, ErrorCode: controlplane.ErrorFarmerBusy}
 	err := fmt.Errorf("refused unrun: %s", why)
 	log.Warnf("natsapi: %s %s on sprout %q (tenant %q): %v", controlplane.SubjectSproutAction, req.Action.Type, req.SproutID, req.TenantID, err)
 	auditTenantAction(auditActionSproutAction, data, reply, err)
@@ -445,7 +419,7 @@ func runSproutAction(req controlplane.SproutActionRequest) (controlplane.SproutA
 	}
 	// Farmer's own switch, before anything is looked up (L1).
 	if req.Action.Type == controlplane.ActionSelfUpdate && !selfUpdateEnabled.Load() {
-		return fail(ErrorSelfUpdateDisabled, fmt.Errorf("self_update refused: %s is off", EnvSelfUpdateEnabled))
+		return fail(controlplane.ErrorSelfUpdateDisabled, fmt.Errorf("self_update refused: %s is off", EnvSelfUpdateEnabled))
 	}
 
 	// The point-of-effect check. Nothing below runs unless the sprout's
@@ -720,7 +694,7 @@ func checkRolloutWindow(ctx context.Context, cat fleetcatalog.Catalog, tenantID 
 		return controlplane.ErrorInternal, fmt.Errorf("self_update refused: tenant %q's rollout window: %w", tenantID, err)
 	}
 	if closed {
-		return ErrorRolloutWindowClosed, fmt.Errorf("self_update for tenant %q refused: now (%s) is outside its rollout window [%s, %s)",
+		return controlplane.ErrorRolloutWindowClosed, fmt.Errorf("self_update for tenant %q refused: now (%s) is outside its rollout window [%s, %s)",
 			tenantID, now.UTC().Format(time.RFC3339Nano), start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano))
 	}
 	return "", nil

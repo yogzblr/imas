@@ -2,7 +2,6 @@ package props
 
 import (
 	"errors"
-	"os"
 	"time"
 )
 
@@ -148,27 +147,4 @@ func getProps(tenantID, sproutID string) map[string]interface{} {
 		result[r.Name] = r.Value
 	}
 	return result
-}
-
-func GetHostnameFunc(sproutID string) func() string {
-	return func() string {
-		return hostname(sproutID)
-	}
-}
-
-// GetHostnameFuncForTenant is GetHostnameFunc scoped to an explicit tenant
-// instead of the package's current-tenant seam — see
-// GetStringPropFuncForTenant.
-func GetHostnameFuncForTenant(tenantID, sproutID string) func() string {
-	return func() string {
-		return hostname(sproutID)
-	}
-}
-
-func hostname(sproutID string) string {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return "localhost"
-	}
-	return hostname
 }

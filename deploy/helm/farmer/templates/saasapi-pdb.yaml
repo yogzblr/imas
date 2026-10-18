@@ -1,4 +1,33 @@
 {{- if and .Values.saasapi.enabled .Values.saasapi.pdb.enabled (gt (int .Values.saasapi.replicaCount) 1) }}
+{{- /*
+saasapi.pdb.maxUnavailable must leave a drain room to evict a pod and
+still keep one serving. The bound is saasapi.replicaCount: the chart has no
+HPA for saasapi, and this PDB renders only with replicaCount > 1.
+*/}}
+{{- $rc := int .Values.saasapi.replicaCount }}
+{{- $mu := .Values.saasapi.pdb.maxUnavailable }}
+{{- if kindIs "string" $mu }}
+{{- if not (regexMatch "^[0-9]+%$" $mu) }}
+{{- fail (printf "saasapi.pdb.maxUnavailable %q must be a whole number or a percentage such as \"50%%\"" $mu) }}
+{{- end }}
+{{- $pct := int (trimSuffix "%" $mu) }}
+{{- if le $pct 0 }}
+{{- fail (printf "saasapi.pdb.maxUnavailable %q would block every drain: no saasapi pod could ever be evicted. Use at least 1 (or a percentage above 0%%), or turn saasapi.pdb.enabled off" $mu) }}
+{{- end }}
+{{- /* Kubernetes rounds a percentage up: ceil(pct * replicas / 100) must stay below replicaCount. */}}
+{{- if gt (mul $pct $rc) (mul (sub $rc 1) 100) }}
+{{- fail (printf "saasapi.pdb.maxUnavailable %q protects nothing: Kubernetes rounds it up to saasapi.replicaCount (%d), so a drain could evict every saasapi pod at once. Use at most %d%%" $mu $rc (div (mul (sub $rc 1) 100) $rc)) }}
+{{- end }}
+{{- else if regexMatch "^-?[0-9]+$" (toString $mu) }}
+{{- if le (int $mu) 0 }}
+{{- fail (printf "saasapi.pdb.maxUnavailable %v would block every drain: no saasapi pod could ever be evicted. Use at least 1, or turn saasapi.pdb.enabled off" $mu) }}
+{{- end }}
+{{- if ge (int $mu) $rc }}
+{{- fail (printf "saasapi.pdb.maxUnavailable %v protects nothing: it is not below saasapi.replicaCount (%d), so a drain could evict every saasapi pod at once. Use at most %d" $mu $rc (sub $rc 1)) }}
+{{- end }}
+{{- else }}
+{{- fail (printf "saasapi.pdb.maxUnavailable %v must be a whole number or a percentage such as \"50%%\"" $mu) }}
+{{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -8,7 +37,11 @@ metadata:
     {{- include "imas-farmer.labels" . | nindent 4 }}
     app.kubernetes.io/component: saasapi
 spec:
-  maxUnavailable: {{ .Values.saasapi.pdb.maxUnavailable }}
+  {{- if kindIs "string" $mu }}
+  maxUnavailable: {{ $mu | quote }}
+  {{- else }}
+  maxUnavailable: {{ int $mu }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "imas-farmer.saasapi.selectorLabels" . | nindent 6 }}

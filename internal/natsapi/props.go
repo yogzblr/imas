@@ -20,34 +20,13 @@ import (
 var ErrReservedPropName = errors.New("prop name is reserved for facts the sprout reports")
 
 // ErrInvalidPropName is returned by props.set and props.delete for a name
-// that is not 1 to maxPropNameLen characters of ASCII letters, digits,
+// that is not 1 to props.MaxNameLen characters of ASCII letters, digits,
 // '_', '-', '.' and ':'.
 var ErrInvalidPropName = errors.New("prop name must be 1-191 ASCII letters, digits, '_', '-', '.' or ':'")
 
-// maxPropNameLen is farmer.props' name column width.
-const maxPropNameLen = 191
-
-// validPropName reports whether name is plain ASCII from a small set.
-// farmer.props' name column takes the schema's default collation, which in
-// PXC folds case and accents and ignores some control characters, so a
-// name like "OS", "ös" or "o\x01s" can address the reserved "os" row.
-// Restricting writable names to this set leaves case as the only fold,
-// which facts.IsReservedPropName handles.
-func validPropName(name string) bool {
-	if name == "" || len(name) > maxPropNameLen {
-		return false
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '_', c == '-', c == '.', c == ':':
-		default:
-			return false
-		}
-	}
-	return true
-}
+// validPropName reports whether name may be written: props.ValidName,
+// plain ASCII from a small set (see there for why).
+func validPropName(name string) bool { return props.ValidName(name) }
 
 // checkWritablePropName is the name check props.set and props.delete share.
 func checkWritablePropName(name string) error {

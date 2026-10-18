@@ -8,7 +8,9 @@
 package fleetcatalogtest
 
 import (
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,9 @@ import (
 	"github.com/yogzblr/imas/internal/fleetsign"
 )
 
+// openSeq makes each Open's database its own, also under go test -count.
+var openSeq atomic.Int64
+
 // Open returns the database, closed when t ends. One connection: ATTACH
 // is per-connection.
 func Open(t testing.TB) *gorm.DB {
@@ -30,7 +35,7 @@ func Open(t testing.TB) *gorm.DB {
 			return r
 		}
 		return '_'
-	}, t.Name())
+	}, t.Name()) + fmt.Sprintf("-%d", openSeq.Add(1))
 	db, err := gorm.Open(sqlite.Open("file:"+name+"-fc?mode=memory&cache=shared"),
 		&gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
 	if err != nil {

@@ -95,8 +95,8 @@ func TestSendErrorCode(t *testing.T) {
 		err  error
 		want controlplane.ErrorCode
 	}{
-		"no box key":    {&cook.ReenrollRequiredError{Op: "cmd.run", SproutID: "web-01"}, ErrorSproutReenrollRequired},
-		"wrapped":       {errors.Join(errors.New("sending"), &cook.ReenrollRequiredError{Op: "cook", SproutID: "web-01"}), ErrorSproutReenrollRequired},
+		"no box key":    {&cook.ReenrollRequiredError{Op: "cmd.run", SproutID: "web-01"}, controlplane.ErrorSproutReenrollRequired},
+		"wrapped":       {errors.Join(errors.New("sending"), &cook.ReenrollRequiredError{Op: "cook", SproutID: "web-01"}), controlplane.ErrorSproutReenrollRequired},
 		"timeout":       {nats.ErrTimeout, controlplane.ErrorSproutUnreachable},
 		"no responders": {nats.ErrNoResponders, controlplane.ErrorSproutUnreachable},
 		// The sprout's own no-keys refusal is not farmer's: farmer has a
@@ -144,8 +144,8 @@ func TestSproutAction_SproutWithNoBoxKeyIsRefusedWithTheCode(t *testing.T) {
 		{Type: controlplane.ActionSelfUpdate, Params: mustJSON(t, controlplane.SelfUpdateParams{Version: suVersion})},
 	} {
 		reply := requestSproutAction(t, saas, controlplane.SproutActionRequest{TenantID: tenant, SproutID: "keyless-01", Action: action})
-		if reply.Status != controlplane.StatusFailed || reply.ErrorCode != ErrorSproutReenrollRequired || reply.JID != "" || reply.Result != nil {
-			t.Errorf("%s: reply %+v, want failed with %s", action.Type, reply, ErrorSproutReenrollRequired)
+		if reply.Status != controlplane.StatusFailed || reply.ErrorCode != controlplane.ErrorSproutReenrollRequired || reply.JID != "" || reply.Result != nil {
+			t.Errorf("%s: reply %+v, want failed with %s", action.Type, reply, controlplane.ErrorSproutReenrollRequired)
 		}
 	}
 	nc.Flush()

@@ -3,6 +3,7 @@ package farmerchart
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -208,10 +209,122 @@ func TestSaasapiPDB(t *testing.T) {
 			t.Errorf("%v: PDB selector matches farmer's pods", tc.args)
 		}
 	}
+	// maxUnavailable must leave a drain room to evict a pod and still keep
+	// one serving: at the default two replicas, 1 or a percentage above 0%
+	// and below 100%. The bound is replicaCount (saasapi has no HPA).
+	for _, tc := range []struct {
+		value string
+		want  string // the fail message; empty: renders
+	}{
+		{"0", "saasapi.pdb.maxUnavailable 0 would block every drain"},
+		{"-1", "saasapi.pdb.maxUnavailable -1 would block every drain"},
+		{"2", "saasapi.pdb.maxUnavailable 2 protects nothing: it is not below saasapi.replicaCount (2)"},
+		{"0%", `saasapi.pdb.maxUnavailable "0%" would block every drain`},
+		{"100%", `saasapi.pdb.maxUnavailable "100%" protects nothing`},
+		{"150%", `saasapi.pdb.maxUnavailable "150%" protects nothing`},
+		// Kubernetes rounds a percentage up: at two replicas 51% is 2.
+		{"51%", `saasapi.pdb.maxUnavailable "51%" protects nothing: Kubernetes rounds it up to saasapi.replicaCount (2)`},
+		{"99%", `saasapi.pdb.maxUnavailable "99%" protects nothing`},
+		{"half", `saasapi.pdb.maxUnavailable "half" must be a whole number or a percentage`},
+		{"1", ""},
+		{"50%", ""},
+	} {
+		args := []string{"--set", "saasapi.pdb.maxUnavailable=" + tc.value}
+		if tc.want != "" {
+			mustFail(t, tc.want, args...)
+			continue
+		}
+		pdb := find(t, mustRender(t, args...), "PodDisruptionBudget", "t-farmer-saasapi")
+		want := any(tc.value)
+		if !strings.HasSuffix(tc.value, "%") {
+			want = 1
+		}
+		if got := get(pdb, "spec", "maxUnavailable"); got != want {
+			t.Errorf("maxUnavailable=%s: PDB maxUnavailable %v (%T), want %v", tc.value, got, got, want)
+		}
+	}
+	// 2 is valid once there are three replicas; one replica gets no PDB,
+	// so the value isn't checked.
+	pdb := find(t, mustRender(t, "--set", "saasapi.replicaCount=3", "--set", "saasapi.pdb.maxUnavailable=2"), "PodDisruptionBudget", "t-farmer-saasapi")
+	if got := get(pdb, "spec", "maxUnavailable"); got != 2 {
+		t.Errorf("replicaCount 3, maxUnavailable 2: PDB maxUnavailable %v", got)
+	}
+	mustFail(t, "saasapi.pdb.maxUnavailable 3 protects nothing", "--set", "saasapi.replicaCount=3", "--set", "saasapi.pdb.maxUnavailable=3")
+	if has(mustRender(t, "--set", "saasapi.replicaCount=1", "--set", "saasapi.pdb.maxUnavailable=0"), "PodDisruptionBudget", "t-farmer-saasapi") {
+		t.Errorf("replicaCount 1: PDB rendered")
+	}
+
 	// The only other PDB is farmer's own (TestFarmerPDBRendered).
 	for _, d := range mustRender(t) {
 		if n := get(d, "metadata", "name"); d["kind"] == "PodDisruptionBudget" && n != "t-farmer-saasapi" && n != "t-farmer" {
 			t.Errorf("unexpected PDB %v", n)
 		}
+	}
+}
+
+// credentialPublisher.extraEnv lands on the publish container of both the
+// post-deploy Job and the refresh CronJob, after the chart's own variables;
+// the default adds nothing.
+func TestPublisherExtraEnv(t *testing.T) {
+	cronContainer := func(t *testing.T, docs []obj) obj {
+		t.Helper()
+		cj := find(t, docs, "CronJob", "t-farmer-saasapi-credential-refresh")
+		for _, c := range get(cj, "spec", "jobTemplate", "spec", "template", "spec", "containers").([]any) {
+			if c.(obj)["name"] == "publish" {
+				return c.(obj)
+			}
+		}
+		t.Fatalf("CronJob has no publish container")
+		return nil
+	}
+	docs := mustRender(t,
+		"--set", "credentialPublisher.extraEnv[0].name=IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE",
+		"--set", "credentialPublisher.extraEnv[0].value=platform",
+		"--set", "credentialPublisher.extraEnv[1].name=HTTPS_PROXY",
+		"--set", "credentialPublisher.extraEnv[1].value=http://proxy:3128")
+	for name, c := range map[string]obj{
+		"Job":     container(t, find(t, docs, "Job", "t-farmer-saasapi-credential-publish"), "publish"),
+		"CronJob": cronContainer(t, docs),
+	} {
+		env := envValues(c)
+		if env["IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE"] != "platform" || env["HTTPS_PROXY"] != "http://proxy:3128" {
+			t.Errorf("%s publish env %v: want IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE=platform and HTTPS_PROXY", name, env)
+		}
+		if env["IMAS_SAASAPI_CRED_OPENBAO_KV_PATH"] != "platform/imas/saasapi-nats-user" {
+			t.Errorf("%s: extraEnv replaced the chart's own variables: %v", name, env)
+		}
+	}
+	// Nothing by default.
+	def := mustRender(t)
+	for name, c := range map[string]obj{
+		"Job":     container(t, find(t, def, "Job", "t-farmer-saasapi-credential-publish"), "publish"),
+		"CronJob": cronContainer(t, def),
+	} {
+		for _, k := range []string{"IMAS_SAASAPI_CRED_OPENBAO_NAMESPACE", "HTTPS_PROXY"} {
+			if _, ok := envMap(c)[k]; ok {
+				t.Errorf("%s: %s set by default", name, k)
+			}
+		}
+	}
+	// extraEnv adds variables, it never replaces the publisher's own
+	// identity, key or path: every other IMAS_* name is refused.
+	mustFail(t, "credentialPublisher.extraEnv: every entry needs a name",
+		"--set", "credentialPublisher.extraEnv[0].value=x")
+	// Both OpenBao clients' namespaces may be set: the KV client's and the
+	// signer's (the publisher signs through IMAS_NATSSIGN_* before it writes).
+	ns := mustRender(t, "--set", "credentialPublisher.extraEnv[0].name=IMAS_NATSSIGN_OPENBAO_NAMESPACE",
+		"--set", "credentialPublisher.extraEnv[0].value=platform")
+	if v := envValues(container(t, find(t, ns, "Job", "t-farmer-saasapi-credential-publish"), "publish"))["IMAS_NATSSIGN_OPENBAO_NAMESPACE"]; v != "platform" {
+		t.Errorf("IMAS_NATSSIGN_OPENBAO_NAMESPACE = %q, want platform", v)
+	}
+	for _, name := range []string{"IMAS_SAASAPI_CRED_OPENBAO_KV_PATH", "IMAS_SAASAPI_CRED_OPENBAO_ADDR", "IMAS_NATS_SAASAPI_USER_SEED_FILE", "IMAS_SAASAPI_USER_JWT_TTL"} {
+		mustFail(t, "credentialPublisher.extraEnv may not set "+name,
+			"--set", "credentialPublisher.extraEnv[0].name="+name, "--set", "credentialPublisher.extraEnv[0].value=x")
+	}
+	// The NetworkPolicy stays OpenBao and DNS only: extraEnv opens no egress.
+	a := get(find(t, def, "NetworkPolicy", "imas-saasapi-cred-publisher"), "spec", "egress")
+	b := get(find(t, docs, "NetworkPolicy", "imas-saasapi-cred-publisher"), "spec", "egress")
+	if !reflect.DeepEqual(a, b) {
+		t.Errorf("extraEnv changed the publisher's egress: %v, default %v", b, a)
 	}
 }

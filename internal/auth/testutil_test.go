@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -10,6 +11,10 @@ import (
 	"github.com/yogzblr/imas/internal/props"
 	"github.com/yogzblr/imas/internal/rbac"
 )
+
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
 
 // newTestDB wires up the in-memory PXC-backed stores internal/rbac (and,
 // transitively, internal/props for dynamic cohort resolution) need — every
@@ -20,7 +25,7 @@ import (
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	dsn := fmt.Sprintf("file:%s-rbac?mode=memory&cache=shared", t.Name())
+	dsn := fmt.Sprintf("file:%s-rbac-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))
 	rbacDB, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening rbac test db: %v", err)
@@ -38,7 +43,7 @@ func newTestDB(t *testing.T) *gorm.DB {
 	SetDB(rbacDB)
 	t.Cleanup(func() { SetDB(nil) })
 
-	propsDSN := fmt.Sprintf("file:%s-props?mode=memory&cache=shared", t.Name())
+	propsDSN := fmt.Sprintf("file:%s-props-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))
 	propsDB, err := gorm.Open(sqlite.Open(propsDSN), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening props test db: %v", err)

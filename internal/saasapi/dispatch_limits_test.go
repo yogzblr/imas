@@ -475,7 +475,7 @@ func TestFleetUpdate_FarmerBusyIsRetried(t *testing.T) {
 				mu.Unlock()
 				reply := controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID}
 				if n <= tc.busyFor {
-					reply.Status, reply.ErrorCode = controlplane.StatusFailed, farmerCodeBusy
+					reply.Status, reply.ErrorCode = controlplane.StatusFailed, controlplane.ErrorFarmerBusy
 				} else {
 					reply.Status, reply.JID = controlplane.StatusDispatched, jidFor(req.SproutID)
 				}
@@ -511,7 +511,7 @@ func TestSproutActionBatch_FarmerBusyLeavesItemQueued(t *testing.T) {
 	mustLinkAsset(t, tid, "web-01", "a1")
 	startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
-			Status: controlplane.StatusFailed, ErrorCode: farmerCodeBusy}
+			Status: controlplane.StatusFailed, ErrorCode: controlplane.ErrorFarmerBusy}
 	})
 	_, resp := postActions(t, tid, map[string]any{"asset_ids": []string{"a1"}, "action": cmdAction("uptime")})
 	actionDispatches.Wait()
@@ -543,14 +543,15 @@ func TestReplyUpdate_FarmerCodes(t *testing.T) {
 		}
 	}
 	// A busy reply naming another sprout is not believed.
-	b, _ := json.Marshal(controlplane.SproutActionReply{TenantID: "t_1", SproutID: "web-02", Status: controlplane.StatusFailed, ErrorCode: farmerCodeBusy})
+	b, _ := json.Marshal(controlplane.SproutActionReply{TenantID: "t_1", SproutID: "web-02", Status: controlplane.StatusFailed, ErrorCode: controlplane.ErrorFarmerBusy})
 	if got := replyUpdate(batch, item, b); got["error_code"] != errCodeDispatchOutcomeUnknown {
 		t.Errorf("mismatched busy reply: %v", got)
 	}
-	// The strings farmer sends (internal/natsapi pins the same values).
-	if farmerCodeBusy != "farmer_busy" || farmerCodeSelfUpdateDisabled != "self_update_disabled" || farmerCodeRolloutWindowClosed != "rollout_window_closed" ||
-		farmerCodeSproutReenrollRequired != "sprout_reenroll_required" {
-		t.Error("farmer code values changed")
+	// The codes saasapi stores are the ones farmer sends (internal/controlplane
+	// pins their values).
+	if errCodeSelfUpdateDisabled != string(controlplane.ErrorSelfUpdateDisabled) || errCodeRolloutWindowClosed != string(controlplane.ErrorRolloutWindowClosed) ||
+		errCodeSproutReenrollRequired != string(controlplane.ErrorSproutReenrollRequired) {
+		t.Error("the stored codes differ from the ones farmer sends")
 	}
 }
 
@@ -567,7 +568,7 @@ func TestSproutActionBatch_SproutReenrollRequiredFailsItem(t *testing.T) {
 	mustLinkAsset(t, tid, "web-01", "a1")
 	startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
 		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
-			Status: controlplane.StatusFailed, ErrorCode: farmerCodeSproutReenrollRequired}
+			Status: controlplane.StatusFailed, ErrorCode: controlplane.ErrorSproutReenrollRequired}
 	})
 	_, resp := postActions(t, tid, map[string]any{"asset_ids": []string{"a1"}, "action": cmdAction("uptime")})
 	actionDispatches.Wait()

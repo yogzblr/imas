@@ -22,21 +22,12 @@ import (
 	"github.com/yogzblr/imas/internal/fleetcatalog/fleetcatalogtest"
 )
 
-// The codes saasapi keeps verbatim (internal/saasapi, farmerErrorCode).
-func TestSproutActionErrorCodeValues(t *testing.T) {
-	for code, want := range map[controlplane.ErrorCode]string{
-		ErrorSelfUpdateDisabled:     "self_update_disabled",
-		ErrorRolloutWindowClosed:    "rollout_window_closed",
-		ErrorFarmerBusy:             "farmer_busy",
-		ErrorSproutReenrollRequired: "sprout_reenroll_required",
-	} {
-		if string(code) != want {
-			t.Errorf("%s, want %s", code, want)
-		}
-	}
-	// The code farmer's errors to the CLI carry is the same string.
-	if string(ErrorSproutReenrollRequired) != cook.ReenrollRequiredCode {
-		t.Errorf("ErrorSproutReenrollRequired %q, cook.ReenrollRequiredCode %q", ErrorSproutReenrollRequired, cook.ReenrollRequiredCode)
+// The code farmer's internal.sprout.action replies carry for a keyless
+// sprout is the same string as the one farmer's errors to the CLI carry
+// (internal/controlplane pins the values, TestSproutActionErrorCodeValues).
+func TestSproutReenrollRequiredMatchesCook(t *testing.T) {
+	if string(controlplane.ErrorSproutReenrollRequired) != cook.ReenrollRequiredCode {
+		t.Errorf("controlplane.ErrorSproutReenrollRequired %q, cook.ReenrollRequiredCode %q", controlplane.ErrorSproutReenrollRequired, cook.ReenrollRequiredCode)
 	}
 }
 
@@ -69,7 +60,7 @@ func TestSelfUpdate_DisabledByDefault(t *testing.T) {
 
 	reply := requestSproutAction(t, saas, controlplane.SproutActionRequest{TenantID: suTenant, SproutID: "web-01",
 		Action: controlplane.SproutAction{Type: controlplane.ActionSelfUpdate, Params: mustJSON(t, controlplane.SelfUpdateParams{Version: suVersion})}})
-	if reply.Status != controlplane.StatusFailed || reply.ErrorCode != ErrorSelfUpdateDisabled || reply.JID != "" {
+	if reply.Status != controlplane.StatusFailed || reply.ErrorCode != controlplane.ErrorSelfUpdateDisabled || reply.JID != "" {
 		t.Fatalf("reply = %+v, want failed/self_update_disabled", reply)
 	}
 	if verified.Load() != 0 || len(rec.all()) != 0 {
@@ -111,7 +102,7 @@ func TestSelfUpdate_RolloutWindowEnforcedByFarmer(t *testing.T) {
 		case wc.Corrupt:
 			want = controlplane.ErrorInternal
 		case wc.Closed:
-			want = ErrorRolloutWindowClosed
+			want = controlplane.ErrorRolloutWindowClosed
 		}
 		cases = append(cases, windowCase{wc.Name, func(c *suCatalog) {
 			fleetcatalogtest.SetWindow(c.t, c.db, suTenant, wc.Start, wc.End)
@@ -127,7 +118,7 @@ func TestSelfUpdate_RolloutWindowEnforcedByFarmer(t *testing.T) {
 		windowCase{"own window closed, another tenant's open", func(c *suCatalog) {
 			c.setWindow(suTenant, now.Add(-2*time.Hour), now.Add(-time.Hour))
 			c.setWindow("t_other", now.Add(-time.Hour), now.Add(time.Hour))
-		}, ErrorRolloutWindowClosed},
+		}, controlplane.ErrorRolloutWindowClosed},
 		windowCase{"window read fails", func(c *suCatalog) {
 			fleetcatalog.Install(fixedWindowCatalog{SQL: fleetcatalog.New(c.db), err: errCatalogDown})
 		}, controlplane.ErrorInternal},
@@ -162,7 +153,7 @@ func TestCheckSelfUpdateRelease_RolloutWindow(t *testing.T) {
 		t.Fatalf("inside the window: %q, %v", code, err)
 	}
 	c.setWindow(suTenant, now.Add(time.Hour), now.Add(2*time.Hour))
-	if code, err := checkSelfUpdateRelease(t.Context(), suTenant, suVersion); err == nil || code != ErrorRolloutWindowClosed {
+	if code, err := checkSelfUpdateRelease(t.Context(), suTenant, suVersion); err == nil || code != controlplane.ErrorRolloutWindowClosed {
 		t.Fatalf("outside the window: %q, %v", code, err)
 	}
 }
@@ -307,7 +298,7 @@ func TestSproutAction_HostileTenantFillsItsCap(t *testing.T) {
 	for i := 0; i < flood-2; i++ {
 		select {
 		case r := <-replies:
-			if r.Status != controlplane.StatusFailed || r.ErrorCode != ErrorFarmerBusy || r.TenantID != "t_hostile" {
+			if r.Status != controlplane.StatusFailed || r.ErrorCode != controlplane.ErrorFarmerBusy || r.TenantID != "t_hostile" {
 				t.Fatalf("over-cap reply = %+v, want failed/farmer_busy", r)
 			}
 		case <-deadline:
@@ -393,7 +384,7 @@ func TestSproutAction_FullPoolStillAdmitsSelfUpdate(t *testing.T) {
 			t.Fatalf("%d running, want 2", running.Load())
 		}
 	}
-	if r := requestSproutAction(t, saas, cmdRunRequest("t_c", "web-01")); r.Status != controlplane.StatusFailed || r.ErrorCode != ErrorFarmerBusy {
+	if r := requestSproutAction(t, saas, cmdRunRequest("t_c", "web-01")); r.Status != controlplane.StatusFailed || r.ErrorCode != controlplane.ErrorFarmerBusy {
 		close(release)
 		t.Fatalf("t_c with the pool full: %+v, want farmer_busy", r)
 	}
@@ -417,7 +408,7 @@ func TestSproutAction_BusyReplyCarriesNoText(t *testing.T) {
 	b, _ := json.Marshal(r)
 	var m map[string]any
 	_ = json.Unmarshal(b, &m)
-	if r.ErrorCode != ErrorFarmerBusy || r.Status != controlplane.StatusFailed || len(m) != 4 {
+	if r.ErrorCode != controlplane.ErrorFarmerBusy || r.Status != controlplane.StatusFailed || len(m) != 4 {
 		t.Fatalf("busy reply = %s", b)
 	}
 }

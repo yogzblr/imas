@@ -2,11 +2,16 @@ package props
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
+
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
 
 // newTestDB opens a fresh in-memory, pure-Go (no CGO) sqlite database,
 // migrates this package's table, and installs it as the package-level db
@@ -17,7 +22,7 @@ import (
 // parallel with each other.
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())
+	dsn := fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening test db: %v", err)

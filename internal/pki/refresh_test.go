@@ -18,6 +18,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/payloadbox/sealedwiretest"
 )
 
 // sealedRefresh builds a fresh sealed refresh request for the sprout
@@ -69,10 +70,10 @@ func TestRefreshSprout_SealedRoundTrip(t *testing.T) {
 	// is exactly a sealed envelope, whose only plaintext is its field
 	// names, with no JWT in any key or string. (Not a substring search:
 	// the ciphertext is random base64.)
-	if err := checkSealedEnvelope(reply); err != nil {
+	if err := sealedwiretest.CheckSealedEnvelope(reply); err != nil {
 		t.Errorf("the reply: %v", err)
 	}
-	if jwt, found, err := jwtInJSON(reply); err != nil || found {
+	if jwt, found, err := sealedwiretest.JWTInJSON(reply); err != nil || found {
 		t.Errorf("the sealed reply carries a JWT in the clear: %q (%v)", jwt, err)
 	}
 	res, err := sproutOpenRefreshReply("web-01", id, reply)
@@ -80,7 +81,7 @@ func TestRefreshSprout_SealedRoundTrip(t *testing.T) {
 		t.Fatalf("the sprout can't open farmer's reply: %v", err)
 	}
 	for _, v := range []string{res.GatewayJWT, res.JWT} {
-		if _, ok := findJWT(v); !ok {
+		if _, ok := sealedwiretest.FindJWT(v); !ok {
 			t.Errorf("sealed %q is not recognized as a JWT, so the check above proves nothing", v)
 		}
 	}

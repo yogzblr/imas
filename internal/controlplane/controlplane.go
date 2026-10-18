@@ -180,6 +180,26 @@ const (
 	// ErrorSproutUnreachable: the sprout is registered but didn't answer
 	// (offline, or the command outlived its timeout).
 	ErrorSproutUnreachable ErrorCode = "sprout_unreachable"
+	// ErrorSelfUpdateDisabled: farmer's IMAS_SELF_UPDATE_ENABLED is off,
+	// so the self_update was refused without being looked at. The SaaS
+	// API stores it as the item's error code and doesn't send it again.
+	ErrorSelfUpdateDisabled ErrorCode = "self_update_disabled"
+	// ErrorRolloutWindowClosed: now is outside the tenant's rollout
+	// window (saas.tenant_update_policy), so the self_update was refused.
+	// The same string the SaaS API records for an item its own window
+	// check stopped.
+	ErrorRolloutWindowClosed ErrorCode = "rollout_window_closed"
+	// ErrorFarmerBusy: the tenant's concurrency cap or the action's pool
+	// was full, so the request was refused unrun. Nothing was dispatched;
+	// it is safe to send again, and the SaaS API leaves the item queued.
+	ErrorFarmerBusy ErrorCode = "farmer_busy"
+	// ErrorSproutReenrollRequired: the sprout has no payload-encryption
+	// (box) key on record, so farmer refused to send it the cmd.run, cook
+	// or self_update (FIX.1: sealed only, never plaintext). Nothing was
+	// sent; the sprout must be re-enrolled before anything can be. The
+	// same string as cook.ReenrollRequiredCode, which farmer's errors to
+	// the CLI carry.
+	ErrorSproutReenrollRequired ErrorCode = "sprout_reenroll_required"
 
 	// internal.tenant.boxkey also answers ErrorInvalidTenantID,
 	// ErrorTenantNotFound (a deprovisioned tenant) and ErrorInternal.

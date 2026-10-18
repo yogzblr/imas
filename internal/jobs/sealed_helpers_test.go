@@ -51,7 +51,7 @@ func sealerFor(t *testing.T) *stepSealer {
 	if s != nil {
 		return s
 	}
-	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-pki?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-pki-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

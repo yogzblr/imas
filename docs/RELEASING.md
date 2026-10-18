@@ -269,9 +269,8 @@ step's result differs from "look for", stop and fix by PR before going on.
    cosign signing are first exercised in step 6.
 4. **`main` is green on the commit you tag**, including the `go.mod and
    go.sum are tidy` step in CI: the release's before hook fails the release
-   on an untidy `go.mod` instead of tidying it. (The `go-licenses` workflow's
-   `save` step is a known failure on `main`, `docs/BUILD-STATUS.md` Open
-   items 5; it does not affect the release.) Check
+   on an untidy `go.mod` instead of tidying it. The `go-licenses` workflow
+   (check and save) must be green too. Check
    `packaging/helm/min-sprout-version` (`v0.0.0` today, which is fine).
 5. **Tag:** `git tag -a v0.1.0-rc.1 -m "imas v0.1.0-rc.1" <commit> && git
    push origin v0.1.0-rc.1`.

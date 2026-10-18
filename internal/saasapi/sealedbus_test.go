@@ -165,7 +165,7 @@ func TestSealedBus_ActionRedispatchIsAFreshMessage(t *testing.T) {
 		calls++
 		if calls == 1 {
 			return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
-				Status: controlplane.StatusFailed, ErrorCode: farmerCodeBusy}
+				Status: controlplane.StatusFailed, ErrorCode: controlplane.ErrorFarmerBusy}
 		}
 		return completingFarmer(req)
 	})

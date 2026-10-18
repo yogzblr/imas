@@ -8,8 +8,10 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +30,10 @@ import (
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 	"github.com/yogzblr/imas/internal/tenantconn/tenantconntest"
 )
+
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
 
 // TestStagedRecipeKey_UnderGatewayPrefix: the key cook stages a sprout's
 // recipe at is inside the prefix Auth grants that sprout's gateway JWT.
@@ -87,7 +93,7 @@ func newStagingTestServerWithRecipes(t *testing.T, extra map[string]string, tena
 	stagingSproutsMu.Lock()
 	stagingSprouts = map[[2]string]*[32]byte{}
 	stagingSproutsMu.Unlock()
-	gdb, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"_pki?mode=memory&cache=shared"), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"_pki-"+strconv.FormatInt(memDBSeq.Add(1), 10)+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

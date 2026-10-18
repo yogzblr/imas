@@ -20,7 +20,7 @@ import (
 // concurrency test below still interleaves its goroutines' statements.
 func newIndexTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	gdb, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s-%d?mode=memory&cache=shared", t.Name(), memDBSeq.Add(1))), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("opening test db: %v", err)
 	}

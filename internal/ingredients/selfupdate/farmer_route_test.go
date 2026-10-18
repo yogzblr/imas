@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,10 @@ import (
 	"github.com/yogzblr/imas/internal/api/handlers"
 	"github.com/yogzblr/imas/internal/fleetsign"
 )
+
+// memDBSeq numbers this package's in-memory sqlite test databases, so
+// a DSN never repeats across `go test -count=N` runs of the same test.
+var memDBSeq atomic.Int64
 
 // A fleet update through farmer's own manifest route (docs/briefs/
 // E-followups.md, Z item 3): the release as saasapi registers it (its
@@ -88,7 +94,7 @@ func TestApply_ThroughFarmerManifestRoute(t *testing.T) {
 // SQL reads (internal/fleetcatalog), in the shape of the saas migrations.
 func releaseDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()) + "-" + strconv.FormatInt(memDBSeq.Add(1), 10)
 	db, err := gorm.Open(sqlite.Open("file:"+name+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)

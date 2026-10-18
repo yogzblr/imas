@@ -630,7 +630,9 @@ client certificate never reach it.
 
 The provider ignores `VAULT_*` and `BAO_*` variables, so a
 `VAULT_HTTP_PROXY` or `BAO_HTTP_PROXY` set for other tools has no effect on
-it.
+it. It sends no namespace header either: a server namespace (Vault
+Enterprise, or an OpenBao namespace) is not supported for `sdb://openbao`,
+so point it at a mount in the root namespace.
 
 ### farmer and saasapi
 
@@ -640,8 +642,26 @@ follow `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, and ignore
 environment of farmer, saasapi or the credential publish
 Job, put the platform OpenBao's host (the host in `*_OPENBAO_ADDR`) in
 `NO_PROXY`, unless the proxy is meant to reach it. With the Helm charts,
-the proxy variables go in `farmer.extraEnv` or `saasapi.extraEnv`; the
-charts set none of them themselves.
+the proxy variables go in `farmer.extraEnv`, `saasapi.extraEnv` or
+`credentialPublisher.extraEnv`; the charts set none of them themselves.
+
+### An `https://` proxy and OpenBao
+
+With `HTTPS_PROXY=https://…` (a proxy reached over TLS, not the usual
+`http://`), Go dials the proxy with the OpenBao client's own TLS settings
+(security review 2026-10, I3). This applies to the sprout's `sdb://openbao`
+provider and to the platform's OpenBao clients:
+
+- the proxy's certificate is checked against the OpenBao CA
+  (`*_OPENBAO_CACERT`), not the system roots, so a proxy whose certificate
+  that CA did not sign is refused;
+- the sprout also offers its OpenBao client certificate to the proxy, so the
+  proxy learns the sprout's certificate (not its key, the login token or a
+  secret, which travel inside the tunnel's own TLS session to OpenBao).
+
+If that is not wanted, use an `http://` proxy for OpenBao (the CONNECT tunnel
+still carries end-to-end TLS to OpenBao), or put the OpenBao host in
+`NO_PROXY`.
 
 ## The imas CLI
 

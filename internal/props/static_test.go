@@ -1,6 +1,7 @@
 package props
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -101,5 +102,29 @@ func TestLoadStaticPropsInvalidEntry(t *testing.T) {
 	// bad-sprout should have nothing.
 	if got := GetStringProp("bad-sprout", "key"); got != "" {
 		t.Errorf("bad-sprout key should be empty, got %q", got)
+	}
+}
+
+func TestDropStaticProps(t *testing.T) {
+	newTestDB(t)
+	LoadStaticProps(map[string]interface{}{
+		"web-1": map[string]interface{}{"role": "webserver", "os": "spoofed"},
+		"web-2": map[string]interface{}{"OS": "spoofed"},
+	})
+	// A dynamic prop of the same name is the sprout's own: never dropped.
+	setPropWithTTL(tenantID(), "web-3", "os", "linux", DefaultPropTTL)
+
+	isOS := func(name string) bool { return strings.EqualFold(name, "os") }
+	if got := DropStaticProps(isOS); got != 2 {
+		t.Fatalf("dropped %d, want 2", got)
+	}
+	if IsStaticProp("web-1", "os") || IsStaticProp("web-2", "OS") {
+		t.Error("a static prop named os is left")
+	}
+	if got := GetStringProp("web-1", "role"); got != "webserver" {
+		t.Errorf("web-1 role = %q, want webserver", got)
+	}
+	if got := GetStringProp("web-3", "os"); got != "linux" {
+		t.Errorf("web-3's own os = %q, want linux", got)
 	}
 }
