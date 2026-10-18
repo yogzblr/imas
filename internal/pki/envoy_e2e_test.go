@@ -119,7 +119,7 @@ func TestSproutLifecycle_ThroughRealEnvoy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := EnrollSprout(t.Context(), "ek_1.supersecret", "web-01", boxPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.supersecret"), "web-01", boxPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout through Envoy: %v", err)
 	}

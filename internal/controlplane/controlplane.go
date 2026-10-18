@@ -33,13 +33,23 @@ const (
 	SubjectTenantPurge = "internal.tenant.purge"
 )
 
-// SubjectSproutAction is the one request-reply subject in this package
-// (design doc §2.2): published by the SaaS API with a reply inbox under
+// SubjectSproutAction is one of the two request-reply subjects in this
+// package (design doc §2.2; SubjectTenantBoxKey is the other): published by the SaaS API with a reply inbox under
 // SaaSAPIInboxPrefix, queue-subscribed by farmer, which replies directly
 // on that inbox. It dispatches a single action to a single, already
 // resolved sprout — the SaaS API fans a §1.5 batch out into one request
 // per item.
 const SubjectSproutAction = "internal.sprout.action"
+
+// SubjectTenantBoxKey is the other request-reply subject, the same way:
+// the SaaS API asks farmer for a tenant's current box public key
+// (TenantBoxKeyRequest, TenantBoxKeyReply) when it mints a join token,
+// whose tenant key fingerprint a sprout checks the key its enrollment
+// response names against (security review 2026-10, L24;
+// internal/jointoken). The key reaches the SaaS API over the sealed
+// control plane, not through the DMZ Envoy the fingerprint guards
+// against.
+const SubjectTenantBoxKey = "internal.tenant.boxkey"
 
 // SaaSAPIInboxPrefix is the only reply-inbox prefix the SaaS API's NATS
 // User may subscribe to (pki's saasAPIUserPermissions grants
@@ -170,6 +180,9 @@ const (
 	// ErrorSproutUnreachable: the sprout is registered but didn't answer
 	// (offline, or the command outlived its timeout).
 	ErrorSproutUnreachable ErrorCode = "sprout_unreachable"
+
+	// internal.tenant.boxkey also answers ErrorInvalidTenantID,
+	// ErrorTenantNotFound (a deprovisioned tenant) and ErrorInternal.
 )
 
 var publicErrorMessages = map[ErrorCode]string{
@@ -410,8 +423,23 @@ type CmdRunResult struct {
 	Duration time.Duration `json:"duration"`
 }
 
+// TenantBoxKeyRequest is the internal.tenant.boxkey payload.
+type TenantBoxKeyRequest struct {
+	TenantID string `json:"tenant_id"`
+}
+
+// TenantBoxKeyReply is farmer's reply to internal.tenant.boxkey: the
+// tenant's current NaCl box public key, standard base64, or a fixed
+// ErrorCode and no key. The tenant's key is created if it has none yet,
+// as its first enrollment would.
+type TenantBoxKeyReply struct {
+	TenantID        string    `json:"tenant_id"`
+	TenantX25519Pub string    `json:"tenant_x25519_pub,omitempty"`
+	ErrorCode       ErrorCode `json:"error_code,omitempty"`
+}
+
 // ValidSaaSAPIReplySubject reports whether subject is a reply inbox farmer
-// may answer an internal.sprout.action request on: a literal subject (no
+// may answer an internal.sprout.action or internal.tenant.boxkey request on: a literal subject (no
 // wildcards, no empty tokens, no whitespace) strictly under
 // SaaSAPIInboxPrefix. Farmer replies from its SYS user, which has no
 // permission restrictions, and NATS doesn't check a publisher's

@@ -11,7 +11,7 @@ package saasapi
 //
 //   - Every request this service sends (internal.tenant.provision,
 //     internal.tenant.deprovision, internal.tenant.purge,
-//     internal.sprout.action) is a payloadbox
+//     internal.sprout.action, internal.tenant.boxkey) is a payloadbox
 //     Call sealed with its box key to the platform key(s) it pins, bound to
 //     the request's purpose, method and subject (pki.SaaSAPIRequestWire),
 //     with the tenant inside the box. Each send seals a new message: a new
@@ -23,9 +23,10 @@ package saasapi
 //   - Every answer it acts on must be sealed by farmer to its box key
 //     under a pinned platform key: a provisioning result bound to its
 //     job's subject, accepted once and within ±5 minutes
-//     (pki.SaaSAPIBox.OpenTenantResult); an internal.sprout.action reply
-//     bound by ReplyTo to the request it answers
-//     (pki.SaaSAPIBox.OpenSproutActionReply). A plaintext answer, one that
+//     (pki.SaaSAPIBox.OpenTenantResult); an internal.sprout.action or
+//     internal.tenant.boxkey reply bound by ReplyTo to the request it
+//     answers (pki.SaaSAPIBox.OpenSproutActionReply,
+//     OpenTenantBoxKeyReply). A plaintext answer, one that
 //     doesn't open, or one bound to something else is refused, never a
 //     result.
 //
@@ -129,6 +130,36 @@ func openSproutActionReply(requestID string, msg *nats.Msg) (json.RawMessage, er
 		return nil, errors.New("sealed reply with no result")
 	}
 	return body.Result, nil
+}
+
+// openTenantBoxKeyReply opens msg, farmer's answer to the
+// internal.tenant.boxkey request whose ID is requestID. An
+// Imas-Payload-Error refusal, a plaintext reply, one that doesn't open
+// under this service's key and a pinned platform key, and one answering
+// another request are all errors: no key is taken from them.
+func openTenantBoxKeyReply(requestID string, msg *nats.Msg) (controlplane.TenantBoxKeyReply, error) {
+	var reply controlplane.TenantBoxKeyReply
+	if code := msg.Header.Get(payloadbox.ErrorHeader); code != "" {
+		return reply, fmt.Errorf("farmer answered with refusal code %q (unauthenticated)", code)
+	}
+	if msg.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
+		return reply, errors.New("plaintext reply refused")
+	}
+	b := controlBox.Load()
+	if b == nil {
+		return reply, errNoControlBox
+	}
+	body, err := b.OpenTenantBoxKeyReply(requestID, msg.Data)
+	if err != nil {
+		return reply, fmt.Errorf("sealed reply refused: %w", err)
+	}
+	if body.Error != "" || len(body.Result) == 0 {
+		return reply, fmt.Errorf("farmer refused the request: %s", body.Error)
+	}
+	if err := json.Unmarshal(body.Result, &reply); err != nil {
+		return reply, fmt.Errorf("malformed sealed reply: %w", err)
+	}
+	return reply, nil
 }
 
 // openTenantResult opens msg, a tenant job result (provision, deprovision

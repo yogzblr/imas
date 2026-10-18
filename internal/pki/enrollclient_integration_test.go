@@ -36,7 +36,7 @@ func TestEnrollClient_PersistedCredentialsConnectToBus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := EnrollSprout(t.Context(), "ek_1.supersecret", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.supersecret"), "web-01", sproutPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout: %v", err)
 	}

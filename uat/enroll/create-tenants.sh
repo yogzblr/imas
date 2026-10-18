@@ -13,11 +13,13 @@
 # Writes into DIR (created mode 0700):
 #   run.json            {"run_id", "saasapi_url"}
 #   tenants.json        {"1": {"tenant_id", "name", "status"}, "2": {...}}
-#   keys.json           {"<vm>": {"tenant", "tenant_id", "key_id", "expires_at", "key_file"}}
-#   keys/<vm>.key       the registration_key, mode 0600: the only secret written
+#   keys.json           {"<vm>": {"tenant", "tenant_id", "key_id", "expires_at", "tenant_key_fingerprint", "key_file"}}
+#   keys/<vm>.key       the registration_key ({key_id}.{secret}.{tenant_key_fingerprint}),
+#                       mode 0600: the only secret written
 #
 # Re-running is safe: a tenant already in tenants.json is reused (never created
-# twice), and a sprout that already has a key keeps it unless --new-keys.
+# twice), and a sprout that already has a key with a tenant key fingerprint
+# keeps it unless --new-keys.
 # Prints tenant ids and key ids only, never a key, token or the shared secret.
 #
 # Exit codes: 0 done; 1 error; 2 usage; 3 a token's organization.id doesn't
@@ -143,7 +145,7 @@ wait_active() {
 }
 
 mint_key() {
-	local n="$1" tid="$2" vm="$3" status body kid exp tries=0
+	local n="$1" tid="$2" vm="$3" status body kid exp fp tries=0
 	local keyfile="$STATE/keys/$vm.key"
 	body="$(jq -nc --argjson h "$KEY_HOURS" '{expires_in_hours: $h, max_uses: 1}')"
 	while :; do
@@ -156,15 +158,19 @@ mint_key() {
 	[[ "$status" == 200 ]] || die "enrollment key for $vm: HTTP $status $(resp_error)"
 	kid="$(jq -r '.key_id // empty' "$WORK/resp")"
 	exp="$(jq -r '.expires_at // empty' "$WORK/resp")"
-	jq -e --arg kid "$kid" '.registration_key | type == "string" and startswith($kid + ".") and (test("\\s") | not)' \
+	# {key_id}.{secret}.{tenant_key_fingerprint}: a sprout refuses a token
+	# without the tenant key fingerprint (enrollpinrequired, L24).
+	fp="$(jq -r '.tenant_key_fingerprint // empty' "$WORK/resp")"
+	[[ "$fp" =~ ^[0-9a-f]{64}$ ]] || die "enrollment key for $vm: no tenant_key_fingerprint in the answer (saasapi older than U2?)"
+	jq -e --arg kid "$kid" --arg fp "$fp" '.registration_key | type == "string" and startswith($kid + ".") and endswith("." + $fp) and test("^[^.\\s]+\\.[^.\\s]+\\.[0-9a-f]{64}$")' \
 		"$WORK/resp" >/dev/null || die "enrollment key for $vm: no usable registration_key in the answer"
 	jq -j .registration_key "$WORK/resp" >"$keyfile.tmp"
 	rm -f "$WORK/resp"
 	chmod 600 "$keyfile.tmp"
 	mv "$keyfile.tmp" "$keyfile"
-	json_set "$keys_json" '.[$vm] = {tenant: ($n | tonumber), tenant_id: $tid, key_id: $kid, expires_at: $exp, key_file: ("keys/" + $vm + ".key")}' \
-		--arg vm "$vm" --arg n "$n" --arg tid "$tid" --arg kid "$kid" --arg exp "$exp"
-	log "  $vm: key $kid (one use, expires $exp)"
+	json_set "$keys_json" '.[$vm] = {tenant: ($n | tonumber), tenant_id: $tid, key_id: $kid, expires_at: $exp, tenant_key_fingerprint: $fp, key_file: ("keys/" + $vm + ".key")}' \
+		--arg vm "$vm" --arg n "$n" --arg tid "$tid" --arg kid "$kid" --arg exp "$exp" --arg fp "$fp"
+	log "  $vm: key $kid (one use, expires $exp, tenant key ${fp:0:16}...)"
 }
 
 mapfile -t tenants < <(uat_tenants "$UAT")
@@ -185,7 +191,7 @@ for n in "${tenants[@]}"; do
 	mapfile -t vms < <(jq -r --arg n "$n" '.sprouts | to_entries[] | select((.value.tenant | tostring | ltrimstr("t")) == $n) | .key' "$UAT" | sort)
 	for vm in "${vms[@]}"; do
 		[[ "$vm" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "VM name '$vm' is not a plain host name"
-		if ((NEW_KEYS == 0)) && [[ -s "$STATE/keys/$vm.key" ]] && jq -e --arg vm "$vm" --arg tid "$tid" '.[$vm].tenant_id == $tid' "$keys_json" >/dev/null; then
+		if ((NEW_KEYS == 0)) && [[ -s "$STATE/keys/$vm.key" ]] && jq -e --arg vm "$vm" --arg tid "$tid" '.[$vm].tenant_id == $tid and (.[$vm].tenant_key_fingerprint // "" | test("^[0-9a-f]{64}$"))' "$keys_json" >/dev/null; then
 			log "  $vm: keeping key $(jq -r --arg vm "$vm" '.[$vm].key_id' "$keys_json")"
 			continue
 		fi

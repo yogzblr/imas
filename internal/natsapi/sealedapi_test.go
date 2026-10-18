@@ -487,7 +487,7 @@ func TestSealedSaaSAPIRequests(t *testing.T) {
 	env := setupSealedEnv(t)
 	saas := setupSaaSAPIKeys(t, env)
 	replicaA, replicaB := newSealedAPI(), newSealedAPI()
-	for _, subject := range []string{controlplane.SubjectTenantProvision, controlplane.SubjectTenantDeprovision, controlplane.SubjectSproutAction} {
+	for _, subject := range []string{controlplane.SubjectTenantProvision, controlplane.SubjectTenantDeprovision, controlplane.SubjectSproutAction, controlplane.SubjectTenantBoxKey} {
 		m, id := saasRequest(t, saas, subject)
 		req, err := replicaA.openSaaSAPIRequest(t.Context(), m)
 		if err != nil {
@@ -500,14 +500,21 @@ func TestSealedSaaSAPIRequests(t *testing.T) {
 		wantCode(t, subject+" replayed on the same replica", err, payloadbox.ErrorCodeOpenFailed)
 		_, err = replicaB.openSaaSAPIRequest(t.Context(), m)
 		wantCode(t, subject+" replayed on another replica", err, payloadbox.ErrorCodeOpenFailed)
-		if subject != controlplane.SubjectSproutAction {
+		replyPurpose := map[string]string{
+			controlplane.SubjectSproutAction: payloadbox.PurposeSaaSSproutActionReply,
+			controlplane.SubjectTenantBoxKey: payloadbox.PurposeSaaSTenantBoxKeyReply,
+		}[subject]
+		if replyPurpose == "" {
+			if _, err := sealSaaSAPIReply(req, nil, nil); err == nil {
+				t.Errorf("%s: sealed a reply to a subject that gets none", subject)
+			}
 			continue
 		}
 		reply, err := sealSaaSAPIReply(req, map[string]string{"status": "dispatched"}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		body, err := saas.OpenReply(payloadbox.PurposeSaaSSproutActionReply, req.Method, subject, id, reply)
+		body, err := saas.OpenReply(replyPurpose, req.Method, subject, id, reply)
 		if err != nil || string(body.Result) != `{"status":"dispatched"}` {
 			t.Fatalf("reply %+v, %v", body, err)
 		}

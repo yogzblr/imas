@@ -167,7 +167,7 @@ func TestRun_MintsAndPublishesToConfiguredPath(t *testing.T) {
 		t.Fatalf("JWT sub=%s iss=%s issuer_account=%q, want the SaaS API key signed directly by the trust's SYS Account key",
 			uc.Subject, uc.Issuer, uc.IssuerAccount)
 	}
-	if !reflect.DeepEqual(uc.Pub.Allow, jwt.StringList{"internal.tenant.provision", "internal.tenant.deprovision", "internal.tenant.purge", "internal.sprout.action"}) ||
+	if !reflect.DeepEqual(uc.Pub.Allow, jwt.StringList{"internal.tenant.provision", "internal.tenant.deprovision", "internal.tenant.purge", "internal.sprout.action", "internal.tenant.boxkey"}) ||
 		!reflect.DeepEqual(uc.Sub.Allow, jwt.StringList{"internal.tenant.provisioned.*", "internal.tenant.deprovisioned.*", "internal.tenant.purged.*", "_INBOX.saasapi.>"}) ||
 		!reflect.DeepEqual(uc.AllowedConnectionTypes, jwt.StringList{jwt.ConnectionTypeStandard}) {
 		t.Fatalf("unexpected permissions on the published JWT: %+v conn=%v", uc.Permissions, uc.AllowedConnectionTypes)

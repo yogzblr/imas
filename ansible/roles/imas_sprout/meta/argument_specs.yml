@@ -12,9 +12,23 @@ argument_specs:
       imas_join_token:
         type: str
         description:
-          - One-time enrollment key, C({key_id}.{secret}), from
-            POST /tenants/{tenant_id}/enrollment-keys. Required for a host that isn't enrolled.
+          - One-time enrollment key, C({key_id}.{secret}.{tenant_key_fingerprint}) (the
+            C(registration_key)), from POST /tenants/{tenant_id}/enrollment-keys. Required
+            for a host that isn't enrolled.
+          - A C({key_id}.{secret}) key without the fingerprint is accepted only with
+            imas_sprout_enroll_pin_required false.
           - Supply it with ansible-vault or a secret store; never commit it.
+      imas_sprout_enroll_pin_required:
+        type: bool
+        default: true
+        description:
+          - Refuse a join token without the tenant key fingerprint (config key
+            C(enrollpinrequired)). The sprout checks the tenant key its enrollment
+            response names against the fingerprint before pinning it, so a DMZ Envoy
+            that substitutes its own key is refused (security review 2026-10, L24).
+          - C(false) accepts a C({key_id}.{secret}) key and trusts the tenant key on
+            first use; the sprout logs a warning at every such enrollment. Always
+            written as C(true) or C(false).
       imas_farmer_host:
         type: str
         required: true

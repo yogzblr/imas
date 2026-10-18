@@ -64,7 +64,12 @@ provisioner:
       sprouts:
         # What prepare.yml's stub farmer accepts: one key, three uses, one
         # per platform. A second enrollment of any of them would exhaust it.
-        imas_join_token: ek_molecule.c3R1YmZhcm1lci1qb2luLXRva2Vu
+        # The stub is started with the credential and writes the full token,
+        # with the fingerprint of the tenant key it generates (L24), to
+        # state/join-token, as the SaaS API's registration_key.
+        imas_molecule_join_credential: ek_molecule.c3R1YmZhcm1lci1qb2luLXRva2Vu
+        imas_join_token: >-
+          {{ lookup('ansible.builtin.file', lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') ~ '/imas/state/join-token') }}
         imas_farmer_host: imas-farmer
         imas_farmer_api_port: 5405
         # The stub's certificate is from a CA it generates: pre-provisioned,

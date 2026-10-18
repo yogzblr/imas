@@ -87,7 +87,8 @@ func (b *SaaSAPIBox) sealPairs() []payloadbox.KeyPair {
 }
 
 // SealRequest seals a Call to farmer (a2f.tenant.provision,
-// a2f.tenant.deprovision, a2f.tenant.purge or a2f.sprout.action) for method on subject, one
+// a2f.tenant.deprovision, a2f.tenant.purge, a2f.sprout.action or
+// a2f.tenant.boxkey) for method on subject, one
 // copy per pinned platform key, and returns its message ID for
 // OpenReply.
 func (b *SaaSAPIBox) SealRequest(purpose, method, subject string, params any) (data []byte, msgID string, err error) {
@@ -97,7 +98,8 @@ func (b *SaaSAPIBox) SealRequest(purpose, method, subject string, params any) (d
 	}, b.sealPairs())
 }
 
-// OpenReply opens farmer's sealed reply (f2a.sprout.action) to the
+// OpenReply opens farmer's sealed reply (f2a.sprout.action,
+// f2a.tenant.boxkey) to the
 // request whose ID is replyTo. Any failure is payloadbox.ErrOpen.
 func (b *SaaSAPIBox) OpenReply(purpose, method, subject, replyTo string, data []byte) (*payloadbox.ReplyBody, error) {
 	_, body, err := payloadbox.OpenReply(data, b.sealPairs(), payloadbox.ReplyExpect{
@@ -126,8 +128,9 @@ func (b *SaaSAPIBox) OpenResult(purpose, method, subject string, data []byte) (*
 }
 
 // SealSaaSAPIRequest seals params as the SaaS API's request on subject
-// (internal.tenant.provision, internal.tenant.deprovision or
-// internal.sprout.action), bound to that subject's purpose and method
+// (internal.tenant.provision, internal.tenant.deprovision,
+// internal.tenant.purge, internal.sprout.action or
+// internal.tenant.boxkey), bound to that subject's purpose and method
 // (SaaSAPIRequestWire), and returns the envelope and its message ID, which
 // farmer's reply must name. Every call is a new message: a fresh random
 // ID and the current time, so a re-send (the outbox sweeper's) is never a
@@ -146,6 +149,15 @@ func (b *SaaSAPIBox) SealSaaSAPIRequest(subject string, params any) (data []byte
 // included, is payloadbox.ErrOpen.
 func (b *SaaSAPIBox) OpenSproutActionReply(requestID string, data []byte) (*payloadbox.ReplyBody, error) {
 	w := SproutActionReplyWire()
+	return b.OpenReply(w.Purpose, w.Method, w.Subject, requestID, data)
+}
+
+// OpenTenantBoxKeyReply opens farmer's sealed reply to the
+// internal.tenant.boxkey request whose ID is requestID
+// (TenantBoxKeyReplyWire). Any failure, a reply to another request
+// included, is payloadbox.ErrOpen.
+func (b *SaaSAPIBox) OpenTenantBoxKeyReply(requestID string, data []byte) (*payloadbox.ReplyBody, error) {
+	w := TenantBoxKeyReplyWire()
 	return b.OpenReply(w.Purpose, w.Method, w.Subject, requestID, data)
 }
 

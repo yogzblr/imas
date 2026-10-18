@@ -21,6 +21,7 @@ to a tenant id (tests/fake/hub-core/bind-tenant.sh writes it).
 """
 
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -164,7 +165,13 @@ if len(parts) >= 3 and parts[:2] == ["v1", "tenants"]:
         n = len(st["keys"]) + 1
         kid = f"ek_{n:04d}"
         st["keys"].append({"tenant_id": tid, "key_id": kid, "request": req})
-        answer(200, {"key_id": kid, "registration_key": f"{kid}.SEKRIT{n:04d}xyz",
+        # The tenant key fingerprint saasapi puts in every token (L24);
+        # FAKE_NO_FINGERPRINT=1 answers as a saasapi from before it.
+        fp = hashlib.sha256(tid.encode()).hexdigest()
+        if os.environ.get("FAKE_NO_FINGERPRINT") == "1":
+            answer(200, {"key_id": kid, "registration_key": f"{kid}.SEKRIT{n:04d}xyz",
+                         "expires_at": "2026-10-06T18:00:00Z", "max_uses": req.get("max_uses")})
+        answer(200, {"key_id": kid, "registration_key": f"{kid}.SEKRIT{n:04d}xyz.{fp}", "tenant_key_fingerprint": fp,
                      "expires_at": "2026-10-06T18:00:00Z", "max_uses": req.get("max_uses")})
     if method == "POST" and len(rest) == 3 and rest[0] == "sprouts" and rest[2] == "asset-link":
         sid, aid = rest[1], req.get("asset_id")

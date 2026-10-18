@@ -918,6 +918,47 @@ func TestLoadConfig_SproutRootCATOFU(t *testing.T) {
 	}
 }
 
+// enrollpinrequired (L24, U2) defaults to true: a join token without a
+// tenant key fingerprint is refused unless the operator turns it off.
+func TestLoadConfig_EnrollPinRequired(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"default on", "", true},
+		{"turned off", "enrollpinrequired: false\n", false},
+		{"explicitly on", "enrollpinrequired: true\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			EnrollPinRequired = !c.want
+			loadSproutConfig(t, c.content)
+			if EnrollPinRequired != c.want {
+				t.Errorf("EnrollPinRequired = %v, want %v", EnrollPinRequired, c.want)
+			}
+		})
+	}
+}
+
+// The packaged config file (packaging/etc/imas-sprout.conf, shipped by
+// the .deb, .rpm, .apk and MSI) sets enrollpinrequired to the same default
+// as the code and the Ansible role: true.
+func TestLoadConfig_PackagedSproutConfigRequiresThePin(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "packaging", "etc", "imas-sprout.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "\nenrollpinrequired: true\n") {
+		t.Fatal("packaging/etc/imas-sprout.conf does not set enrollpinrequired: true")
+	}
+	EnrollPinRequired = false
+	loadSproutConfig(t, string(content))
+	if !EnrollPinRequired {
+		t.Error("EnrollPinRequired = false after loading the packaged config file")
+	}
+}
+
 func TestLoadConfig_SproutWithCustomID(t *testing.T) {
 	tmpRoot := t.TempDir()
 	content := "sproutid: my-custom-sprout\nloglevel: warn\n"

@@ -90,7 +90,10 @@ func TestBusyAnswerPassesThroughEnvoy(t *testing.T) {
 	c := &pki.EnrollClient{HTTP: env.HTTPClient(), FarmerURL: env.URL}
 	before := farmer.count("/v1/enroll")
 	start := time.Now()
-	_, err = c.Enroll(t.Context(), "ek_test.secret", "web-01", pki.EnrollKeys{NKey: kp, BoxPriv: &box})
+	// A join token with a tenant key fingerprint (L24): this farmer only
+	// ever answers busy, so which tenant key it names doesn't matter.
+	token := "ek_test.secret." + strings.Repeat("ab", 32)
+	_, err = c.Enroll(t.Context(), token, "web-01", pki.EnrollKeys{NKey: kp, BoxPriv: &box})
 	if !errors.Is(err, pki.ErrFarmerBusy) {
 		t.Fatalf("Enroll through Envoy: %v, want ErrFarmerBusy", err)
 	}

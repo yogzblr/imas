@@ -69,6 +69,9 @@ type EnrollResult struct {
 	TenantID      string
 	HasGatewayJWT bool
 	HasBinding    bool
+	// TenantX25519Pub is the tenant box public key the answer names, which
+	// a real sprout checks against its token's fingerprint (L24).
+	TenantX25519Pub string
 }
 
 // OK reports a 200 with a sprout ID.
@@ -148,10 +151,11 @@ func (e *Enroller) enrollOnce(ctx context.Context, s *SyntheticSprout, joinToken
 		TenantID      string          `json:"tenant_id"`
 		GatewayJWT    string          `json:"gateway_jwt"`
 		EnrollBinding json.RawMessage `json:"enroll_binding"`
+		TenantPub     string          `json:"tenant_x25519_pub"`
 	}
 	_ = json.Unmarshal(raw, &out)
 	res := &EnrollResult{
-		Status: resp.StatusCode, Error: out.Error, SproutID: out.SproutID, TenantID: out.TenantID,
+		Status: resp.StatusCode, Error: out.Error, SproutID: out.SproutID, TenantID: out.TenantID, TenantX25519Pub: out.TenantPub,
 		HasGatewayJWT: out.GatewayJWT != "", HasBinding: len(out.EnrollBinding) > 0 && string(out.EnrollBinding) != "null",
 	}
 	if res.Error == "" && resp.StatusCode != http.StatusOK {

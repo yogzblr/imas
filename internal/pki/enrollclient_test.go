@@ -123,6 +123,10 @@ type enrollServer struct {
 	// answered with a 502 before reaching Enroll, standing in for an
 	// Envoy or network failure between enrollment's two steps.
 	failProven int
+	// enrollTenantPubOverride, if set, is the tenant_x25519_pub every
+	// POST /v1/enroll response names instead of farmer's: a DMZ Envoy
+	// substituting its own key (L24).
+	enrollTenantPubOverride string
 	// refreshTenantOverride and refreshTenantPubOverride, if set, are the
 	// tenant_id and tenant_x25519_pub POST /v1/refresh names (inside a
 	// reply farmer sealed properly) instead of the real ones.
@@ -257,6 +261,11 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			_, _ = w.Write([]byte(`{"error":"enrollment_failed"}`))
 			return
 		}
+		s.mu.Lock()
+		if s.enrollTenantPubOverride != "" {
+			res.TenantX25519Pub = s.enrollTenantPubOverride
+		}
+		s.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(EnrollResponse{
 			SproutID: res.SproutID, TenantID: res.TenantID, JWT: res.JWT, GatewayJWT: res.GatewayJWT,
 			NKeyIdentity: req.NKeyPub, TenantX25519Pub: res.TenantX25519Pub,
@@ -385,7 +394,7 @@ func TestEnrollSprout_EnrollPersistAndRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := EnrollSprout(t.Context(), "ek_1.supersecret", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.supersecret"), "web-01", sproutPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout: %v", err)
 	}
@@ -510,7 +519,7 @@ func TestRefreshGatewayJWT_DeletedSproutCannotReenroll(t *testing.T) {
 	setupSproutFiles(t)
 	startEnrollServer(t)
 	sproutPub, _ := EnsureSproutBoxKey()
-	resp, err := EnrollSprout(t.Context(), "ek_1.supersecret", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.supersecret"), "web-01", sproutPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +545,7 @@ func TestEnrollSprout_Rejected(t *testing.T) {
 	startEnrollServer(t)
 	sproutPub, _ := EnsureSproutBoxKey()
 
-	if _, err := EnrollSprout(t.Context(), "ek_unknown.secret", "web-01", sproutPub); err == nil {
+	if _, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_unknown.secret"), "web-01", sproutPub); err == nil {
 		t.Fatal("expected an error for an unknown join token")
 	}
 	if SproutEnrolled() {
@@ -559,7 +568,7 @@ func TestEnrollSprout_RetriesStep2WithTheSameBinding(t *testing.T) {
 	srv.mu.Lock()
 	srv.failProven = enrollStep2Attempts - 1
 	srv.mu.Unlock()
-	resp, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub)
 	if err != nil || resp.GatewayJWT == "" {
 		t.Fatalf("EnrollSprout = %+v, %v; want success on the last attempt", resp, err)
 	}
@@ -585,7 +594,7 @@ func TestEnrollSprout_RetriesStep2WithTheSameBinding(t *testing.T) {
 	srv.mu.Lock()
 	srv.failProven = enrollStep2Attempts
 	srv.mu.Unlock()
-	if _, err := EnrollSprout(t.Context(), "ek_2.s", "web-02", sproutPub); err == nil {
+	if _, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_2.s"), "web-02", sproutPub); err == nil {
 		t.Fatal("EnrollSprout succeeded with every second request failing")
 	}
 }
@@ -609,7 +618,7 @@ func TestEnrollSprout_ClockSkewRejected(t *testing.T) {
 	orig := enrollClock
 	enrollClock = func() time.Time { return time.Now().Add(-EnrollSigMaxSkew - time.Minute) }
 	t.Cleanup(func() { enrollClock = orig })
-	if _, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub); err == nil {
+	if _, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub); err == nil {
 		t.Fatal("expected a request signed outside the skew window to be rejected")
 	}
 	if store.rows["ek_1"].UsedCount != 0 {
@@ -770,7 +779,7 @@ func TestRunGatewayJWTRefresher_RefreshesExpiredTokenAndStops(t *testing.T) {
 	setupSproutFiles(t)
 	startEnrollServer(t)
 	sproutPub, _ := EnsureSproutBoxKey()
-	resp, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,7 +857,7 @@ func TestEnsureEnrolled_AdoptsFarmerAssignedID(t *testing.T) {
 	startEnrollServer(t)
 	sproutPub, _ := EnsureSproutBoxKey()
 
-	id, err := EnsureEnrolled(t.Context(), "ek_1.s", "web-01", sproutPub, time.Millisecond)
+	id, err := EnsureEnrolled(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub, time.Millisecond)
 	if err != nil {
 		t.Fatalf("EnsureEnrolled: %v", err)
 	}
@@ -869,7 +878,7 @@ func TestEnsureEnrolled_RetriesUntilCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := EnsureEnrolled(ctx, "ek_unknown.s", "web-01", sproutPub, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := EnsureEnrolled(ctx, pinnedToken(t, "ek_unknown.s"), "web-01", sproutPub, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("EnsureEnrolled = %v, want the context's error", err)
 	}
 	srv.mu.Lock()
@@ -897,7 +906,7 @@ func enrollForTest(t *testing.T) (*enrollServer, *jwsGatewayMinter, *fakeEnrollm
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub)
 	if err != nil {
 		t.Fatalf("EnrollSprout: %v", err)
 	}

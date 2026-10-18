@@ -58,8 +58,8 @@ Everything is written below `--state` (mode 0700):
 |---|---|---|
 | `run.json` | no | `run_id` and the saasapi URL, so a state directory is never reused for another run |
 | `tenants.json` | no | `{"1": {"tenant_id", "name", "status"}, "2": ...}`, the form `uat/tests/harness` reads |
-| `keys.json` | no | Per VM: tenant, tenant id, `key_id`, `expires_at` |
-| `keys/<vm>.key` | **yes**, 0600 | The `registration_key` (join token) |
+| `keys.json` | no | Per VM: tenant, tenant id, `key_id`, `expires_at`, `tenant_key_fingerprint` |
+| `keys/<vm>.key` | **yes**, 0600 | The `registration_key` (join token, `{key_id}.{secret}.{tenant_key_fingerprint}`; `create-tenants.sh` refuses an answer without the fingerprint, which the sprouts' default `enrollpinrequired: true` needs) |
 | `inventory/` | no | `hosts.yml`, `group_vars/`, `plan.json` (what each sprout should become) |
 | `ssh/known_hosts` | no | This run's host keys |
 | `enrolled.json` | no | Per VM, the sprout ID it enrolled with (from `collect.yml`) |

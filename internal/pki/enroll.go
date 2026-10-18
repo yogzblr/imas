@@ -82,12 +82,21 @@ package pki
 // from a sealed refresh (refreshsealed.go). The sprout never used step
 // 1's gateway JWT.
 //
+// The tenant key fingerprint in the join token (security review 2026-10,
+// L24; internal/jointoken). The sprout compares the tenant key a first
+// response names with the token's fingerprint before it pins it
+// (enrollclient.go), which is what stops a DMZ Envoy substituting its own
+// key. Farmer checks it too, before redeeming (checkTokenTenantKey), so a
+// token minted before a tenant key rotation is refused without spending a
+// use. A token without a fingerprint is accepted here; whether a sprout
+// sends one is its own setting (enrollpinrequired).
+//
 // Every failure path in Enroll returns the single generic
 // ErrEnrollmentFailed sentinel (design doc §3.4) — unknown key_id,
-// malformed token, a hash mismatch, revoked, expired, exhausted, and a
-// lost redemption race are all deliberately indistinguishable over the
-// wire, to deny an attacker an oracle for enumerating key_ids or timing a
-// race against expiry. The specific reason is logged locally (log.Warnf
+// malformed token, a hash mismatch, revoked, expired, exhausted, a stale
+// tenant key fingerprint, and a lost redemption race are all deliberately
+// indistinguishable over the wire, to deny an attacker an oracle for
+// enumerating key_ids or timing a race against expiry. The specific reason is logged locally (log.Warnf
 // below) for operator visibility, never returned.
 import (
 	"context"
@@ -108,6 +117,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
+	"github.com/yogzblr/imas/internal/jointoken"
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/payloadbox"
 )
@@ -199,7 +209,8 @@ func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
 	return res.RowsAffected == 1, nil
 }
 
-// UseInMemoryJoinToken makes Enroll accept joinToken ("{key_id}.{secret}")
+// UseInMemoryJoinToken makes Enroll accept joinToken ("{key_id}.{secret}",
+// with or without a tenant key fingerprint after it; internal/jointoken)
 // for tenantID up to maxUses times, from an in-memory store that replaces
 // saas.enrollment_keys until the returned function restores it. For tests
 // outside this package that drive POST /v1/enroll end to end
@@ -209,10 +220,11 @@ func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
 // can no longer start from a sprout accepted outside it. Never called
 // outside tests.
 func UseInMemoryJoinToken(joinToken, tenantID string, maxUses int) (restore func()) {
-	keyID, secret, ok := splitJoinToken(joinToken)
-	if !ok {
+	tok, err := jointoken.Parse(joinToken)
+	if err != nil {
 		panic("pki: UseInMemoryJoinToken: malformed join token")
 	}
+	keyID, secret := tok.KeyID, tok.Secret
 	orig := enrollKeyStore
 	enrollKeyStore = &memoryEnrollmentKeyStore{keyID: keyID, row: enrollmentKeyRow{
 		TenantID: tenantID, KeyHash: hashSecret(secret), Expiry: time.Now().Add(24 * time.Hour), MaxUses: maxUses,
@@ -491,11 +503,12 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		return nil, ErrEnrollmentFailed
 	}
 
-	keyID, secret, ok := splitJoinToken(joinToken)
-	if !ok {
+	tok, err := jointoken.Parse(joinToken)
+	if err != nil {
 		log.Warnf("enroll: malformed join token")
 		return nil, ErrEnrollmentFailed
 	}
+	keyID, secret := tok.KeyID, tok.Secret
 
 	row, err := enrollKeyStore.lookup(keyID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -562,6 +575,20 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	if err := refuseDeprovisionedTenant(row.TenantID); err != nil {
 		log.Warnf("enroll: key_id %s: %v", keyID, err)
 		return nil, ErrEnrollmentFailed
+	}
+
+	// A token carrying a tenant key fingerprint (L24, U2) was minted for
+	// the tenant key current then. If farmer's current key is another one
+	// (the tenant key was rotated since), the sprout would refuse this
+	// response anyway; refusing here, checked before redeeming like the
+	// three above, keeps the token's use. The sprout's own check is the
+	// one that matters: a compromised Envoy can rewrite this request, not
+	// the token the sprout compares against.
+	if tok.Fingerprint != "" {
+		if err := checkTokenTenantKey(row.TenantID, tok.Fingerprint); err != nil {
+			log.Warnf("enroll: key_id %s: %v", keyID, err)
+			return nil, ErrEnrollmentFailed
+		}
 	}
 
 	// row.TenantID (workstream E, FLAG FOR SECURITY REVIEW: tenant
@@ -913,19 +940,33 @@ func mintGatewayJWTFor(ctx context.Context, tenantID, sproutID, nkeyPub string) 
 	})
 }
 
-// splitJoinToken splits design doc §3.1's "{key_id}.{secret}" token on its
-// first '.', rejecting anything that doesn't leave both halves non-empty.
-func splitJoinToken(token string) (keyID, secret string, ok bool) {
-	i := strings.IndexByte(token, '.')
-	if i <= 0 || i == len(token)-1 {
-		return "", "", false
+// checkTokenTenantKey checks fingerprint, a join token's tenant key
+// fingerprint, against tenantID's current box public key, read from
+// OpenBao afresh (TenantX25519PublicKeyForJoinToken): this replica's
+// cache may predate a rotation another replica made, which would refuse
+// a token minted for the new key, and its stale-copy fallback must not
+// let a token for a rotated-out key spend a use. The fresh read also
+// refreshes the cache, so the response names the same key. A mismatch
+// means the token was minted before the tenant key was last rotated: it
+// has to be replaced with a new one.
+func checkTokenTenantKey(tenantID, fingerprint string) error {
+	pub, err := TenantX25519PublicKeyForJoinToken(tenantID)
+	if err != nil {
+		return fmt.Errorf("loading tenant %s X25519 key to check the join token's fingerprint: %w", tenantID, err)
 	}
-	return token[:i], token[i+1:], true
+	want, err := jointoken.FingerprintB64(pub)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(want), []byte(fingerprint)) != 1 {
+		return fmt.Errorf("the join token names tenant key %s, but tenant %s's current key is %s: the key was rotated after the token was minted; mint a new token", fingerprint, tenantID, want)
+	}
+	return nil
 }
 
 // hashSecret must stay byte-for-byte identical to internal/saasapi's own
-// hashSecret (idgen.go): both sides hash the secret half of the same
-// {key_id}.{secret} token the same way. farmer can't import
+// hashSecret (idgen.go): both sides hash the secret part of the same
+// {key_id}.{secret}.{tenant_key_fingerprint} token the same way. farmer can't import
 // internal/saasapi (separate schema/service boundary — design doc §5.1's
 // "SaaS API" vs. "Farmer" split), so this is a deliberate, small
 // duplication rather than a cross-service dependency.

@@ -80,6 +80,16 @@ A sprout needs a trusted TLS root before it can make any of the calls above, and
 
 `sproutrootcatofu` defaults to `true`, so existing direct-to-farmer installs are unchanged. Rotating the DMZ edge certificate onto a different CA means re-provisioning `sproutrootca` on every sprout first.
 
+### Tenant key: checked against the join token, not trusted on first use
+
+Envoy terminates the enrollment TLS, so the pinned root CA proves the sprout is talking to Envoy, not that Envoy relays farmer's answer unchanged. The first response names the tenant's X25519 public key (`tenant_x25519_pub`), which the sprout seals its box key proof to and pins for good. Before security review 2026-10's L24 was fixed (unit U2), whatever key that response named was pinned: a compromised Envoy could substitute its own and read everything farmer later sealed to the sprout, in both directions.
+
+- **The join token carries the key's fingerprint**: `{key_id}.{secret}.{tenant_key_fingerprint}`, the lowercase hex SHA-256 of the tenant key's 32 raw bytes (`internal/jointoken`). The SaaS API reads the key from farmer over the sealed control plane (`internal.tenant.boxkey`, sealed both ways between the SaaS API's and the platform's box keys, so neither Envoy nor a compromised bus can change it) when it mints the token. The token reaches the sprout by the same authenticated channel as the root CA (Ansible over SSH or WinRM).
+- **The sprout checks before it uses the key.** The tenant key in the first response must have the token's fingerprint, or the enrollment stops with `ErrTenantKeyFingerprintMismatch`, before the box key proof is sealed to it and before anything is pinned, and `EnsureEnrolled` does not retry it (the sprout exits). The second response must name the same key as the first.
+- **A token without a fingerprint** (`{key_id}.{secret}`, minted before U2) still parses. The sprout refuses it before sending anything (`ErrJoinTokenNoFingerprint`) unless `enrollpinrequired: false` (default `true`; the Ansible role's `imas_sprout_enroll_pin_required` and the packaged config file match), and then logs a warning at every enrollment that it trusts the tenant key on first use.
+- **Farmer checks too, as a courtesy.** A token whose fingerprint isn't the tenant's current key, read from OpenBao afresh rather than the replica's cache (which may predate a rotation another replica made), is refused with the generic `enrollment_failed` before it is redeemed, so a token minted before a tenant key rotation costs no use. The sprout's check is the one that counts: Envoy can rewrite the request farmer sees, not the token the sprout compares against.
+- **Rotation is unaffected.** A token is for a first enrollment only. A sprout that is enrolled follows later tenant keys through the continuity proofs farmer sends with each refresh (sealed under the key it pinned), never through a token. A token minted before a rotation has to be replaced.
+
 ## Proof of possession: every request signs with the sprout's NKey seed
 
 `nkey_pub` is not a secret. Envoy forwards it upstream as `x-imas-sprout-nkey` on every JWT-gated request, and it is the `sub` of both tokens the sprout holds. The idempotency replay (`imas-machine-manager-api-design.md` §3.3 step 1) runs before the join token is checked, so if `nkey_pub` alone were enough, anyone who had seen an enrolled sprout's `nkey_pub` could call `/v1/enroll` and get a freshly minted gateway JWT for that sprout. Every request must therefore prove it holds the NKey seed behind the `nkey_pub` it presents.
@@ -100,7 +110,7 @@ A sprout needs a trusted TLS root before it can make any of the calls above, and
 
 ```json
 {
-  "join_token": "<key_id>.<secret>",
+  "join_token": "<key_id>.<secret>.<tenant_key_fingerprint>",
   "nkey_pub":   "U...",
   "hostname":   "web-01",
   "sprout_pub": "<base64 X25519 public key>",
@@ -170,7 +180,7 @@ The gateway JWT is short-lived by design (`config.GatewayJWTTTL`), so every enro
 
 **Sprout side** (`internal/pki/enrollclient.go`):
 - The refresh is scheduled two-thirds of the way through the token's lifetime, less up to a tenth of the lifetime of random jitter, and retried with backoff (capped at 5 minutes) on failure.
-- **The tenant X25519 public key is pinned at enrollment**, with the tenant ID and (since J.2) the sprout ID beside it. The key pin moves only on a continuity proof sealed under the pinned key (authenticated tenant key rotation, `imas-payload-encryption-design.md`). A refresh reply naming a different key without one, or another tenant or sprout ID, is refused whole: nothing from it is persisted, and the sprout exits with an error so its service manager records a failure. So does a sprout missing its box key or a pin: it can't make a sealed refresh and must be re-enrolled.
+- **The tenant X25519 public key is pinned at enrollment**, once it matches the join token's fingerprint (see "Tenant key: checked against the join token"), with the tenant ID and (since J.2) the sprout ID beside it. The key pin moves only on a continuity proof sealed under the pinned key (authenticated tenant key rotation, `imas-payload-encryption-design.md`). A refresh reply naming a different key without one, or another tenant or sprout ID, is refused whole: nothing from it is persisted, and the sprout exits with an error so its service manager records a failure. So does a sprout missing its box key or a pin: it can't make a sealed refresh and must be re-enrolled.
 - **A severing tenant key rotation cuts a sprout off.** Farmer no longer holds the key the sprout pinned, so it can't open the sprout's refresh, and nothing it could send back would be authenticated. The refusal is an ordinary, retried `enrollment_failed`, not a fatal error, and the sprout stays cut off until an operator re-enrolls it (owner decision, 2026-10-04: "let the sprout re-enroll").
 - **A busy answer is the one retryable failure.** When another farmer replica holds the sprout's User JWT mint lease, `/v1/enroll` and `/v1/refresh` answer `503` with a `Retry-After` (the body is still the generic one). The sprout waits that long (5 s when the header is missing or invalid, at most 60 s, plus up to 20 percent jitter), logs `server busy (lease held), retrying in Ns`, and retries with a freshly signed or sealed request, at most 5 times per request; an enrollment's second request counts its busy answers against its own 5 attempts. Envoy retries neither route on a 5xx (only `connect-failure` and `refused-stream`, once), so the `Retry-After` reaches the sprout.
 - **The join token is deleted by the sprout itself** once enrollment is fully persisted (the NATS User JWT, written last, is on disk): it is removed from the sprout config file, which is kept at mode 0600. A token supplied by environment variable or command-line flag can't be removed by the sprout, so it logs where the token still is. The token has no use left after enrollment: every later call is a sealed refresh.

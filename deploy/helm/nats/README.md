@@ -104,6 +104,13 @@ separate `deploy/helm/farmer` chart.
      After enrollment the sprout dials the `wss://` `nats_urls` it was
      given (persisted in `sproutbusurlsfile`), or `busurls` if you pin
      them in the sprout config.
+   - Give each sprout the `registration_key` exactly as the SaaS API
+     minted it (`{key_id}.{secret}.{tenant_key_fingerprint}`) and keep
+     `enrollpinrequired: true` (the default). Envoy terminates the
+     enrollment TLS, so the sprout checks the tenant key farmer's answer
+     names against the token's fingerprint and refuses one Envoy
+     substituted (`docs/design/imas-envoy-enrollment-design.md`, "Tenant
+     key: checked against the join token").
 
 ```sh
 helm install imas-dmz deploy/helm/nats -n imas-dmz \

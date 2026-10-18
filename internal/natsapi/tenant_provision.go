@@ -65,8 +65,9 @@ const (
 )
 
 // RegisterTenantProvisioning queue-subscribes nc — farmer's SYS listener
-// connection — to internal.tenant.provision, internal.tenant.deprovision
-// and internal.tenant.purge (tenant_purge.go).
+// connection — to internal.tenant.provision, internal.tenant.deprovision,
+// internal.tenant.purge (tenant_purge.go) and internal.tenant.boxkey
+// (tenant_boxkey.go).
 // It uses the same natsCoreQueueGroup as imas.api.> (workstream D's
 // discipline) so that with several farmer replicas, exactly one processes
 // each request. Call once per process, not once per tenant.
@@ -108,7 +109,10 @@ func registerSaaSAPIHandlers(nc *nats.Conn, s *sealedAPI) error {
 	}); err != nil {
 		return fmt.Errorf("natsapi: failed to subscribe to %s: %w", controlplane.SubjectTenantPurge, err)
 	}
-	log.Info("natsapi: registered tenant provisioning and purge handlers (SYS account, sealed)")
+	if err := registerTenantBoxKey(nc, s); err != nil {
+		return err
+	}
+	log.Info("natsapi: registered tenant provisioning, purge and box key handlers (SYS account, sealed)")
 	return registerSproutAction(nc, s)
 }
 

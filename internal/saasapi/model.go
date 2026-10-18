@@ -108,8 +108,9 @@ func (ProvisioningJob) TableName() string { return "provisioning_jobs" }
 // idgen.go/enrollment_keys.go, both explicitly flagged for security
 // review per the task brief.
 type EnrollmentKey struct {
-	// KeyID is the public, indexed lookup half of the {key_id}.{secret}
-	// token (§3.1) — safe to log and store in plaintext.
+	// KeyID is the public, indexed lookup part of the
+	// {key_id}.{secret}.{tenant_key_fingerprint} token (§3.1,
+	// internal/jointoken) — safe to log and store in plaintext.
 	KeyID      string     `gorm:"column:key_id;primaryKey;size:32" json:"key_id"`
 	TenantID   string     `gorm:"column:tenant_id;size:32;not null;index" json:"tenant_id"`
 	KeyHash    string     `gorm:"column:key_hash;size:64;not null" json:"-"`

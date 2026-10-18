@@ -78,11 +78,11 @@
 
   <rect x="40" y="440" width="230" height="118" rx="6" class="box"/>
   <text x="52" y="462" class="h">Join token</text>
-  <text x="52" y="480" class="mono">{key_id}.{secret}</text>
-  <text x="52" y="498" class="small">from --join-token, IMAS_JOIN_TOKEN</text>
-  <text x="52" y="513" class="small">or "jointoken" in /etc/imas/sprout.</text>
-  <text x="52" y="530" class="small">Required for first enrollment; the</text>
-  <text x="52" y="545" class="small">sprout clears it from its config after.</text>
+  <text x="52" y="480" class="mono">{key_id}.{secret}.{fp}</text>
+  <text x="52" y="498" class="small">fp: tenant key SHA-256, checked before</text>
+  <text x="52" y="513" class="small">pinning. --join-token, IMAS_JOIN_TOKEN</text>
+  <text x="52" y="530" class="small">or "jointoken"; first enrollment only,</text>
+  <text x="52" y="545" class="small">cleared from the config after.</text>
 
   <rect x="40" y="584" width="230" height="96" rx="6" class="box"/>
   <text x="52" y="606" class="h">Packaging</text>

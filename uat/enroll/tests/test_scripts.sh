@@ -47,7 +47,7 @@ fresh() {
 	export FAKE_DIR="$work/$1/fake"
 	state="$work/$1/state"
 	mkdir -p "$FAKE_DIR"
-	unset FAKE_PENDING_POLLS FAKE_TENANT_FAILS FAKE_429 FAKE_CONNECT_AFTER FAKE_LINK_CONFLICT FAKE_PLAYBOOK_FAIL
+	unset FAKE_PENDING_POLLS FAKE_TENANT_FAILS FAKE_429 FAKE_CONNECT_AFTER FAKE_LINK_CONFLICT FAKE_PLAYBOOK_FAIL FAKE_NO_FINGERPRINT
 }
 ct() {
 	"$enroll/create-tenants.sh" --uat "$testdata/uat.json" --state "$state" \
@@ -74,7 +74,9 @@ check "three keys in each tenant" \
 check "each sprout's key is from its own tenant" \
 	jq -e --arg a "$t1" --arg b "$t2" 'to_entries | all(if (.key | startswith("t1-")) then .value.tenant_id == $a and .value.tenant == 1 else .value.tenant_id == $b and .value.tenant == 2 end)' "$state/keys.json"
 check "a key file per sprout holding the registration key" \
-	bash -c 'for v in t1-ubuntu t1-alma t1-win t2-ubuntu t2-alma t2-win; do grep -qE "^ek_[0-9]{4}\.SEKRIT[0-9]{4}xyz$" "$1/keys/$v.key" || exit 1; done' _ "$state"
+	bash -c 'for v in t1-ubuntu t1-alma t1-win t2-ubuntu t2-alma t2-win; do grep -qE "^ek_[0-9]{4}\.SEKRIT[0-9]{4}xyz\.[0-9a-f]{64}$" "$1/keys/$v.key" || exit 1; done' _ "$state"
+check "keys.json records each key's tenant key fingerprint, the one its token ends with" \
+	bash -c 'for v in t1-ubuntu t1-alma t1-win t2-ubuntu t2-alma t2-win; do fp="$(jq -r --arg v "$v" ".[\$v].tenant_key_fingerprint" "$1/keys.json")"; [[ "$fp" =~ ^[0-9a-f]{64}$ ]] && grep -q "\.$fp$" "$1/keys/$v.key" || exit 1; done' _ "$state"
 check "key files are mode 600, the state dir 700" \
 	bash -c '[ "$(stat -c %a "$1")" = 700 ] && for f in "$1"/keys/*.key; do [ "$(stat -c %a "$f")" = 600 ] || exit 1; done' _ "$state"
 check "key id matches the key file" \
@@ -115,6 +117,15 @@ rc=0
 ct --token-cmd "$tests/fake/token-cmd" >/dev/null 2>&1 || rc=$?
 check "rate limited mints are retried" [ "$rc" -eq 0 ]
 check "and all six keys exist" jq -e '(.keys | length) == 6' "$FAKE_DIR/state.json"
+
+fresh nofingerprint
+export FAKE_NO_FINGERPRINT=1
+rc=0
+ct --token-cmd "$tests/fake/token-cmd" >/dev/null 2>"$work/err" || rc=$?
+check "a key without a tenant key fingerprint stops the run" [ "$rc" -eq 1 ]
+check "saying so" grep -q "no tenant_key_fingerprint in the answer" "$work/err"
+check "and no key file is written" bash -c '! ls "$1"/keys/*.key 2>/dev/null | grep -q .' _ "$state"
+check "prints no secret on that path" no_secret "$work/err"
 
 fresh failed
 export FAKE_TENANT_FAILS=1

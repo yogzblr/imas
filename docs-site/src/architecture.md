@@ -23,7 +23,9 @@ outbound from core to the DMZ bus, never the reverse.
 ## Tenancy and identity
 
 A sprout is enrolled into exactly one **tenant** using a one-time
-**enrollment key** (a join token: tenant-scoped, short-lived, usage-capped).
+**enrollment key** (a join token: tenant-scoped, short-lived, usage-capped,
+carrying the fingerprint of the tenant's box key, which the sprout checks the
+key enrollment names against before pinning it).
 Enrollment mints, in one response, the sprout's identity as **two paired
 JWTs**: a NATS User JWT (`ed25519-nkey`, Account-signed — consumed only by
 nats-server's own decentralized auth) and a standard EdDSA JWT

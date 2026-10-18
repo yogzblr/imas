@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/yogzblr/imas/internal/jointoken"
+	log "github.com/yogzblr/imas/internal/log"
 )
 
 const (
@@ -37,11 +40,15 @@ type createEnrollmentKeyRequest struct {
 // createEnrollmentKeyResponse carries the raw secret exactly once, per
 // design doc §1.2/§3.1. Nothing else in this package — no log line, no
 // stored row, no other response — ever includes RegistrationKey again.
+// TenantKeyFingerprint is the fingerprint RegistrationKey ends with
+// (internal/jointoken), repeated so an operator can compare it with the
+// tenant key a sprout pinned; it is not a secret.
 type createEnrollmentKeyResponse struct {
-	KeyID           string    `json:"key_id"`
-	RegistrationKey string    `json:"registration_key"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	MaxUses         int       `json:"max_uses"`
+	KeyID                string    `json:"key_id"`
+	RegistrationKey      string    `json:"registration_key"`
+	TenantKeyFingerprint string    `json:"tenant_key_fingerprint"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	MaxUses              int       `json:"max_uses"`
 }
 
 // enrollmentKeyListItem is the GET listing shape (design doc §1.2: "List
@@ -61,8 +68,11 @@ type enrollmentKeyListItem struct {
 // CreateEnrollmentKey handles POST /tenants/{tenant_id}/enrollment-keys
 // (design doc §1.2, §3.1). It generates a random key_id (public, indexed
 // lookup) and a separate 32-byte random secret, persists only the
-// secret's SHA-256 hash, and returns the full "{key_id}.{secret}" token
-// exactly once.
+// secret's SHA-256 hash, and returns the full
+// "{key_id}.{secret}.{tenant_key_fingerprint}" token exactly once. The
+// fingerprint is of the tenant's current box key, which farmer gives
+// over the sealed control plane (tenant_boxkey.go; security review
+// 2026-10, L24); without it no key is created (503 farmer_unavailable).
 func CreateEnrollmentKey(w http.ResponseWriter, r *http.Request) {
 	tenantID := r.PathValue("tenant_id")
 	if !tenantExists(w, tenantID) {
@@ -80,6 +90,19 @@ func CreateEnrollmentKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxUses < minMaxUses || req.MaxUses > maxMaxUses {
 		writeError(w, http.StatusBadRequest, "invalid_request", "max_uses out of range")
+		return
+	}
+
+	// Asked before anything is stored: a key without a fingerprint is
+	// never handed out.
+	fingerprint, err := tenantKeyFingerprintFor(r.Context(), tenantID)
+	if errors.Is(err, errTenantKeyDeprovisioned) {
+		writeError(w, http.StatusConflict, "tenant_deprovisioned", "the tenant is deprovisioned; its enrollment keys would enroll nothing")
+		return
+	}
+	if err != nil {
+		log.Errorf("saasapi: enrollment key for tenant %s: %v", tenantID, err)
+		writeError(w, http.StatusServiceUnavailable, "farmer_unavailable", "the tenant's key could not be read from farmer; try again")
 		return
 	}
 
@@ -109,11 +132,17 @@ func CreateEnrollmentKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	token, err := jointoken.Format(key.KeyID, secret, fingerprint)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to build the enrollment token")
+		return
+	}
 	writeJSON(w, http.StatusOK, createEnrollmentKeyResponse{
-		KeyID:           key.KeyID,
-		RegistrationKey: key.KeyID + "." + secret,
-		ExpiresAt:       key.Expiry,
-		MaxUses:         key.MaxUses,
+		KeyID:                key.KeyID,
+		RegistrationKey:      token,
+		TenantKeyFingerprint: fingerprint,
+		ExpiresAt:            key.Expiry,
+		MaxUses:              key.MaxUses,
 	})
 }
 

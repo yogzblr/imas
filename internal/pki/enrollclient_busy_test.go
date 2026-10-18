@@ -113,7 +113,7 @@ func TestEnrollSprout_BusyHonoursRetryAfter(t *testing.T) {
 			srv.mu.Lock()
 			srv.busy = []string{tc.header, tc.header}
 			srv.mu.Unlock()
-			resp, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+			resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub)
 			if err != nil || resp.GatewayJWT == "" {
 				t.Fatalf("EnrollSprout = %+v, %v; want success after the busy answers", resp, err)
 			}
@@ -142,7 +142,7 @@ func TestEnrollSprout_BusyGivesUpAtTheAttemptLimit(t *testing.T) {
 		srv.busy = append(srv.busy, "1")
 	}
 	srv.mu.Unlock()
-	_, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+	_, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub)
 	if !errors.Is(err, ErrFarmerBusy) {
 		t.Fatalf("err = %v, want ErrFarmerBusy", err)
 	}
@@ -193,7 +193,7 @@ func TestEnrollSprout_BusySecondRequest(t *testing.T) {
 		}
 		return time.Now().Unix()
 	}
-	resp, err := c.Enroll(t.Context(), "ek_1.s", "web-01", EnrollKeys{NKey: kp, BoxPriv: priv})
+	resp, err := c.Enroll(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", EnrollKeys{NKey: kp, BoxPriv: priv})
 	if err != nil || resp.GatewayJWT == "" {
 		t.Fatalf("Enroll = %+v, %v", resp, err)
 	}
@@ -220,7 +220,7 @@ func TestEnrollClient_TimestampsIncrease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Enroll(t.Context(), "ek_1.s", "web-01", EnrollKeys{NKey: loadTestSproutNKey(t), BoxPriv: priv}); err != nil {
+	if _, err := c.Enroll(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", EnrollKeys{NKey: loadTestSproutNKey(t), BoxPriv: priv}); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -251,7 +251,7 @@ func TestRefreshGatewayJWT_BusyHonoursRetryAfter(t *testing.T) {
 	setupSproutFiles(t)
 	srv := startEnrollServer(t)
 	sproutPub, _ := EnsureSproutBoxKey()
-	resp, err := EnrollSprout(t.Context(), "ek_1.s", "web-01", sproutPub)
+	resp, err := EnrollSprout(t.Context(), pinnedToken(t, "ek_1.s"), "web-01", sproutPub)
 	if err != nil {
 		t.Fatal(err)
 	}

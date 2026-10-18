@@ -201,7 +201,8 @@ POST/GET/PATCH/DELETE /tenants and GET /tenants/{tenant_id}/status
 (async provisioning per the doc's pending/active/failed states, backed
 by a provisioning_jobs outbox table), and POST/GET/DELETE
 /tenants/{tenant_id}/enrollment-keys per section 1.2/3.1's key_id.secret
-split (key_id plaintext indexed lookup, secret's SHA-256 stored as
+split (since U2 the token also ends with the tenant key fingerprint,
+key_id.secret.fingerprint) (key_id plaintext indexed lookup, secret's SHA-256 stored as
 key_hash, never the raw secret). Do not implement the actual farmer-side
 NATS calls yet (internal.tenant.provision etc.) — stub them with a TODO
 referencing section 2.2, since that depends on workstream B/H landing
@@ -252,7 +253,8 @@ NATS's websocket listener validating each sprout's JWT via a jwt_authn
 filter against JWKS before the connection reaches nats-server, plus a
 second Envoy route proxying authenticated recipe-download requests to
 non-DMZ. Build the enrollment endpoint per section 3 of
-imas-machine-manager-api-design.md: token format {key_id}.{secret},
+imas-machine-manager-api-design.md: token format {key_id}.{secret} (since
+U2, {key_id}.{secret}.{tenant_key_fingerprint}),
 constant-time hash comparison against saas.enrollment_keys, atomic
 redemption via the UPDATE ... WHERE used_count < max_uses guard shown in
 that doc, idempotency check on nkey_pub first, generic
@@ -458,7 +460,8 @@ drives the same playbooks a customer would run.
 claude --cloud "Implement M.4 from docs/design/imas-fork-roadmap.md and
 imas-windows-parity-addendum.md: Ansible playbooks a customer runs to
 bootstrap a host onto imas, consuming workstream H's one-time enrollment
-key ({key_id}.{secret}, per docs/design/imas-envoy-enrollment-design.md
+key ({key_id}.{secret}, since U2 with .{tenant_key_fingerprint} after it,
+per docs/design/imas-envoy-enrollment-design.md
 §3 and imas-machine-manager-api-design.md §3.1).
 
 Add under ansible/ (new top-level dir, alongside deploy/):

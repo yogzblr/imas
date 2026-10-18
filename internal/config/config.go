@@ -331,6 +331,18 @@ var (
 	// whatever answers first. See docs/design/imas-envoy-enrollment-design.md.
 	SproutRootCATOFU bool
 
+	// EnrollPinRequired ("enrollpinrequired", sprout only, default true)
+	// is whether a first enrollment needs a join token that carries the
+	// tenant key fingerprint ({key_id}.{secret}.{fingerprint}; security
+	// review 2026-10, L24). The sprout checks the tenant key farmer's
+	// enrollment response names against it before pinning anything, so a
+	// DMZ Envoy that substitutes its own key is refused. With false, a
+	// token without a fingerprint is used, trusting the tenant key the
+	// response names on first use, and every such enrollment logs a
+	// warning; a token that does carry one is still checked. True before
+	// LoadConfig too, so nothing that skips it enrolls unpinned.
+	EnrollPinRequired = true
+
 	// SproutFleetSigningKeyring ("sproutfleetsigningkeyring", sprout only)
 	// is the release GPG public keyring the selfupdate ingredient verifies
 	// every release's checksums.txt signature against
@@ -414,7 +426,8 @@ var (
 	// default.
 	SproutUpdateRepoToken string
 
-	// JoinToken is the "{key_id}.{secret}" enrollment key a sprout
+	// JoinToken is the "{key_id}.{secret}.{tenant_key_fingerprint}"
+	// enrollment key (internal/jointoken) a sprout
 	// presents to POST /v1/enroll the first time it enrolls
 	// (docs/design/imas-envoy-enrollment-design.md). Whoever provisions
 	// the sprout (e.g. an Ansible playbook) picks the source: the
@@ -917,6 +930,7 @@ func LoadConfig(binary string) {
 			jety.SetDefault("sproutpki", filepath.Join(systemConfigRoot, "pki/sprout")+string(filepath.Separator))
 			jety.SetDefault("sproutrootca", filepath.Join(systemConfigRoot, "pki/sprout/tls-rootca.pem"))
 			jety.SetDefault("sproutrootcatofu", true)
+			jety.SetDefault("enrollpinrequired", true)
 			jety.SetDefault("sproutfleetsigningkeyring", filepath.Join(systemConfigRoot, "fleet-signing-keys.asc"))
 			jety.SetDefault("nkeysproutpubfile", filepath.Join(systemConfigRoot, "pki/sprout/sprout.nkey.pub"))
 			jety.SetDefault("joblogdir", defaultSproutJobLogDir())
@@ -956,6 +970,7 @@ func LoadConfig(binary string) {
 			SproutBoxKeyPrevGrace = jety.GetDuration("sproutboxkeyprevgrace")
 			SproutHandledJobsFile = jety.GetString("sprouthandledjobsfile")
 			SproutRootCATOFU = jety.GetBool("sproutrootcatofu")
+			EnrollPinRequired = jety.GetBool("enrollpinrequired")
 			BusURLs = stringList(jety.Get("busurls"))
 			BusProxyURL = strings.TrimSpace(jety.GetString("busproxyurl"))
 			BusReconnectBase = jety.GetDuration("busreconnectbase")

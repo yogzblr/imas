@@ -7,6 +7,7 @@ package saasapi
 // installs it in production; a test that needs it absent clears it.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -56,7 +57,15 @@ func (k controlKeys) farmerPairs() []payloadbox.KeyPair {
 // testKeys are this test binary's genuine keys.
 var testKeys = newControlKeys()
 
-func init() { SetControlPlaneBox(testKeys.saasBox()) }
+// testTenantKeyFingerprint is the tenant key fingerprint every join
+// token this package's tests mint carries, unless a test asks a (fake)
+// farmer for it (tenant_boxkey_test.go).
+const testTenantKeyFingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func init() {
+	SetControlPlaneBox(testKeys.saasBox())
+	tenantKeyFingerprintFor = func(context.Context, string) (string, error) { return testTenantKeyFingerprint, nil }
+}
 
 // useControlBox installs b for the test and restores the genuine one.
 func useControlBox(t *testing.T, b *pki.SaaSAPIBox) {
@@ -94,7 +103,12 @@ func farmerOpenRequest(msg *nats.Msg, into any) (*payloadbox.Message, error) {
 // sealFarmerReply is farmer's sealed f2a.sprout.action reply to the
 // request whose ID is requestID, under keys k.
 func (k controlKeys) sealFarmerReply(requestID string, result any, errText string) []byte {
-	w := pki.SproutActionReplyWire()
+	return k.sealFarmerReplyWire(pki.SproutActionReplyWire(), requestID, result, errText)
+}
+
+// sealFarmerReplyWire is farmer's sealed reply on wire w to the request
+// whose ID is requestID, under keys k.
+func (k controlKeys) sealFarmerReplyWire(w pki.SaaSAPIWire, requestID string, result any, errText string) []byte {
 	data, err := payloadbox.SealReply(payloadbox.Reply{
 		Purpose: w.Purpose, TenantID: payloadbox.PlatformTenantID, Principal: payloadbox.PrincipalSaaSAPI,
 		ReplyTo: requestID, Method: w.Method, Subject: w.Subject, Result: result, Error: errText,

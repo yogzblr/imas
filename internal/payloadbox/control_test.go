@@ -28,6 +28,7 @@ var controlCases = []controlCase{
 	{"saas deprovision", PurposeSaaSTenantDeprovision, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.deprovision", "internal.tenant.deprovision"},
 	{"saas purge", PurposeSaaSTenantPurge, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.purge", "internal.tenant.purge"},
 	{"saas sprout action", PurposeSaaSSproutAction, PurposeSaaSSproutActionReply, PlatformTenantID, PrincipalSaaSAPI, "sprout.action", "internal.sprout.action"},
+	{"saas tenant box key", PurposeSaaSTenantBoxKey, PurposeSaaSTenantBoxKeyReply, PlatformTenantID, PrincipalSaaSAPI, "tenant.boxkey", "internal.tenant.boxkey"},
 	{"provisioned result", PurposeSaaSTenantProvisioned, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.provisioned", "internal.tenant.provisioned.job-1"},
 	{"deprovisioned result", PurposeSaaSTenantDeprovisioned, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.deprovisioned", "internal.tenant.deprovisioned.job-1"},
 	{"purged result", PurposeSaaSTenantPurged, "", PlatformTenantID, PrincipalSaaSAPI, "tenant.purged", "internal.tenant.purged.job-1"},
@@ -213,8 +214,8 @@ func TestControlPurposesAreDistinctAndDirected(t *testing.T) {
 		PurposeCookNudgeRequest, PurposeCookNudgeResponse, PurposeStagedRecipe, PurposeBoxKeySubmit, PurposeTenantKeyContinuity,
 		PurposeEnrollProof,
 		PurposeCLIRequest, PurposeCLIReply, PurposeCLIUserKeySubmit,
-		PurposeSaaSTenantProvision, PurposeSaaSTenantDeprovision, PurposeSaaSTenantPurge, PurposeSaaSSproutAction,
-		PurposeSaaSTenantProvisioned, PurposeSaaSTenantDeprovisioned, PurposeSaaSTenantPurged, PurposeSaaSSproutActionReply,
+		PurposeSaaSTenantProvision, PurposeSaaSTenantDeprovision, PurposeSaaSTenantPurge, PurposeSaaSSproutAction, PurposeSaaSTenantBoxKey,
+		PurposeSaaSTenantProvisioned, PurposeSaaSTenantDeprovisioned, PurposeSaaSTenantPurged, PurposeSaaSSproutActionReply, PurposeSaaSTenantBoxKeyReply,
 		PurposeRefresh, PurposeRefreshReply,
 	}
 	seen := map[string]bool{}

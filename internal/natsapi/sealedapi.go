@@ -324,15 +324,20 @@ func (s *sealedAPI) openSaaSAPIRequest(ctx context.Context, m *nats.Msg) (*seale
 	return req, nil
 }
 
-// sealSaaSAPIReply seals farmer's reply to an internal.sprout.action
-// request (f2a.sprout.action, pki.SproutActionReplyWire), bound to the
-// request's ID. result is the controlplane.SproutActionReply. handlerErr
+// sealSaaSAPIReply seals farmer's reply to a request-reply SaaS API
+// request (f2a.sprout.action to internal.sprout.action, f2a.tenant.boxkey
+// to internal.tenant.boxkey; pki.SaaSAPIReplyWire), bound to the
+// request's ID. result is the controlplane.SproutActionReply or
+// controlplane.TenantBoxKeyReply. handlerErr
 // is set only when farmer refused the request before running anything
 // (ErrSealedStoreUnavailable); it then travels inside the box with no
 // result, and the SaaS API reads "an error and no result" as refused
 // unrun.
 func sealSaaSAPIReply(req *sealedRequest, result any, handlerErr error) ([]byte, error) {
-	w := pki.SproutActionReplyWire()
+	w, ok := pki.SaaSAPIReplyWire(req.Subject)
+	if !ok {
+		return nil, fmt.Errorf("natsapi: %s gets no reply", req.Subject)
+	}
 	r := payloadbox.Reply{
 		Purpose: w.Purpose, ReplyTo: req.ID, Method: req.Method, Subject: req.Subject, Result: result,
 	}
@@ -359,8 +364,9 @@ func sealSaaSAPIResult(kind controlplane.TenantJob, jobID string, result any) (s
 
 // openSaaSAPIRequestOrRefuse opens m with s (openSaaSAPIRequest) and
 // returns the opened request, or nil once a refusal is dealt with: logged
-// and, when answer is set (internal.sprout.action, request-reply, whose
-// reply subject the caller has already checked), answered, with the fixed
+// and, when answer is set (internal.sprout.action and
+// internal.tenant.boxkey, request-reply, whose reply subject the caller
+// has already checked), answered, with the fixed
 // code and no body, or with a sealed error for a request that opened while
 // Valkey was down. Without answer (the fire-and-forget provisioning
 // subjects) nothing is published: the SaaS API's job stays pending, and

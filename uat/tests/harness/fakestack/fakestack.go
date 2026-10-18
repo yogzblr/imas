@@ -28,6 +28,7 @@ import (
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -423,9 +424,20 @@ func (s *Stack) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	keyID, secret, _ := strings.Cut(req.JoinToken, ".")
-	k, ok := s.keys[keyID]
-	if !ok || k.secret != secret || s.tenants[k.tenantID] == nil || s.tenants[k.tenantID].status != "active" {
+	// Farmer's own check: a fingerprint, if the token carries one, must
+	// be the tenant key's (internal/jointoken).
+	tok, err := jointoken.Parse(req.JoinToken)
+	if err != nil {
+		fail()
+		return
+	}
+	k, ok := s.keys[tok.KeyID]
+	if ok && tok.Fingerprint != "" {
+		if fp, _ := jointoken.FingerprintB64(s.tenantBoxPub(k.tenantID)); fp != tok.Fingerprint {
+			ok = false
+		}
+	}
+	if !ok || k.secret != tok.Secret || s.tenants[k.tenantID] == nil || s.tenants[k.tenantID].status != "active" {
 		fail()
 		return
 	}
@@ -679,7 +691,14 @@ func (s *Stack) createKey(w http.ResponseWriter, r *http.Request, tid string) {
 	id := "ek_" + strings.ToLower(base32ish(16))
 	k := &key{tenantID: tid, secret: hex.EncodeToString(random(16)), expires: time.Now().Add(time.Duration(body.Hours) * time.Hour), maxUses: body.MaxUses, created: time.Now()}
 	s.keys[id] = k
-	writeJSON(w, 200, map[string]any{"key_id": id, "registration_key": id + "." + k.secret, "expires_at": k.expires.UTC().Format(time.RFC3339), "max_uses": k.maxUses})
+	// With the tenant key's fingerprint, as saasapi mints it (L24).
+	fp, err := jointoken.FingerprintB64(s.tenantBoxPub(tid))
+	if err != nil {
+		writeErr(w, 500, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"key_id": id, "registration_key": id + "." + k.secret + "." + fp, "tenant_key_fingerprint": fp,
+		"expires_at": k.expires.UTC().Format(time.RFC3339), "max_uses": k.maxUses})
 }
 
 func (s *Stack) listKeys(w http.ResponseWriter, tid string) {

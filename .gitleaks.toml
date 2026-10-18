@@ -46,4 +46,8 @@ regexes = [
   # possession (T6, internal/pki/nkeynonce.go): a fixed protocol label
   # like enrollSigDomain, not a credential.
   '''nkeySubmissionDomain\s*=\s*"imas-putnkey-v1"''',
+  # The dummy tenant key fingerprint internal/saasapi's tests mint join
+  # tokens with (U2, sealedfarmer_test.go): a SHA-256-shaped placeholder
+  # standing in for farmer's answer, a hash of no key, not a credential.
+  '''testTenantKeyFingerprint\s*=\s*"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"''',
 ]

@@ -16,6 +16,7 @@ func TestSaaSAPIWire(t *testing.T) {
 		"internal.tenant.provision":   {payloadbox.PurposeSaaSTenantProvision, "tenant.provision", "internal.tenant.provision"},
 		"internal.tenant.deprovision": {payloadbox.PurposeSaaSTenantDeprovision, "tenant.deprovision", "internal.tenant.deprovision"},
 		"internal.sprout.action":      {payloadbox.PurposeSaaSSproutAction, "sprout.action", "internal.sprout.action"},
+		"internal.tenant.boxkey":      {payloadbox.PurposeSaaSTenantBoxKey, "tenant.boxkey", "internal.tenant.boxkey"},
 	} {
 		if got, ok := SaaSAPIRequestWire(subject); !ok || got != want {
 			t.Errorf("%s: %+v %v", subject, got, ok)
@@ -28,6 +29,14 @@ func TestSaaSAPIWire(t *testing.T) {
 	}
 	if w := SproutActionReplyWire(); w.Purpose != payloadbox.PurposeSaaSSproutActionReply || w.Method != "sprout.action" || w.Subject != "internal.sprout.action" {
 		t.Errorf("reply wire %+v", w)
+	}
+	if w := TenantBoxKeyReplyWire(); w.Purpose != payloadbox.PurposeSaaSTenantBoxKeyReply || w.Method != "tenant.boxkey" || w.Subject != "internal.tenant.boxkey" {
+		t.Errorf("box key reply wire %+v", w)
+	}
+	for _, subject := range []string{"internal.tenant.provision", "internal.tenant.purge", "internal.tenant.boxkey.x"} {
+		if _, ok := SaaSAPIReplyWire(subject); ok {
+			t.Errorf("%s gets a reply wire", subject)
+		}
 	}
 	w, err := TenantResultWire(controlplane.TenantJobDeprovision, "pj_1")
 	if err != nil || w != (SaaSAPIWire{payloadbox.PurposeSaaSTenantDeprovisioned, "tenant.deprovisioned", "internal.tenant.deprovisioned.pj_1"}) {

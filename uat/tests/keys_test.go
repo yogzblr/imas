@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/uat/tests/harness"
 )
 
@@ -25,8 +26,10 @@ func TestSmokeK1_MintKey(t *testing.T) {
 	if !strings.HasPrefix(key.KeyID, "ek_") {
 		sc.Errorf("key_id %q doesn't start with ek_", key.KeyID)
 	}
-	if !strings.HasPrefix(key.RegistrationKey, key.KeyID+".") || len(key.RegistrationKey) <= len(key.KeyID)+1 {
-		sc.Errorf("registration_key isn't <key_id>.<secret>")
+	// The token carries the tenant key's fingerprint (L24), which a
+	// sprout checks the key enrolment names against.
+	if pt, err := jointoken.Parse(key.RegistrationKey); err != nil || pt.KeyID != key.KeyID || pt.Fingerprint == "" || pt.Fingerprint != key.TenantKeyFingerprint {
+		sc.Errorf("registration_key isn't <key_id>.<secret>.<tenant_key_fingerprint> with tenant_key_fingerprint %q", key.TenantKeyFingerprint)
 	}
 	if key.MaxUses != 3 {
 		sc.Errorf("max_uses %d, want 3", key.MaxUses)
@@ -46,7 +49,7 @@ func TestSmokeK1_MintKey(t *testing.T) {
 	if k.State != "active" || k.UsedCount != 0 || k.MaxUses != 3 {
 		sc.Errorf("listed as state=%s used=%d max=%d, want active 0 3", k.State, k.UsedCount, k.MaxUses)
 	}
-	if strings.Contains(string(r.Body), key.RegistrationKey[len(key.KeyID)+1:]) {
+	if pt, err := jointoken.Parse(key.RegistrationKey); err == nil && strings.Contains(string(r.Body), pt.Secret) {
 		sc.Errorf("the key list carries the secret")
 	}
 
@@ -73,6 +76,9 @@ func TestCoreK2_ExhaustedKeyRefused(t *testing.T) {
 	}
 	if first.HasGatewayJWT {
 		sc.Errorf("step 1 answered with a gateway JWT; only the box key proof of step 2 may earn one (J.2)")
+	}
+	if fp, err := jointoken.FingerprintB64(first.TenantX25519Pub); err != nil || fp != key.TenantKeyFingerprint {
+		sc.Errorf("the tenant key enrolment names has fingerprint %s (%v), the token %s: a sprout would refuse it (L24)", fp, err, key.TenantKeyFingerprint)
 	}
 	sc.Step("enrol a second synthetic sprout with the spent key")
 	_, second := syntheticEnroll(t, sc, key.RegistrationKey)
