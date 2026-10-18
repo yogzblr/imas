@@ -111,3 +111,20 @@ Scope: `docs/`, small code moves named below, GitHub issues.
 - **P17 leftovers.** After the batches S, T and U, list in the findings document
   which of the "tests that pin current behaviour" are now changed, and which gaps
   remain; fix any remaining gap that is a missing test.
+
+### Brief corrections (V3, 2026-10-18)
+
+- **Codes.** "`self_update_disabled` and the two other codes" are four
+  farmer-only `internal.sprout.action` codes on `main`:
+  `self_update_disabled`, `rollout_window_closed`, `farmer_busy` and
+  `sprout_reenroll_required`. All four moved into `internal/controlplane`.
+- **Issues.** #138, #139 and #142 were already closed on GitHub, by #169,
+  #272 and #238. V3 checked each fix and its test on `main` and added the
+  comment naming the PR. The state stayed closed.
+- **Carry-over list.** `docs/claude-code-parallel-build-plan.md` has no
+  list of its own; it only cites Open item 10 of the archive.
+- **REC.1.** S6 (purge of `tenants/<id>/`) and U4 (audit retention)
+  already cover REC.1's audit and deprovision follow-ups. What was left
+  is recorded in `docs/security-findings-status.md` (P11 rows 41 to 44).
+- **Info-only noise.** Of review -b's Info notes, bI3 and bI5 only confirm
+  H2 and M7. They have rows in the table, marked "As H2" and "As M7".
