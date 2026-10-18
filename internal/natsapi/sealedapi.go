@@ -32,11 +32,9 @@ package natsapi
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/maphash"
 	"strings"
 
 	"github.com/nats-io/nats.go"
@@ -116,50 +114,21 @@ func RefusalCode(err error) string {
 // a sealed error reply, not a header.
 var ErrSealedStoreUnavailable = errors.New("natsapi: the replay store is unavailable; mutating requests are refused until it is back")
 
-// apiGuardShards spreads one replica's replay guard over independent
-// payloadbox.ReplayGuards. ReplayGuard sweeps its whole map on every
-// accept and holds one lock; sharding bounds both for a replica serving
-// many users.
-const apiGuardShards = 64
-
-// apiGuardShardEntries is each shard's capacity: 64 x 16384 = 1M
-// requests inside one 5-minute window per replica, about 3500 a second.
-// A full shard refuses (ReplayGuard never forgets an unexpired ID).
-const apiGuardShardEntries = 1 << 14
-
 // apiReplayGuard is one replica's in-memory replay guard for sealed
 // control-plane requests, keyed on (tenant_id, principal, message id):
 // a message ID is the sender's random choice, unique per sender, and the
-// tenant-safety rule keys everything on the tenant.
-type apiReplayGuard struct {
-	seed   maphash.Seed
-	shards [apiGuardShards]*payloadbox.ReplayGuard
-}
+// tenant-safety rule keys everything on the tenant. A full shard refuses
+// (payloadbox.KeyedReplayGuard).
+type apiReplayGuard struct{ g *payloadbox.KeyedReplayGuard }
 
 func newAPIReplayGuard() *apiReplayGuard {
-	g := &apiReplayGuard{seed: maphash.MakeSeed()}
-	for i := range g.shards {
-		g.shards[i] = &payloadbox.ReplayGuard{MaxSkew: payloadbox.DefaultMaxSkew, MaxEntries: apiGuardShardEntries}
-	}
-	return g
+	return &apiReplayGuard{g: payloadbox.NewKeyedReplayGuard()}
 }
 
 // Accept records msg once for (tenantID, principal); payloadbox.ErrStale,
 // ErrReplayed or ErrReplayGuardFull otherwise.
 func (g *apiReplayGuard) Accept(tenantID, principal string, msg *payloadbox.Message) error {
-	// Length-prefixed, so no two (tenant, principal, id) triples share a
-	// key.
-	var b strings.Builder
-	for _, s := range []string{tenantID, principal, msg.ID} {
-		var n [4]byte
-		binary.BigEndian.PutUint32(n[:], uint32(len(s)))
-		b.Write(n[:])
-		b.WriteString(s)
-	}
-	key := b.String()
-	keyed := *msg
-	keyed.ID = key
-	return g.shards[maphash.String(g.seed, key)%apiGuardShards].Accept(&keyed)
+	return g.g.Accept(msg, tenantID, principal)
 }
 
 // sealedAPI is one replica's state for sealed requests: its replay guard

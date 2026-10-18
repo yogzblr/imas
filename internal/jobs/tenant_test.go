@@ -177,10 +177,11 @@ func TestTwoTenants_SameSproutAndJID_WriteListReadDelete(t *testing.T) {
 
 	recordJobCreation(tenantA, sharedSID, cook.RecipeEnvelope{JobID: sharedJID, InvokedBy: "UALICE", Steps: []cook.Step{{ID: "a-1"}}})
 	recordJobCreation(tenantB, sharedSID, cook.RecipeEnvelope{JobID: sharedJID, InvokedBy: "UBOB", Steps: []cook.Step{{ID: "b-1"}, {ID: "b-2"}}})
+	tenantOf := map[*nats.Conn]string{connA: tenantA, connB: tenantB}
 	for conn, ids := range map[*nats.Conn][]string{connA: {"a-1"}, connB: {"b-1", "b-2"}} {
 		for _, id := range ids {
 			b, _ := json.Marshal(cook.StepCompletion{ID: cook.StepID(id), CompletionStatus: cook.StepCompleted, Started: time.Now()})
-			if err := conn.Publish("imas.cook."+sharedSID+"."+sharedJID, b); err != nil {
+			if err := conn.PublishMsg(sealedMsg(t, tenantOf[conn], "imas.cook."+sharedSID+"."+sharedJID, b)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -306,7 +307,7 @@ func TestTwoTenants_SameSproutAndJID_Reconcile(t *testing.T) {
 	for _, tenant := range []string{tenantA, tenantB} {
 		for _, id := range []string{"start-" + sharedJID, "s1", "completed-" + sharedJID} {
 			b, _ := json.Marshal(cook.StepCompletion{ID: cook.StepID(id), CompletionStatus: cook.StepCompleted})
-			logJobs(tenant, &nats.Msg{Subject: "imas.cook." + sharedSID + "." + sharedJID, Data: b})
+			logJobs(tenant, sealedMsg(t, tenant, "imas.cook."+sharedSID+"."+sharedJID, b))
 		}
 	}
 

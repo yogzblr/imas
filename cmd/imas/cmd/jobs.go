@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 	"github.com/yogzblr/imas/internal/auth"
 	"github.com/yogzblr/imas/internal/log"
@@ -207,72 +206,77 @@ var cmdJobsWatch = &cobra.Command{
 		}
 		defer nc.Flush()
 
-		topic := fmt.Sprintf("imas.cook.*.%s", jid)
-		finished := make(chan struct{}, 1)
-
-		sub, err := nc.Subscribe(topic, func(msg *nats.Msg) {
-			var step cook.StepCompletion
-			if err := json.Unmarshal(msg.Data, &step); err != nil {
-				log.Errorf("Error unmarshalling message: %v\n", err)
-				return
-			}
-
-			subComponents := strings.Split(msg.Subject, ".")
-			sproutID := subComponents[2]
-
-			if strings.HasPrefix(string(step.ID), "completed-") {
-				printTex.Lock()
-				fmt.Printf("\n%s :: Job %s completed on %s\n",
-					color.GreenString("DONE"), jid, sproutID)
-				printTex.Unlock()
-				finished <- struct{}{}
-				return
-			}
-			if strings.HasPrefix(string(step.ID), "start-") {
-				printTex.Lock()
-				fmt.Printf("%s :: Job %s started on %s\n",
-					color.CyanString("START"), jid, sproutID)
-				printTex.Unlock()
-				return
-			}
-
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("%s::%s\n", sproutID, jid))
-			b.WriteString(fmt.Sprintf("  ID: %s\n", step.ID))
-			switch step.CompletionStatus {
-			case cook.StepCompleted:
-				b.WriteString(fmt.Sprintf("  Result: %s\n", color.GreenString("Success")))
-			case cook.StepFailed:
-				b.WriteString(fmt.Sprintf("  Result: %s\n", color.RedString("Failure")))
-			case cook.StepSkipped:
-				b.WriteString(fmt.Sprintf("  Result: %s\n", color.YellowString("Skipped")))
-			default:
-				b.WriteString(fmt.Sprintf("  Result: %s\n", color.YellowString("Unknown")))
-			}
-			for _, change := range step.Changes {
-				b.WriteString(fmt.Sprintf("    %s\n", change))
-			}
-			if !step.Started.IsZero() {
-				b.WriteString(fmt.Sprintf("  Duration: %s\n", step.Duration.Round(time.Millisecond)))
-			}
-
-			printTex.Lock()
-			fmt.Print(b.String())
-			printTex.Unlock()
-		})
+		// Step events come from farmer over the sealed farmer-to-CLI leg
+		// (jobs.follow): this CLI holds no tenant key to read the
+		// sprouts' sealed events itself.
+		stream, err := client.FollowJobs(nc, jid, client.FollowOptions{Max: time.Duration(watchTimeout) * time.Second})
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("Failed to follow job %s: %v", jid, err)
 		}
-		defer sub.Unsubscribe()
+		defer stream.Stop()
 
 		fmt.Printf("Watching job %s (timeout %ds)...\n", jid, watchTimeout)
 
-		select {
-		case <-finished:
-		case <-time.After(time.Duration(watchTimeout) * time.Second):
-			color.Red("Watch timed out after %d seconds.", watchTimeout)
+		timeout := time.After(time.Duration(watchTimeout) * time.Second)
+		for {
+			select {
+			case ev, ok := <-stream.Events:
+				if !ok {
+					return
+				}
+				if printWatchedStep(ev.SproutID, jid, ev.Step) {
+					return
+				}
+			case <-timeout:
+				color.Red("Watch timed out after %d seconds.", watchTimeout)
+				return
+			}
 		}
 	},
+}
+
+// printWatchedStep prints one step event of job jid on sproutID and
+// reports whether it was the job's completion.
+func printWatchedStep(sproutID, jid string, step cook.StepCompletion) bool {
+	if strings.HasPrefix(string(step.ID), "completed-") {
+		printTex.Lock()
+		fmt.Printf("\n%s :: Job %s completed on %s\n",
+			color.GreenString("DONE"), jid, sproutID)
+		printTex.Unlock()
+		return true
+	}
+	if strings.HasPrefix(string(step.ID), "start-") {
+		printTex.Lock()
+		fmt.Printf("%s :: Job %s started on %s\n",
+			color.CyanString("START"), jid, sproutID)
+		printTex.Unlock()
+		return false
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%s::%s\n", sproutID, jid))
+	b.WriteString(fmt.Sprintf("  ID: %s\n", step.ID))
+	switch step.CompletionStatus {
+	case cook.StepCompleted:
+		b.WriteString(fmt.Sprintf("  Result: %s\n", color.GreenString("Success")))
+	case cook.StepFailed:
+		b.WriteString(fmt.Sprintf("  Result: %s\n", color.RedString("Failure")))
+	case cook.StepSkipped:
+		b.WriteString(fmt.Sprintf("  Result: %s\n", color.YellowString("Skipped")))
+	default:
+		b.WriteString(fmt.Sprintf("  Result: %s\n", color.YellowString("Unknown")))
+	}
+	for _, change := range step.Changes {
+		b.WriteString(fmt.Sprintf("    %s\n", change))
+	}
+	if !step.Started.IsZero() {
+		b.WriteString(fmt.Sprintf("  Duration: %s\n", step.Duration.Round(time.Millisecond)))
+	}
+
+	printTex.Lock()
+	fmt.Print(b.String())
+	printTex.Unlock()
+	return false
 }
 
 var cmdJobsCancel = &cobra.Command{

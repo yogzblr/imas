@@ -129,8 +129,15 @@ func NatsRequest(method string, params any) (json.RawMessage, error) {
 // SealedRequest is NatsRequest on nc, under purpose (c2f.api, or a
 // method's own c2f purpose), with timeout.
 func SealedRequest(nc *nats.Conn, purpose, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	result, _, err := sealedRequest(nc, purpose, method, params, timeout)
+	return result, err
+}
+
+// sealedRequest is SealedRequest, also returning the request's message
+// ID, which farmer's pushed events for it name (FollowJobs).
+func sealedRequest(nc *nats.Conn, purpose, method string, params any, timeout time.Duration) (json.RawMessage, string, error) {
 	if nc == nil {
-		return nil, fmt.Errorf("NATS connection not established")
+		return nil, "", fmt.Errorf("NATS connection not established")
 	}
 	if b, ok := params.([]byte); ok {
 		// A []byte would marshal as a base64 string, not as the JSON it
@@ -139,7 +146,7 @@ func SealedRequest(nc *nats.Conn, purpose, method string, params any, timeout ti
 	}
 	data, id, principal, err := pki.CLISealRequest(purpose, method, params)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	subject := pki.CLIAPISubjectPrefix + method
 	msg := nats.NewMsg(subject)
@@ -148,9 +155,10 @@ func SealedRequest(nc *nats.Conn, purpose, method string, params any, timeout ti
 	msg.Data = data
 	resp, err := nc.RequestMsg(msg, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("NATS request to %s failed: %w", subject, err)
+		return nil, "", fmt.Errorf("NATS request to %s failed: %w", subject, err)
 	}
-	return openReply(method, id, resp)
+	result, err := openReply(method, id, resp)
+	return result, id, err
 }
 
 // openReply turns farmer's answer to request id into a result.

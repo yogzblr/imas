@@ -716,10 +716,16 @@ Day to day:
 - After a tenant key rotation (`imas keys rotate-tenant-key`), update
   `tenantboxpub` within the grace window. Until then requests are refused
   with `open-failed`.
-- Still read in plaintext from the bus, until sealed step events land: the
-  step results `imas cook` and `imas jobs watch` show, and `imas serve`'s
-  live log. Check a result that matters with `imas jobs show <JID>`, which
-  is sealed.
+- Step results (`imas cook`, `imas jobs watch`, `imas serve`'s live log)
+  come from farmer over a sealed leg (`jobs.follow`): sprouts seal their
+  step events, farmer opens and records them and forwards each one sealed
+  to your CLI box key. Following needs the `view` action on the sprout.
+- Sprouts seal their facts and step events, and farmer refuses them in
+  plaintext. A sprout on an older build therefore stops reporting facts
+  and its jobs never finish; `imas sprouts list` and `imas sprouts show`
+  mark it "needs upgrade" (`upgrade_required` in `sprouts.list` and
+  `sprouts.get`), and farmer logs each refusal. Upgrade `imas-sprout` on
+  that host; the mark clears with its first sealed facts report.
 
 ### Interactive shell (`imas ssh`)
 

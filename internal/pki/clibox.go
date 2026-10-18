@@ -196,3 +196,35 @@ func RecordCLIBoxKeySubmission(tenantID, userID, sealedUnder string, body *paylo
 	}
 	return sub.Pub, auth.RecordCLIBoxKeySubmission(tenantID, userID, sealedUnder, sub.Pub, auth.CLIBoxKeyGraceDuration)
 }
+
+// SealEventToCLI seals body, a message farmer pushes to userID in
+// tenantID under purpose (payloadbox.PurposeCLICookStep) answering the
+// request reqID, to the user's active CLI box key, one copy per tenant
+// key. ReplyTo is reqID, so the CLI takes it only on the stream it asked
+// for with that request.
+func SealEventToCLI(tenantID, userID, purpose, reqID string, body any) ([]byte, error) {
+	if reqID == "" {
+		return nil, errors.New("pki: a pushed event needs the request it answers")
+	}
+	active, _, err := auth.ValidCLIBoxKeys(tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := auth.DecodeCLIBoxPub(active)
+	if err != nil {
+		return nil, err
+	}
+	tenantKeys, err := TenantBoxKeys(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	pairs := make([]payloadbox.KeyPair, 0, len(tenantKeys))
+	for _, tk := range tenantKeys {
+		pairs = append(pairs, payloadbox.KeyPair{PeerPub: pub, Priv: tk.Priv})
+	}
+	msg, err := payloadbox.NewMessage(purpose, tenantID, userID, reqID, body)
+	if err != nil {
+		return nil, err
+	}
+	return payloadbox.Seal(msg, pairs)
+}

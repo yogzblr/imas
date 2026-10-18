@@ -1,8 +1,11 @@
 package payloadbox
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/maphash"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 )
@@ -150,6 +153,69 @@ func (g *ReplayGuard) Accept(msg *Message) error {
 			delete(g.seen, msg.ID)
 			return err
 		}
+	}
+	return nil
+}
+
+// KeyedReplayGuardShards and KeyedReplayGuardShardEntries size a
+// KeyedReplayGuard: 64 x 16384 = 1M messages inside one 5-minute window
+// per replica, about 3500 a second.
+const (
+	KeyedReplayGuardShards       = 64
+	KeyedReplayGuardShardEntries = 1 << 14
+)
+
+// KeyedReplayGuard is a ReplayGuard for a receiver that accepts messages
+// from many senders: each message is keyed on its scope (tenant ID and
+// principal, for instance) as well as its ID, and the keys are spread over
+// KeyedReplayGuardShards independent guards. ReplayGuard sweeps its whole
+// map on every accept and holds one lock; sharding bounds both. In memory
+// only, one per replica: a receiver whose messages change shared state
+// backs it with a cluster-wide claim (internal/pki's ClaimSealedMessage).
+type KeyedReplayGuard struct {
+	seed   maphash.Seed
+	shards [KeyedReplayGuardShards]*ReplayGuard
+}
+
+// NewKeyedReplayGuard returns a guard with DefaultMaxSkew.
+func NewKeyedReplayGuard() *KeyedReplayGuard {
+	g := &KeyedReplayGuard{seed: maphash.MakeSeed()}
+	for i := range g.shards {
+		g.shards[i] = &ReplayGuard{MaxSkew: DefaultMaxSkew, MaxEntries: KeyedReplayGuardShardEntries}
+	}
+	return g
+}
+
+// Accept records msg once for scope; ErrStale, ErrReplayed or
+// ErrReplayGuardFull otherwise. msg itself is not changed.
+func (g *KeyedReplayGuard) Accept(msg *Message, scope ...string) error {
+	// Length-prefixed, so no two (scope..., id) tuples share a key.
+	var b strings.Builder
+	part := func(s string) {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(s)))
+		b.Write(n[:])
+		b.WriteString(s)
+	}
+	for _, s := range scope {
+		part(s)
+	}
+	part(msg.ID)
+	key := b.String()
+	keyed := *msg
+	keyed.ID = key
+	return g.shards[maphash.String(g.seed, key)%KeyedReplayGuardShards].Accept(&keyed)
+}
+
+// CheckFresh returns ErrStale unless msg's IssuedAt is within
+// DefaultMaxSkew of the local clock: ReplayGuard's freshness check alone,
+// for a reader that relays a message rather than acting on it, and
+// leaves replay to the receiver it relays to.
+func CheckFresh(msg *Message) error {
+	t := now().Unix()
+	skew := int64(DefaultMaxSkew / time.Second)
+	if msg.IssuedAt < t-skew || msg.IssuedAt > t+skew {
+		return ErrStale
 	}
 	return nil
 }

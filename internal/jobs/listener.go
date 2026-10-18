@@ -15,14 +15,18 @@ package jobs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"strings"
+	"errors"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/yogzblr/imas/internal/log"
 
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 // natsCoreQueueGroup is the queue group every farmer replica shares for
@@ -69,7 +73,7 @@ func RegisterNatsConn(tenantID string, conn *nats.Conn) {
 	// tenantID is passed to each handler for the job object keys
 	// (store.go) and the job-status index (status_index.go), both keyed
 	// by the tenant whose connection the event arrived on.
-	_, err := conn.QueueSubscribe("imas.cook.*.*", natsCoreQueueGroup, func(msg *nats.Msg) {
+	_, err := conn.QueueSubscribe(cook.StepEventSubjectPattern, natsCoreQueueGroup, func(msg *nats.Msg) {
 		logJobs(tenantID, msg)
 	})
 	if err != nil {
@@ -175,26 +179,63 @@ func recordJobCreation(tenantID, sprout string, envelope cook.RecipeEnvelope) {
 	log.Noticef("job %s created for sprout %s (tenant %s, %d steps)", envelope.JobID, sprout, tenantID, len(envelope.Steps))
 }
 
+// stepGuard is this replica's replay guard for step events, keyed on
+// (tenant_id, sprout_id, message id).
+var stepGuard = payloadbox.NewKeyedReplayGuard()
+
+// claimStepEvent claims a step event cluster-wide (pki.ClaimSealedMessage:
+// Valkey SET NX on (tenant_id, sprout_id, message id)); a variable so
+// tests can stand up two replicas.
+var claimStepEvent = pki.ClaimSealedMessage
+
+// errStepClaim: a step event opened but couldn't be claimed cluster-wide
+// (Valkey unreachable). Refused: fail closed, as for a mutating sealed
+// request.
+var errStepClaim = errors.New("jobs: the replay store is unavailable; step events are refused until it is back")
+
+// acceptStepEvent opens and checks msg, a step event on tenantID's
+// connection (cook.OpenStepEvent: sealed by the subject's sprout, for the
+// subject's job, fresh), and accepts it once: this replica's stepGuard,
+// then the cluster-wide claim. FLAG FOR SECURITY REVIEW (P6). A plaintext
+// event marks the sprout as needing an upgrade
+// (heartbeat.MarkUpgradeRequired). Whatever is refused changes no job
+// record.
+func acceptStepEvent(tenantID string, msg *nats.Msg) (*cook.OpenedStepEvent, error) {
+	ev, err := cook.OpenStepEvent(tenantID, msg)
+	if err != nil {
+		if errors.Is(err, cook.ErrPlaintextStepEvent) {
+			if sid, _, ok := cook.StepEventSubjectIDs(msg.Subject); ok {
+				heartbeat.MarkUpgradeRequired(tenantID, sid, heartbeat.UpgradeKindCookStep)
+			}
+		}
+		return nil, err
+	}
+	if err := stepGuard.Accept(ev.Message(), tenantID, ev.SproutID); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	switch err := claimStepEvent(ctx, tenantID, ev.SproutID, ev.EventID); {
+	case err == nil:
+		return ev, nil
+	case errors.Is(err, pki.ErrSealedReplayed):
+		return nil, err
+	default:
+		return nil, errors.Join(errStepClaim, err)
+	}
+}
+
 // logJobs records one job event: in the job object store under tenantID,
 // and in the job-status index for tenantID. tenantID is the tenant whose
-// connection msg arrived on; the sprout and job IDs come from the subject.
+// connection msg arrived on; the sprout and job IDs come from the subject
+// and are bound inside the sealed event (acceptStepEvent).
 func logJobs(tenantID string, msg *nats.Msg) {
-	// Subject: imas.cook.<sproutID>.<jid>
-	tComponents := strings.Split(msg.Subject, ".")
-	if len(tComponents) < 4 {
-		log.Errorf("unexpected subject format for job step: %s", msg.Subject)
-		return
-	}
-	sprout := tComponents[2]
-	JID := tComponents[3]
-
-	// Get the completedStep data
-	var completedStep cook.StepCompletion
-	err := json.Unmarshal(msg.Data, &completedStep)
+	ev, err := acceptStepEvent(tenantID, msg)
 	if err != nil {
-		log.Error(err)
+		log.Warnf("jobs: refusing a step event on %s (tenant %s): %v", msg.Subject, tenantID, err)
 		return
 	}
+	sprout, JID, completedStep := ev.SproutID, ev.JobID, ev.Step
 	ref, err := newJobRef(tenantID, sprout, JID)
 	if err != nil {
 		log.Errorf("refusing to record step for job %q on sprout %q (tenant %q): %v", JID, sprout, tenantID, err)

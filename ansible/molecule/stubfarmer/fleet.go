@@ -23,7 +23,10 @@ package main
 //     sealed.go), and checks its sealed acknowledgement.
 //   - GET /_stub/fleet reports each sprout's last announced version
 //     (imas.sprouts.announce.<id>) and every job's step events
-//     (imas.cook.<id>.<jid>), which is what the test asserts on.
+//     (imas.cook.<id>.<jid>), which is what the test asserts on. Step
+//     events are sealed by the sprout (internal/cook's stepevent.go); the
+//     stub opens each under its tenant key and the sprout's box key, as
+//     farmer does, records the opened step, and drops anything else.
 //
 // With -repo-proxy-to, the stub also fronts a package repository (the
 // test's Nexus) with TLS from a second CA it writes to
@@ -296,13 +299,47 @@ func (f *farmer) watchBus(nc *nats.Conn) error {
 	}); err != nil {
 		return err
 	}
-	_, err := nc.Subscribe("imas.cook.*.*", func(m *nats.Msg) {
-		parts := strings.Split(m.Subject, ".")
-		jid := parts[len(parts)-1]
+	_, err := nc.Subscribe(cook.StepEventSubjectPattern, func(m *nats.Msg) {
+		step, jid, err := f.openStepEvent(m)
+		if err != nil {
+			log.Printf("fleet: dropping a step event on %s: %v", m.Subject, err)
+			return
+		}
 		f.fleet.mu.Lock()
-		f.fleet.events[jid] = append(f.fleet.events[jid], json.RawMessage(append([]byte(nil), m.Data...)))
+		f.fleet.events[jid] = append(f.fleet.events[jid], step)
 		f.fleet.mu.Unlock()
-		log.Printf("fleet: job %s: %s", jid, m.Data)
+		log.Printf("fleet: job %s: %s", jid, step)
 	})
 	return err
+}
+
+// openStepEvent opens m, a sealed step event (cook.StepEvent under
+// payloadbox.PurposeCookStep), as farmer's job listener does: under the
+// stub's tenant key and the box key of the sprout the subject names, for
+// the subject's job. It returns the step's JSON and the job ID.
+func (f *farmer) openStepEvent(m *nats.Msg) (json.RawMessage, string, error) {
+	sproutID, jid, ok := cook.StepEventSubjectIDs(m.Subject)
+	if !ok {
+		return nil, "", fmt.Errorf("unexpected subject")
+	}
+	if m.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
+		return nil, "", cook.ErrPlaintextStepEvent
+	}
+	f.mu.Lock()
+	sproutPub := f.sproutBox[sproutID]
+	f.mu.Unlock()
+	if sproutPub == nil {
+		return nil, "", fmt.Errorf("sprout %s has no box key", sproutID)
+	}
+	msg, err := payloadbox.Open(m.Data, []payloadbox.KeyPair{{PeerPub: sproutPub, Priv: f.tenantBoxPriv}},
+		payloadbox.Expect{Purpose: payloadbox.PurposeCookStep, TenantID: stubTenantID, SproutID: sproutID})
+	if err != nil {
+		return nil, "", err
+	}
+	var ev cook.StepEvent
+	if err := json.Unmarshal(msg.Body, &ev); err != nil || ev.JobID != jid {
+		return nil, "", fmt.Errorf("sealed event is not for job %s", jid)
+	}
+	step, err := json.Marshal(ev.Step)
+	return step, jid, err
 }

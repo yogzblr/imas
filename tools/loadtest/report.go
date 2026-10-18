@@ -53,8 +53,22 @@ type result struct {
 	HeartbeatInterval     string `json:"heartbeat_interval,omitempty"`
 	SproutHeartbeats      int64  `json:"sprout_heartbeats"`
 	SproutHeartbeatErrors int64  `json:"sprout_heartbeat_errors"`
+	// Facts is what sealing the sprouts' facts cost (U3); nil when they
+	// sent none.
+	Facts *factsResult `json:"facts,omitempty"`
 
 	Checks []check `json:"checks"`
+}
+
+// factsResult is the per-message cost of sealing facts reports
+// (payloadbox.PurposeFacts): the mean plaintext and sealed size, the
+// difference, and the mean time to marshal and seal one.
+type factsResult struct {
+	Messages      int64   `json:"messages"`
+	PlainBytes    int64   `json:"plain_bytes"`
+	SealedBytes   int64   `json:"sealed_bytes"`
+	OverheadBytes int64   `json:"overhead_bytes"`
+	SealMicros    float64 `json:"seal_micros"`
 }
 
 // addEnrollFailures counts the sprouts that never enrolled as sprouts
@@ -264,6 +278,13 @@ func (r *result) writeText(w io.Writer) {
 	}
 	p("    core           %s", coreNote(r.Procs))
 	p("")
+	if fr := r.Facts; fr != nil {
+		p("(e) sealed facts (s2f.facts), per message")
+		p("    size           %s plaintext, %s sealed (+%s, %.0f%%), over %d messages", fmtBytes(fr.PlainBytes), fmtBytes(fr.SealedBytes),
+			fmtBytes(fr.OverheadBytes), 100*float64(fr.OverheadBytes)/float64(max(fr.PlainBytes, 1)), fr.Messages)
+		p("    seal time      %.1f µs (marshal and seal, one copy)", fr.SealMicros)
+		p("")
+	}
 	p("checks")
 	for _, c := range r.Checks {
 		mark := "PASS"
@@ -380,6 +401,7 @@ func mergeResults(rs []*result) *result {
 		}
 		out.SproutHeartbeats += r.SproutHeartbeats
 		out.SproutHeartbeatErrors += r.SproutHeartbeatErrors
+		out.Facts = mergeFacts(out.Facts, r.Facts)
 		hold = mergeLatency(hold, r.Hold, holdH)
 		after = mergeLatency(after, r.After, afterH)
 		if r.Restart != nil {
@@ -462,4 +484,21 @@ func mergeRestart(acc, r *restartResult) *restartResult {
 		acc.Note = strings.TrimPrefix(acc.Note+"; "+r.Note, "; ")
 	}
 	return acc
+}
+
+// mergeFacts combines two generators' facts costs, weighted by message
+// count.
+func mergeFacts(a, b *factsResult) *factsResult {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	n := a.Messages + b.Messages
+	w := func(x, y int64) int64 { return (x*a.Messages + y*b.Messages) / n }
+	out := &factsResult{Messages: n, PlainBytes: w(a.PlainBytes, b.PlainBytes), SealedBytes: w(a.SealedBytes, b.SealedBytes),
+		SealMicros: (a.SealMicros*float64(a.Messages) + b.SealMicros*float64(b.Messages)) / float64(n)}
+	out.OverheadBytes = out.SealedBytes - out.PlainBytes
+	return out
 }

@@ -42,11 +42,9 @@ package cook
 //     with keys refuses a plaintext one with encryption-required. Either
 //     way nothing is acted on, so a bus can't inject one.
 //
-// Not sealed here: the step events the sprout publishes while it cooks
-// (imas.cook.<id>.<jid>, sproutcook.go). They are fire-and-forget
-// publishes read in plaintext by farmer's job store, the web UI's log
-// stream and the imas CLI, which holds no tenant key; see
-// docs/BUILD-STATUS.md.
+// The step events the sprout publishes while it cooks
+// (imas.cook.<id>.<jid>, sproutcook.go) are sealed too, one-way, under
+// payloadbox.PurposeCookStep: see stepevent.go.
 
 import (
 	"encoding/json"

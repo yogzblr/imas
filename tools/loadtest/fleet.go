@@ -10,7 +10,8 @@ package main
 // every heartbeat interval.
 //
 // Only test.ping and facts.request are answered (test.ping with the
-// sprout's own handler, internal/ingredients/test.SPing). The other
+// sprout's own handler, internal/ingredients/test.SPing; facts.request
+// with the sprout's facts, sealed as at connect). The other
 // subscriptions exist so that the bus carries the same interest per
 // connection as for a real sprout; a message on them is counted and
 // dropped.
@@ -41,9 +42,11 @@ import (
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/heartbeat"
 	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/natsretry"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -71,9 +74,10 @@ type fleetOptions struct {
 	ReconnectCap   time.Duration
 	ConnectTimeout time.Duration
 	SourceIPs      []net.IP
-	// Facts is published once per sprout at connect and answers
-	// facts.request; nil publishes none.
-	Facts   []byte
+	// Facts is published once per sprout at connect, sealed (its
+	// SproutID set to the sprout's), and answers facts.request; nil
+	// publishes none.
+	Facts   *facts.SystemFacts
 	Workers int
 	// HeartbeatInterval is how often each sprout publishes its heartbeat
 	// (pki.SproutHeartbeatSubject, body heartbeat.ConnID), as
@@ -90,6 +94,9 @@ type fleet struct {
 
 	mu    sync.Mutex
 	conns []*nats.Conn
+
+	idxOnce sync.Once
+	byID    map[string]int
 
 	live      []atomic.Bool
 	liveCount atomic.Int64
@@ -111,6 +118,9 @@ type fleet struct {
 
 	// Messages handled.
 	pings, factsReqs, inert, slowConsumers atomic.Int64
+	// Facts sealed: how many, their plaintext and sealed bytes, and the
+	// time spent sealing (factsCost).
+	factsSealed, factsPlainBytes, factsSealedBytes, factsSealNanos atomic.Int64
 	// Heartbeats published, and publishes that failed.
 	heartbeats, heartbeatErrors atomic.Int64
 }
@@ -160,10 +170,74 @@ func (f *fleet) handle(m *nats.Msg) {
 		_ = m.Respond(b)
 		f.pings.Add(1)
 	case strings.HasSuffix(m.Subject, ".facts.request"):
-		_ = m.Respond(f.opts.Facts)
+		id := strings.TrimSuffix(strings.TrimPrefix(m.Subject, "imas.sprouts."), ".facts.request")
+		if c, ok := f.credByID(id); ok && f.opts.Facts != nil {
+			if data, err := f.sealFacts(c); err == nil {
+				r := nats.NewMsg(m.Reply)
+				r.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+				r.Data = data
+				_ = m.RespondMsg(r)
+			}
+		}
 		f.factsReqs.Add(1)
 	default:
 		f.inert.Add(1)
+	}
+}
+
+// sealFacts seals the fleet's facts as c's report, the way cmd/sprout's
+// sealedFactsMsg does, and counts what it cost (factsCost).
+func (f *fleet) sealFacts(c sproutCred) ([]byte, error) {
+	if c.Box.Priv == nil || c.Box.TenantPub == nil {
+		return nil, fmt.Errorf("sprout %s has no box key to seal its facts with", c.ID)
+	}
+	sf := *f.opts.Facts
+	sf.SproutID = c.ID
+	start := time.Now()
+	plain, err := json.Marshal(sf)
+	if err != nil {
+		return nil, err
+	}
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeFacts, c.Box.TenantID, c.ID, "", json.RawMessage(plain))
+	if err != nil {
+		return nil, err
+	}
+	data, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: c.Box.TenantPub, Priv: c.Box.Priv}})
+	if err != nil {
+		return nil, err
+	}
+	f.factsSealNanos.Add(int64(time.Since(start)))
+	f.factsSealed.Add(1)
+	f.factsPlainBytes.Add(int64(len(plain)))
+	f.factsSealedBytes.Add(int64(len(data)))
+	return data, nil
+}
+
+// credByID finds sprout id's credentials.
+func (f *fleet) credByID(id string) (sproutCred, bool) {
+	f.idxOnce.Do(func() {
+		f.byID = make(map[string]int, len(f.creds))
+		for i, c := range f.creds {
+			f.byID[c.ID] = i
+		}
+	})
+	i, ok := f.byID[id]
+	if !ok {
+		return sproutCred{}, false
+	}
+	return f.creds[i], true
+}
+
+// factsCost is what sealing the fleet's facts cost, per message.
+func (f *fleet) factsCost() *factsResult {
+	n := f.factsSealed.Load()
+	if n == 0 {
+		return nil
+	}
+	plain, sealed := f.factsPlainBytes.Load()/n, f.factsSealedBytes.Load()/n
+	return &factsResult{
+		Messages: n, PlainBytes: plain, SealedBytes: sealed, OverheadBytes: sealed - plain,
+		SealMicros: float64(f.factsSealNanos.Load()) / float64(n) / 1e3,
 	}
 }
 
@@ -273,7 +347,15 @@ func (f *fleet) connectOne(i int) error {
 		return err
 	}
 	if f.opts.Facts != nil {
-		if err := nc.Publish("imas.sprouts."+id+".facts", f.opts.Facts); err != nil {
+		data, err := f.sealFacts(f.creds[i])
+		if err != nil {
+			nc.Close()
+			return err
+		}
+		m := nats.NewMsg("imas.sprouts." + id + ".facts")
+		m.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+		m.Data = data
+		if err := nc.PublishMsg(m); err != nil {
 			nc.Close()
 			return err
 		}

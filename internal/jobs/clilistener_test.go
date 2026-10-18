@@ -1,7 +1,6 @@
 package jobs
 
 import (
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -46,99 +45,32 @@ func TestNewCLIListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UPUBKEY_TEST")
-
+	listener := NewCLIListener(store, "UPUBKEY_TEST")
 	if listener.store != store {
 		t.Error("store mismatch")
-	}
-	if listener.nc != conn {
-		t.Error("nc mismatch")
 	}
 	if listener.userKey != "UPUBKEY_TEST" {
 		t.Errorf("expected userKey UPUBKEY_TEST, got %s", listener.userKey)
 	}
 }
 
-func TestCLIListener_SubscribeAll(t *testing.T) {
+// Record keeps each forwarded step under its job.
+func TestCLIListener_Record(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCLIStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY1")
-
-	if err := listener.SubscribeAll(); err != nil {
-		t.Fatalf("SubscribeAll: %v", err)
-	}
-	defer listener.Stop()
-
-	if listener.sub == nil {
-		t.Fatal("expected subscription to be set")
-	}
-
-	// Publish a step completion and verify it gets recorded.
-	step := cook.StepCompletion{
-		ID:               "step-1",
-		CompletionStatus: cook.StepCompleted,
-		Started:          time.Now(),
-		Duration:         time.Second,
-	}
-	data, _ := json.Marshal(step)
-	if err := conn.Publish("imas.cook.sprout-test.job-sub-all", data); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify the step was recorded.
-	summary, _, err := store.GetJob("job-sub-all")
+	listener := NewCLIListener(store, "UKEY1")
+	listener.Record("sprout-test", "job-rec", cook.StepCompletion{
+		ID: "step-1", CompletionStatus: cook.StepCompleted, Started: time.Now(), Duration: time.Second,
+	})
+	summary, _, err := store.GetJob("job-rec")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
 	if summary.Total != 1 {
 		t.Errorf("expected 1 step, got %d", summary.Total)
-	}
-}
-
-func TestCLIListener_SubscribeJob(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY2")
-
-	if err := listener.SubscribeJob("specific-jid"); err != nil {
-		t.Fatalf("SubscribeJob: %v", err)
-	}
-	defer listener.Stop()
-
-	// Publish to the specific JID.
-	step := cook.StepCompletion{
-		ID:               "step-1",
-		CompletionStatus: cook.StepFailed,
-		Started:          time.Now(),
-		Duration:         2 * time.Second,
-	}
-	data, _ := json.Marshal(step)
-	if err := conn.Publish("imas.cook.sprout-x.specific-jid", data); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
-	time.Sleep(200 * time.Millisecond)
-
-	summary, _, err := store.GetJob("specific-jid")
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if summary.Status != JobFailed {
-		t.Errorf("expected failed status, got %s", summary.Status)
 	}
 }
 
@@ -148,13 +80,10 @@ func TestCLIListener_RecordJobInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY3")
+	listener := NewCLIListener(store, "UKEY3")
 
 	listener.RecordJobInit("init-jid", "web.deploy", []string{"sprout-a", "sprout-b"})
 
-	// Verify both sprouts got recorded.
 	metaA, err := store.GetJobMeta("init-jid")
 	if err != nil {
 		t.Fatalf("GetJobMeta for sprout-a: %v", err)
@@ -167,101 +96,16 @@ func TestCLIListener_RecordJobInit(t *testing.T) {
 	}
 }
 
-func TestCLIListener_Stop(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY4")
-
-	if err := listener.SubscribeAll(); err != nil {
-		t.Fatal(err)
-	}
-	listener.Stop()
-
-	// After stop, subscription should be inactive.
-	if listener.sub.IsValid() {
-		t.Error("expected subscription to be invalid after Stop")
-	}
-}
-
-func TestCLIListener_Stop_NilSub(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY5")
-
-	// Should not panic when sub is nil.
-	listener.Stop()
-}
-
-func TestCLIListener_HandleStepCompletion_BadSubject(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY6")
-
-	if err := listener.SubscribeAll(); err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Stop()
-
-	// Publish with valid subject but bad JSON — should be silently handled.
-	if err := conn.Publish("imas.cook.sprout.jid", []byte("not json")); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
-	time.Sleep(100 * time.Millisecond)
-
-	// Should not have recorded anything.
-	_, _, err = store.GetJob("jid")
-	// File should exist but be empty or non-existent.
-	if err != ErrJobNotFound {
-		t.Logf("error was: %v (acceptable if step wasn't recorded)", err)
-	}
-}
-
 func TestCLIListener_RecordsFailedStepWithError(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCLIStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UKEY3")
-	if err := listener.SubscribeJob("jid-err"); err != nil {
-		t.Fatalf("SubscribeJob: %v", err)
-	}
-	defer listener.Stop()
-
-	step := cook.StepCompletion{
-		ID:               "step-1",
-		CompletionStatus: cook.StepFailed,
-		Started:          time.Now(),
-		Error:            errors.New("boom"),
-	}
-	data, err := json.Marshal(step)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.Publish("imas.cook.sprout-e.jid-err", data); err != nil {
-		t.Fatal(err)
-	}
-	conn.Flush()
-	time.Sleep(200 * time.Millisecond)
-
+	listener := NewCLIListener(store, "UKEY3")
+	listener.Record("sprout-e", "jid-err", cook.StepCompletion{
+		ID: "step-1", CompletionStatus: cook.StepFailed, Started: time.Now(), Error: errors.New("boom"),
+	})
 	summary, _, err := store.GetJob("jid-err")
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)

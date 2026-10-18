@@ -270,61 +270,38 @@ func TestDefaultCLIStorePath_WithXDG(t *testing.T) {
 // --- CLIListener edge cases ---
 
 func TestCLIListener_RecordJobInit_StoreError(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("cannot test permission errors as root")
-	}
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Make dir read-only so RecordJobStart fails.
-	os.Chmod(dir, 0o555)
-	t.Cleanup(func() { os.Chmod(dir, 0o700) })
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UFAIL")
-
+	store, _ := brokenCLIStore(t)
+	listener := NewCLIListener(store, "UFAIL")
 	// Should not panic — error is logged.
 	listener.RecordJobInit("fail-jid", "recipe", []string{"sprout-a", "sprout-b"})
 }
 
-func TestCLIListener_HandleStepCompletion_RecordError(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("cannot test permission errors as root")
-	}
-	dir := t.TempDir()
+// brokenCLIStore is a CLIStore whose directory has been replaced by a
+// file, so every write fails, whoever runs the test (root included).
+func brokenCLIStore(t *testing.T) (*CLIStore, string) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "store")
 	store, err := NewCLIStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UERR")
-
-	if err := listener.SubscribeAll(); err != nil {
+	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Stop()
-
-	// Make dir read-only so AppendStep fails.
-	os.Chmod(dir, 0o555)
-	t.Cleanup(func() { os.Chmod(dir, 0o700) })
-
-	step := cook.StepCompletion{
-		ID:               "s1",
-		CompletionStatus: cook.StepCompleted,
-		Started:          time.Now(),
-		Duration:         time.Second,
-	}
-	data, _ := json.Marshal(step)
-	if err := conn.Publish("imas.cook.sprout-err.job-err", data); err != nil {
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	conn.Flush()
-	time.Sleep(200 * time.Millisecond)
+	return store, dir
+}
+
+func TestCLIListener_Record_StoreError(t *testing.T) {
+	store, _ := brokenCLIStore(t)
+	listener := NewCLIListener(store, "UERR")
 	// Should not panic — error is logged.
+	listener.Record("sprout-err", "job-err", cook.StepCompletion{ID: "s1", CompletionStatus: cook.StepCompleted, Started: time.Now()})
+	if _, _, err := store.GetJob("job-err"); err == nil {
+		t.Fatal("a step was recorded in a broken store")
+	}
 }
 
 // --- Store.listSproutDirs edge cases ---
@@ -552,45 +529,6 @@ func TestStartReaper_PositiveTTL(t *testing.T) {
 	}
 }
 
-// --- SubscribeAll / SubscribeJob error paths ---
-
-func TestCLIListener_SubscribeAll_ClosedConn(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UCLOSED")
-
-	// Close connection before subscribing.
-	conn.Close()
-
-	err = listener.SubscribeAll()
-	if err == nil {
-		t.Error("expected error when subscribing on closed connection")
-	}
-}
-
-func TestCLIListener_SubscribeJob_ClosedConn(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewCLIStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, conn := startTestNATSServer(t)
-	listener := NewCLIListener(store, conn, "UCLOSED2")
-
-	conn.Close()
-
-	err = listener.SubscribeJob("some-jid")
-	if err == nil {
-		t.Error("expected error when subscribing on closed connection")
-	}
-}
-
 // --- logJobs: write to read-only sprout dir ---
 
 // --- logJobs: existing file append path ---
@@ -613,7 +551,7 @@ func TestLogJobs_NewSprout(t *testing.T) {
 
 	// Publish for a sprout and job with no objects yet: the event alone
 	// creates the job.
-	if err := conn.Publish("imas.cook.brand-new-sprout.new-job", data); err != nil {
+	if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.brand-new-sprout.new-job", data)); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()

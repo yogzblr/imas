@@ -1,7 +1,6 @@
 package facts
 
 import (
-	"encoding/json"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +37,9 @@ func startTestNATS(t *testing.T) (*nats.Conn, func()) {
 }
 
 func TestRegisterFarmerListener_ValidFacts(t *testing.T) {
+	usePKIDB(t)
+	keys := newSealedFacts(t, "t_test")
+	keys.enroll("t_test", "sprout-listener-test")
 	nc, cleanup := startTestNATS(t)
 	defer cleanup()
 
@@ -54,14 +56,7 @@ func TestRegisterFarmerListener_ValidFacts(t *testing.T) {
 		KernelArch:  "amd64",
 		SproutID:    "sprout-listener-test",
 	}
-	data, err := json.Marshal(sf)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	if err := nc.Publish("imas.sprouts.sprout-listener-test.facts", data); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
+	publishSealed(t, nc, "sprout-listener-test", keys.seal("t_test", "sprout-listener-test", sf))
 	nc.Flush()
 	time.Sleep(100 * time.Millisecond)
 
@@ -77,6 +72,9 @@ func TestRegisterFarmerListener_ValidFacts(t *testing.T) {
 }
 
 func TestRegisterFarmerListener_EmptySproutID(t *testing.T) {
+	usePKIDB(t)
+	keys := newSealedFacts(t, "t_test")
+	keys.enroll("t_test", "unknown")
 	nc, cleanup := startTestNATS(t)
 	defer cleanup()
 
@@ -89,35 +87,35 @@ func TestRegisterFarmerListener_EmptySproutID(t *testing.T) {
 		Hostname: "empty-id-host",
 		SproutID: "",
 	}
-	data, err := json.Marshal(sf)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
 	// Should log error and not store — no panic.
-	if err := nc.Publish("imas.sprouts.unknown.facts", data); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
+	publishSealed(t, nc, "unknown", keys.seal("t_test", "unknown", sf))
 	nc.Flush()
 	time.Sleep(100 * time.Millisecond)
 
-	// Props should not have been stored for empty sprout ID.
+	// Props should not have been stored for empty sprout ID, nor under
+	// the subject's sprout.
 	if got := props.GetStringPropForTenant("t_test", "", "os"); got != "" {
 		t.Errorf("expected empty prop for empty sprout ID, got %q", got)
+	}
+	if got := props.GetPropsForTenant("t_test", "unknown"); got != nil {
+		t.Errorf("report naming no sprout stored under the subject's: %v", got)
 	}
 }
 
 func TestRegisterFarmerListener_InvalidJSON(t *testing.T) {
+	usePKIDB(t)
+	newSealedFacts(t, "t_test")
 	nc, cleanup := startTestNATS(t)
 	defer cleanup()
 
 	RegisterFarmerListener("t_test", nc)
 	nc.Flush()
 
-	// Publish invalid JSON — should not panic.
+	// Publish invalid JSON, plaintext and marked sealed — should not panic.
 	if err := nc.Publish("imas.sprouts.bad.facts", []byte("not json")); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
+	publishSealed(t, nc, "bad", []byte("not json"))
 	nc.Flush()
 	time.Sleep(100 * time.Millisecond)
 	// No assertion needed — just verifying no panic.
@@ -139,6 +137,9 @@ func TestRegisterFarmerListener_InvalidJSON(t *testing.T) {
 // verifies that published events are load-balanced across the two instead
 // of delivered to both.
 func TestRegisterFarmerListener_UsesQueueGroup(t *testing.T) {
+	usePKIDB(t)
+	keys := newSealedFacts(t, "t_test")
+	keys.enroll("t_test", "sprout-queue-group-test")
 	nc, cleanup := startTestNATS(t)
 	defer cleanup()
 
@@ -165,10 +166,7 @@ func TestRegisterFarmerListener_UsesQueueGroup(t *testing.T) {
 			SproutID: "sprout-queue-group-test",
 			NumCPU:   i,
 		}
-		data, _ := json.Marshal(sf)
-		if err := nc.Publish("imas.sprouts.sprout-queue-group-test.facts", data); err != nil {
-			t.Fatal(err)
-		}
+		publishSealed(t, nc, "sprout-queue-group-test", keys.seal("t_test", "sprout-queue-group-test", sf))
 	}
 	nc.Flush()
 	time.Sleep(200 * time.Millisecond)
@@ -197,6 +195,11 @@ func TestRegisterFarmerListener_UsesQueueGroup(t *testing.T) {
 }
 
 func TestRegisterFarmerListener_MultipleSprouts(t *testing.T) {
+	usePKIDB(t)
+	keys := newSealedFacts(t, "t_test")
+	for _, id := range []string{"sprout-a", "sprout-b", "sprout-c"} {
+		keys.enroll("t_test", id)
+	}
 	nc, cleanup := startTestNATS(t)
 	defer cleanup()
 
@@ -217,10 +220,7 @@ func TestRegisterFarmerListener_MultipleSprouts(t *testing.T) {
 			Hostname: sprout.hostname,
 			SproutID: sprout.id,
 		}
-		data, _ := json.Marshal(sf)
-		if err := nc.Publish("imas.sprouts."+sprout.id+".facts", data); err != nil {
-			t.Fatalf("publish %s: %v", sprout.id, err)
-		}
+		publishSealed(t, nc, sprout.id, keys.seal("t_test", sprout.id, sf))
 	}
 	nc.Flush()
 	time.Sleep(150 * time.Millisecond)

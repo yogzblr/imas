@@ -178,6 +178,40 @@ replay guard where a message can change state) and Decision 6 of the design.
   If facts exceed the bus payload limit when sealed, compress before sealing and
   say so.
 
+Brief corrections (U3, as built):
+
+- Purposes live in `internal/payloadbox` (`payloadbox.go`), not
+  `internal/pki`; `internal/pki` has the seal and open helpers around them
+  (`SproutSealForFarmer`, `OpenFromSprout`, and the new `SealEventToCLI`
+  and `CLIOpenEvent`). The new purposes are `s2f.facts`, `s2f.cook.step`
+  and `f2c.cook.step`. The design's `s2f.cook.event` is the brief's
+  `s2f.cook.step`; the design is corrected.
+- "The replay guard where a message can change state": a facts report
+  only rewrites the sprout's own recent facts, so it takes the
+  per-replica guard alone. A step event changes a job record, and farmer's
+  job listener is queue-grouped (one job's events land on several
+  replicas), so it also takes the cluster-wide Valkey claim
+  (`pki.ClaimSealedMessage`), failing closed. Without the claim a skipped
+  step (a dropped failed event plus a successful one replayed to another
+  replica) makes the job read as succeeded.
+- A third CLI reader of `imas.cook.*`, `internal/jobs` `CLIListener` (the
+  CLI's local job store), subscribed in plaintext too; it now records what
+  `imas cook`'s follow delivers and subscribes to nothing.
+- The sprout also answered `imas.sprouts.<id>.facts.request` with its facts
+  in plaintext; it now answers with the same sealed report, or `no-keys`.
+- The farmer-to-CLI leg is per-message `payloadbox` boxes sealed to the
+  user's CLI box key and bound to the `jobs.follow` request's ID, not the
+  design's stream frames under an ephemeral key ("built on the sealed
+  CLI-to-farmer channel that already exists"). The design is corrected.
+- The "sprout needs an upgrade" state needs a store every replica reads: a
+  Valkey marker (`internal/heartbeat` `upgrade.go`,
+  `imas:upgrade:{<tenant>:<sprout>}`), added to the tenant erasure
+  inventory (`internal/tenantpurge`, category `valkey.upgrade`) and shown
+  by `sprouts.list` and `sprouts.get` as `upgrade_required`. Not a prop:
+  a prop could move the sprout into a cohort.
+- `docs/BUILD-STATUS.md` has no separate sealing table: the boundaries are
+  item P6, which the status fragment updates.
+
 ## U4: retention is configurable in the charts
 
 Scope: `deploy/helm/farmer` (and the other charts that keep data), `internal/config`,

@@ -110,6 +110,11 @@ var cmdSproutsList = &cobra.Command{
 					stateStr = color.RedString(stateStr)
 				}
 
+				if s.UpgradeRequired != "" {
+					fmt.Printf("%-*s  %-*s  %s  %s\n", maxID, s.ID, maxState, stateStr, statusColor(status),
+						color.YellowString("needs upgrade (%s sent in plaintext, refused)", s.UpgradeRequired))
+					continue
+				}
 				fmt.Printf("%-*s  %-*s  %s\n", maxID, s.ID, maxState, stateStr, statusColor(status))
 			}
 
@@ -185,6 +190,9 @@ var cmdSproutsShow = &cobra.Command{
 			}
 			if info.NKey != "" {
 				fmt.Printf("NKey:      %s\n", info.NKey)
+			}
+			if info.UpgradeRequired != "" {
+				color.Yellow("Upgrade:   required: this sprout sends %s in plaintext, which farmer refuses; upgrade imas-sprout", info.UpgradeRequired)
 			}
 
 			// Show props if available.

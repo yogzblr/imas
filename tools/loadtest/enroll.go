@@ -290,7 +290,12 @@ func (e *enroller) enrollOne(ctx context.Context, hostname string) (sproutCred, 
 			if err != nil {
 				return sproutCred{}, err
 			}
-			return sproutCred{ID: resp.SproutID, JWT: resp.JWT, Seed: string(seed), Gateway: resp.GatewayJWT}, nil
+			tenantPub, err := pki.DecodeBoxPubKey(resp.TenantX25519Pub)
+			if err != nil {
+				return sproutCred{}, fmt.Errorf("enrolment answered a bad tenant box key: %w", err)
+			}
+			return sproutCred{ID: resp.SproutID, JWT: resp.JWT, Seed: string(seed), Gateway: resp.GatewayJWT,
+				Box: sproutBox{TenantID: resp.TenantID, TenantPub: tenantPub, Priv: &box}}, nil
 		}
 		if attempt >= e.retries || ctx.Err() != nil {
 			return sproutCred{}, err

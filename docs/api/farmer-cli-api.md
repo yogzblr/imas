@@ -143,8 +143,33 @@ Farmer's audit log gets `shell.open` (the request), `shell.start` (leg 2's
 outcome) and `shell.end` (duration, exit code, reason, bytes and frames
 each way). No entry, and nothing else, records what was typed or printed.
 
-## Still plaintext
+## Step events: `jobs.follow`
 
-Step events (`imas.cook.*.<jid>`, read by `imas cook`, `imas jobs watch`,
-the CLI's local job store and `imas serve`'s log stream). See "What stays
-plaintext until Decision D" in the design.
+Sprouts seal their step events to the tenant key (`s2f.cook.step` on
+`imas.cook.<sprout>.<jid>`), which the CLI doesn't hold, so the CLI never
+reads `imas.cook.*`. `imas cook`, `imas jobs watch`, the CLI's local job
+store and `imas serve`'s log stream get them from farmer instead:
+
+1. The CLI subscribes on `imas.stream.cli.<stream>`, `<stream>` 32
+   lowercase hex digits it picks at random.
+2. It sends the sealed `jobs.follow` request (needs `view`; claimed
+   cluster-wide like a mutating method):
+
+   | Param | Meaning |
+   |---|---|
+   | `jid` | the job to follow; empty for every job whose sprout you may view |
+   | `stream` | the stream ID from step 1 |
+   | `idle_seconds` | end after this long without an event (0: no idle limit; at most 2100) |
+   | `max_seconds` | end after this long in any case (0 or more than 2100: 2100) |
+
+   The result is `{"stream", "expires_at"}`, sent once farmer is
+   subscribed, so a cook triggered after it misses no event.
+3. Farmer forwards each step event that opens, is fresh, isn't a replay
+   and comes from a sprout you may view (checked again every 60 seconds), as an `f2c.cook.step` message on
+   the stream, sealed to your CLI box key, naming the `jobs.follow`
+   request's ID (`ReplyTo`) and carrying `{stream, sid, jid, eid, step}`.
+   The CLI drops anything that doesn't open under its key, names another
+   request or stream, is stale, or repeats an `eid`.
+
+A farmer replica runs at most 1024 follows; past that `jobs.follow` fails
+and the CLI tries again later. See "As built: U3" in the design.

@@ -1,14 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/glebarez/sqlite"
 	"github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
+	"github.com/valkey-io/valkey-go"
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/api/handlers"
@@ -92,7 +93,18 @@ func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 	tenantboxtest.Start(t)
 	pki.InvalidateTenantBoxKeys(tenant)
 	t.Cleanup(func() { pki.InvalidateTenantBoxKeys(tenant) })
-	cooktest.NewSprout(t, tenant, sprout).AnswerCooks(t, nc, cooktest.Acknowledge)
+	stub := cooktest.NewSprout(t, tenant, sprout)
+	stub.AnswerCooks(t, nc, cooktest.Acknowledge)
+	// Step events are sealed by the sprout and claimed once cluster-wide
+	// (internal/jobs), so the claim needs a Valkey.
+	mr := miniredis.RunT(t)
+	vc, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(vc.Close)
+	pki.SetReplayCacheClient(vc)
+	t.Cleanup(func() { pki.SetReplayCacheClient(nil) })
 
 	if err := cook.SendStepsEvent(tenant, sprout, jid, []cook.Step{{ID: "s1"}}); err != nil {
 		t.Fatalf("dispatching: %v", err)
@@ -102,8 +114,7 @@ func TestInstalledStorageIndexesCookJobs(t *testing.T) {
 		{ID: "s1", CompletionStatus: cook.StepCompleted},
 		{ID: cook.StepID("completed-" + jid), CompletionStatus: cook.StepCompleted},
 	} {
-		b, _ := json.Marshal(step)
-		if err := nc.Publish("imas.cook."+sprout+"."+jid, b); err != nil {
+		if err := nc.PublishMsg(stub.StepEvent(t, jid, step)); err != nil {
 			t.Fatalf("publishing step: %v", err)
 		}
 	}

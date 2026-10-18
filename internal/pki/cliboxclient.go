@@ -285,3 +285,39 @@ func PromoteCLIBoxKey(newPub string) error {
 	}
 	return os.Rename(pendingPath, CLIBoxPrivFile())
 }
+
+// CLIOpenEvent opens data, a message farmer pushed under purpose
+// (payloadbox.PurposeCLICookStep) answering this CLI's request reqID,
+// under the current key and then a pending one, against the pinned tenant
+// key and tenant, for this user. It must answer reqID and be fresh
+// (payloadbox.CheckFresh). Any failure is payloadbox.ErrOpen or
+// payloadbox.ErrStale; dropping a duplicate is the caller's (each
+// message's ID is unique).
+func CLIOpenEvent(purpose, reqID string, data []byte) (*payloadbox.Message, error) {
+	if reqID == "" {
+		return nil, payloadbox.ErrOpen
+	}
+	keys, err := loadCLIKeys()
+	if err != nil {
+		return nil, err
+	}
+	defer keys.wipe()
+	want := payloadbox.Expect{Purpose: purpose, TenantID: keys.tenantID, SproutID: keys.userID}
+	for _, priv := range []*[32]byte{keys.current, keys.pending} {
+		if priv == nil {
+			continue
+		}
+		msg, err := payloadbox.Open(data, []payloadbox.KeyPair{{PeerPub: keys.tenantPub, Priv: priv}}, want)
+		if err != nil {
+			continue
+		}
+		if msg.ReplyTo != reqID {
+			return nil, payloadbox.ErrOpen
+		}
+		if err := payloadbox.CheckFresh(msg); err != nil {
+			return nil, err
+		}
+		return msg, nil
+	}
+	return nil, payloadbox.ErrOpen
+}

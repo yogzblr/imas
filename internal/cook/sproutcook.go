@@ -78,12 +78,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 		select {
 		// each time a step completes, check if any other steps can be started
 		case completion := <-completionChan:
-			b, marshalErr := json.Marshal(completion)
-			if marshalErr != nil {
-				log.Errorf("failed to marshal step completion: %v", marshalErr)
-			}
-
-			conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
+			publishStepEvent(sproutStepPublisher(), pki.GetSproutID(), envelope.JobID, completion)
 			// Not the completion itself: its changes and notes can carry
 			// step output.
 			log.Infof("Step %s completed with status %v", completion.ID, completion.CompletionStatus)
@@ -237,11 +232,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 					ChangesMade:      false,
 					Changes:          nil,
 				}
-				b, marshalErr := json.Marshal(completion)
-				if marshalErr != nil {
-					log.Errorf("failed to marshal step completion: %v", marshalErr)
-				}
-				conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
+				publishStepEvent(sproutStepPublisher(), pki.GetSproutID(), envelope.JobID, completion)
 				log.Info("All steps completed")
 				return nil
 			}
@@ -253,11 +244,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 				CompletionStatus: StepFailed,
 				Error:            ErrCookTimeout,
 			}
-			b, marshalErr := json.Marshal(completion)
-			if marshalErr != nil {
-				log.Errorf("failed to marshal timeout completion: %v", marshalErr)
-			}
-			conn.Publish("imas.cook."+pki.GetSproutID()+"."+envelope.JobID, b)
+			publishStepEvent(sproutStepPublisher(), pki.GetSproutID(), envelope.JobID, completion)
 			return ErrCookTimeout
 		}
 	}

@@ -11,6 +11,11 @@ type SproutInfo struct {
 	KeyState  string `json:"key_state"`
 	Connected bool   `json:"connected"`
 	NKey      string `json:"nkey,omitempty"`
+	// UpgradeRequired names the kind of message ("facts", "cook step")
+	// this sprout last sent in plaintext, which farmer refused: it runs a
+	// build older than sealed facts and step events and needs an upgrade
+	// (internal/heartbeat's upgrade marker). Empty otherwise.
+	UpgradeRequired string `json:"upgrade_required,omitempty"`
 }
 
 // SproutListResponse is the response from the sprouts.list API.

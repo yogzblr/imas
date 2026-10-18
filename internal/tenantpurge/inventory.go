@@ -101,15 +101,17 @@ func ObjectPrefixes(tenantID string) []ObjectPrefix {
 	}
 }
 
-// Valkey key prefixes (internal/heartbeat's).
+// Valkey key prefixes (internal/heartbeat's). ValkeyUpgradePrefix names
+// the "sprout needs an upgrade" markers (heartbeat's upgrade.go).
 const (
 	ValkeyHeartbeatPrefix = "imas:heartbeat:"
 	ValkeyAcceptedPrefix  = "imas:accepted:"
+	ValkeyUpgradePrefix   = "imas:upgrade:"
 )
 
 // PurgeValkeyPrefixes are the Valkey key prefixes whose keys for the
 // tenant are deleted; each key is <prefix>{<tenant_id>:<sprout_id>}.
-var PurgeValkeyPrefixes = []string{ValkeyHeartbeatPrefix, ValkeyAcceptedPrefix}
+var PurgeValkeyPrefixes = []string{ValkeyHeartbeatPrefix, ValkeyAcceptedPrefix, ValkeyUpgradePrefix}
 
 // KeepValkeyPrefixes are the Valkey key prefixes not deleted, with the
 // reason.
@@ -125,6 +127,8 @@ func ValkeyCategory(prefix string) string {
 		return "valkey.heartbeat"
 	case ValkeyAcceptedPrefix:
 		return "valkey.accepted"
+	case ValkeyUpgradePrefix:
+		return "valkey.upgrade"
 	}
 	return "valkey.other"
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,8 +14,11 @@ import (
 	"time"
 
 	nats "github.com/nats-io/nats.go"
+	"golang.org/x/crypto/curve25519"
 
+	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -169,7 +174,7 @@ func TestFixtureSproutIsConfinedToItsSubjects(t *testing.T) {
 	}
 
 	// Its own subject works end to end with the core requester.
-	fl := newFleet(creds[:1], fleetOptions{Servers: []string{bus.URL()}, TLS: tlsCfg, ConnectTimeout: 5 * time.Second, Facts: []byte(`{}`)})
+	fl := newFleet(creds[:1], fleetOptions{Servers: []string{bus.URL()}, TLS: tlsCfg, ConnectTimeout: 5 * time.Second, Facts: &facts.SystemFacts{OS: "linux"}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fl.startWorkers(ctx)
@@ -345,5 +350,77 @@ func TestBusConnectionLimit(t *testing.T) {
 	}
 	if n := res.Reasons["refused during TLS (a bus at its connection limit does this)"]; n != 3 {
 		t.Errorf("reasons %v: want 3 connection-limit refusals", res.Reasons)
+	}
+}
+
+// Load-test sprouts seal their facts as a sprout does (s2f.facts, U3):
+// at connect and in answer to facts.request, each under its own box key
+// to the tenant key, and the run reports what sealing cost.
+func TestFleetSealsFacts(t *testing.T) {
+	bus, tlsCfg, _, tf := startTestBus(t)
+	creds, err := tf.mintSprouts("fs", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core, err := nats.Connect(bus.URL(), nats.Secure(tlsCfg), nats.UserJWTAndSeed(tf.coreJWT, tf.coreSeed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+	reports, err := core.SubscribeSync("imas.sprouts.*.facts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	fl := newFleet(creds, fleetOptions{Servers: []string{bus.URL()}, TLS: tlsCfg, ConnectTimeout: 5 * time.Second, Facts: &facts.SystemFacts{OS: "linux", Hostname: "lt-host"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fl.startWorkers(ctx)
+	defer fl.Close()
+	if err := fl.connectOne(0); err != nil {
+		t.Fatal(err)
+	}
+	id := creds[0].ID
+	pub, err := curve25519.X25519(creds[0].Box.Priv[:], curve25519.Basepoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sproutPub [32]byte
+	copy(sproutPub[:], pub)
+	open := func(m *nats.Msg) facts.SystemFacts {
+		t.Helper()
+		if m.Header.Get(payloadbox.Header) != payloadbox.HeaderBox1 || bytes.Contains(m.Data, []byte("lt-host")) {
+			t.Fatalf("facts not sealed: %v %q", m.Header, m.Data)
+		}
+		msg, err := payloadbox.Open(m.Data, []payloadbox.KeyPair{{PeerPub: &sproutPub, Priv: tf.boxPriv}},
+			payloadbox.Expect{Purpose: payloadbox.PurposeFacts, TenantID: tf.name, SproutID: id})
+		if err != nil {
+			t.Fatalf("facts did not open as farmer opens them: %v", err)
+		}
+		var sf facts.SystemFacts
+		if err := json.Unmarshal(msg.Body, &sf); err != nil {
+			t.Fatal(err)
+		}
+		return sf
+	}
+	m, err := reports.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sf := open(m); sf.SproutID != id || sf.Hostname != "lt-host" {
+		t.Fatalf("report %+v", sf)
+	}
+	resp, err := core.Request("imas.sprouts."+id+".facts.request", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sf := open(resp); sf.SproutID != id {
+		t.Fatalf("facts.request answer %+v", sf)
+	}
+	cost := fl.factsCost()
+	if cost == nil || cost.Messages != 2 || cost.SealedBytes <= cost.PlainBytes || cost.OverheadBytes != cost.SealedBytes-cost.PlainBytes {
+		t.Fatalf("facts cost %+v", cost)
 	}
 }

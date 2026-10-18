@@ -89,13 +89,15 @@ func useTestObjServer(t *testing.T) (*objectstoretest.Server, *objectstore.Store
 	return srv, obj
 }
 
+// stepMsg is the sealed event testTenant's sprout publishes on subject
+// (imas.cook.<sprout>.<jid>) for step.
 func stepMsg(t *testing.T, subject string, step cook.StepCompletion) *nats.Msg {
 	t.Helper()
 	data, err := json.Marshal(step)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &nats.Msg{Subject: subject, Data: data}
+	return sealedMsg(t, testTenant, subject, data)
 }
 
 // TestRegisterNatsConn_NoLocalDir verifies farmer no longer creates
@@ -129,7 +131,7 @@ func TestLogJobs_StepCompletion(t *testing.T) {
 	}
 	data, _ := json.Marshal(step)
 
-	if err := conn.Publish("imas.cook.sprout-log-test.job-log-1", data); err != nil {
+	if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.sprout-log-test.job-log-1", data)); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -161,7 +163,7 @@ func TestLogJobs_AppendToExisting(t *testing.T) {
 			Duration:         time.Second,
 		}
 		data, _ := json.Marshal(step)
-		if err := conn.Publish("imas.cook.sprout-append.job-append-1", data); err != nil {
+		if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.sprout-append.job-append-1", data)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -211,7 +213,7 @@ func TestLogJobs_InvalidJSON(t *testing.T) {
 	obj := useTestObjStore(t)
 
 	// Invalid JSON — should not panic, and nothing is written.
-	logJobs(testTenant, &nats.Msg{Subject: "imas.cook.sprout-bad.job-bad", Data: []byte("invalid json")})
+	logJobs(testTenant, sealedMsg(t, testTenant, "imas.cook.sprout-bad.job-bad", []byte("invalid json")))
 
 	if keys := listKeys(t, obj, jobKeyPrefix); len(keys) != 0 {
 		t.Errorf("expected nothing written for invalid JSON, got %v", keys)
@@ -283,7 +285,7 @@ func TestLogJobs_ConcurrentSteps(t *testing.T) {
 			Duration:         time.Millisecond,
 		}
 		data, _ := json.Marshal(step)
-		if err := conn.Publish("imas.cook.sprout-concurrent.job-concurrent", data); err != nil {
+		if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.sprout-concurrent.job-concurrent", data)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -508,7 +510,7 @@ func TestRegisterNatsConn_UsesQueueGroup(t *testing.T) {
 				Started:          time.Now(),
 			}
 			data, _ := json.Marshal(step)
-			if err := conn.Publish("imas.cook.queue-sprout.queue-job", data); err != nil {
+			if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.queue-sprout.queue-job", data)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -614,7 +616,7 @@ func TestRegisterNatsConn_TwoReplicasRecordEachEventOnce(t *testing.T) {
 	for i := range numSteps {
 		step := makeStep(fmt.Sprintf("step-%d", i), cook.StepCompleted, time.Now(), time.Millisecond)
 		b, _ := json.Marshal(step)
-		if err := pub.Publish("imas.cook.sprout-shared.shared-job", b); err != nil {
+		if err := pub.PublishMsg(sealedMsg(t, testTenant, "imas.cook.sprout-shared.shared-job", b)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -664,7 +666,7 @@ func TestLogJobs_FailedStepWithError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Publish("imas.cook.sprout-fail.job-fail-1", data); err != nil {
+	if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.sprout-fail.job-fail-1", data)); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
@@ -694,7 +696,7 @@ func TestLogJobs_LegacyEmptyObjectError(t *testing.T) {
 	RegisterNatsConn("t_test", conn)
 
 	payload := []byte(`{"ID":"timeout-job-old","CompletionStatus":3,"ChangesMade":false,"Changes":null,"started":"0001-01-01T00:00:00Z","Error":{}}`)
-	if err := conn.Publish("imas.cook.sprout-old.job-old", payload); err != nil {
+	if err := conn.PublishMsg(sealedMsg(t, testTenant, "imas.cook.sprout-old.job-old", payload)); err != nil {
 		t.Fatal(err)
 	}
 	conn.Flush()
