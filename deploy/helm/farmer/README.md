@@ -804,7 +804,13 @@ Each OpenBao client runs under its own role and gets exactly one policy.
     once (kept across upgrades with `lookup`) into `<release>-farmer-db`.
   - External: `database.existingSecret` holds both full DSNs.
   - saasapi refuses to start unless its DSN sets `parseTime=true` (the
-    `database.params` default does), and warns if `loc` isn't UTC.
+    `database.params` default does).
+  - farmer and saasapi both refuse to start when their DSN's `loc` is not
+    `UTC` (an absent `loc` is the driver's default, UTC), and the chart
+    refuses a `database.params` that sets another: the row leases and the
+    DATETIME columns the two services share are written and compared as
+    UTC times (security review 2026-10, I1). For `database.existingSecret`
+    DSNs, set `loc=UTC` or leave `loc` out.
 - **Schemas, users and grants** are the migrate Job's; see
   [Migrations](#migrations).
 - **Declarative `users` isn't used.** The operator's `users` field applies
@@ -1776,7 +1782,7 @@ Only this chart's own keys are listed. Anything under `openbao`, `pxc`
 | `openbaoClient.authMethod` | `kubernetes` | Or `token`, which uses `tokenSecretName` with per-client keys. |
 | `openbaoClient.k8sMount` / `k8sAudience` | `kubernetes` / `openbao` | Kubernetes auth mount, and the projected token's audience. |
 | `openbaoTools.image` | `quay.io/openbao/openbao:2.7.1` | The bao CLI, for the bootstrap Job and the CA fetch. |
-| `database.host` / `port` / `params` | `""` / `3306` / `parseTime=true&charset=utf8mb4&loc=UTC` | PXC. Empty host with `pxc.enabled`: its HAProxy Service. |
+| `database.host` / `port` / `params` | `""` / `3306` / `parseTime=true&charset=utf8mb4&loc=UTC` | PXC. Empty host with `pxc.enabled`: its HAProxy Service. `params` must keep `loc=UTC` (or no `loc`): farmer and saasapi refuse any other. |
 | `database.farmer.*` / `database.saasapi.*` | `farmer`/`farmer_svc`, `saas`/`saas_svc` | Schemas and users. |
 | `database.existingSecret` | `""` | Both DSNs (`existingSecretKeys`). Required without `pxc.enabled`. |
 | `database.migrate.image.*` | `ghcr.io/yogzblr/imas-migrate`, tag `appVersion` | `cmd/migrate`. Keep it at farmer's and saasapi's version. |

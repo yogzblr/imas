@@ -37,6 +37,9 @@ func usePKIDB(t *testing.T) {
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 }
 
 // newSealedFacts starts the mock OpenBao. pki's store must be set

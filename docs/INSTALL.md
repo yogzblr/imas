@@ -72,7 +72,7 @@ The core needs these before farmer can enroll a single sprout:
 
 | Service | Used by | Required? |
 |---|---|---|
-| **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
+| **PXC** (Percona XtraDB Cluster / MySQL 8) with a `farmer` and a `saas` schema | farmer (`IMAS_PXC_DSN`), saasapi (`SAASAPI_DSN`) | farmer exits at startup without it. Both DSNs must set `loc=UTC` (or no `loc`); farmer and saasapi refuse any other. The grants are design doc §5.1; see [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "PXC". |
 | **OpenBao** | farmer: PKI (API certificate), Transit `imas-gateway-jwt` (gateway JWTs), KV v2 `secret/imas/tenant-x25519/tenants/<tenant>` (one payload-encryption keypair per tenant, generated fresh; nothing is read at `secret/imas/tenant-x25519` itself) | farmer starts without the Transit key, but `POST /v1/enroll` fails closed until it is configured. Without OpenBao PKI you must place farmer's certificate and key yourself. |
 | **Valkey** | farmer (heartbeats, enrollment replay cache), saasapi (rate limits, `connected`) | `/v1/enroll` and `/v1/refresh` fail closed without it. Give farmer and saasapi the same address list. Both authenticate with a password (a file from Secret `imas-valkey-auth`, generated into OpenBao by the core chart's bootstrap Job), can use TLS (`valkey.tls.*`, expected for a production Valkey), and warn if Valkey may evict keys: run it with `maxmemory-policy noeviction`. See [`deploy/helm/farmer/README.md`](../deploy/helm/farmer/README.md), "Valkey". |
 | **S3-compatible object storage** | farmer: recipes and job logs, in two different buckets; saasapi: tenant recipe uploads, with its own credential | recipe and job requests fail until it's configured. The Helm chart opens farmer's egress to `objectStore.endpoint`'s port by itself. For Azure Blob, the core chart can run Versity Gateway in front of it (`versity.enabled`), which then is the S3 endpoint and creates the buckets and their users. |
@@ -182,7 +182,7 @@ farmerinterface: 0.0.0.0              # bind address only
 farmerapiport: 5405
 farmerbusurl: tls://bus.example.internal:5406   # where farmer dials farmerbus
 farmerorganization: <your org>         # must match the bus's
-pxcdsn: farmer_svc:<pw>@tcp(pxc:3306)/farmer?parseTime=true
+pxcdsn: farmer_svc:<pw>@tcp(pxc:3306)/farmer?parseTime=true&loc=UTC   # loc must be UTC or absent
 valkeyaddrs: valkey:6379
 s3endpoint: s3.example.internal
 s3bucket: imas-recipes

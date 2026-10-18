@@ -59,12 +59,19 @@ var pushAllMu sync.Mutex
 // Account. cmd/farmer runs it whenever its SYS connection connects or
 // reconnects.
 //
-// The bus no longer mints any Account JWT for itself (see busauth.go), so
-// a bus that lost its volume, or a whole cluster started fresh, learns the
-// Accounts only from core; until now core pushed an Account only when its
-// claims changed, so an unchanged tenant would never have reached it. A
-// new node joining an existing cluster gets them from its peers instead,
-// through the fence's pull.
+// The bus mints no Account JWT (see busauth.go): every node's account
+// loader loads the Accounts from the accounts bucket at start and on each
+// change, and a clustered node also merges its peers' through the fence's
+// pull. This push gets them to the nodes sooner, and repairs a node whose
+// loader is behind.
+//
+// Before a tenant's Account is pushed it is re-synced from the database
+// (syncNatsAuth for the legacy tenant, syncTenantSprouts for the others;
+// security review 2026-10, I9): after a restore from an older backup, of
+// the accounts bucket or of the database's view of it, the JWT core
+// starts from can predate a revocation the database records, and pushing
+// it as it is would re-admit the revoked sprout. A sync that fails (the
+// database unreadable) fails that tenant's push; nothing older is pushed.
 //
 // Live tenants go through pushLiveTenantAccount, so a deprovision racing
 // this push (on this replica or another) still ends with the lock-out
@@ -136,8 +143,8 @@ func PushAllAccounts() (int, error) {
 		}
 	}
 
-	// SYS first: the bus may hold only its epoch-dated bootstrap, without
-	// core's revocations (rotated-out SaaS API keys).
+	// SYS first: a node may hold only the trust's bootstrap SYS Account
+	// JWT, without core's revocations (rotated-out SaaS API keys).
 	if err := pushCurrent("SYS account", mat.sysAccountJWT, mat.sysAccountPub); err != nil {
 		errs = append(errs, fmt.Errorf("SYS account: %w", err))
 	} else {
@@ -145,6 +152,9 @@ func PushAllAccounts() (int, error) {
 	}
 	legacy := currentTenantID()
 	leased(legacy, "legacy tenant "+legacy, func() (bool, error) {
+		if _, err := syncNatsAuth(mat); err != nil {
+			return false, fmt.Errorf("re-syncing its revocations from the database before the push: %w", err)
+		}
 		return true, pushCurrent("legacy tenant "+legacy, mat.tenantJWT, mat.tenantPub)
 	})
 
@@ -160,6 +170,9 @@ func PushAllAccounts() (int, error) {
 			tam, err := loadTenantAccountMaterial(id)
 			if err != nil {
 				return false, err
+			}
+			if _, err := syncTenantSprouts(mat, tam, id); err != nil {
+				return false, fmt.Errorf("re-syncing its revocations from the database before the push: %w", err)
 			}
 			return true, pushUntilCurrent("tenant "+id, tam.jwt,
 				func(j string) error { return pushLiveTenantAccount(mat, id, j) },

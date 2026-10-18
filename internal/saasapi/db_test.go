@@ -79,9 +79,9 @@ func TestAssetLinkModelIndexes(t *testing.T) {
 	}
 }
 
-// OpenDB refuses a DSN without parseTime=true before connecting to
-// anything, and never echoes the DSN (it holds the password). A loc other
-// than UTC is accepted with a warning.
+// OpenDB refuses a DSN without parseTime=true, or with a loc other than
+// UTC (security review 2026-10, I1), before connecting to anything, and
+// never echoes the DSN (it holds the password).
 func TestCheckDSN(t *testing.T) {
 	const secret = "s3cr3t-pw"
 	for _, dsn := range []string{
@@ -103,22 +103,21 @@ func TestCheckDSN(t *testing.T) {
 		t.Errorf("missing parseTime: %v, want an error naming parseTime=true", err)
 	}
 
-	for dsn, warn := range map[string]bool{
-		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true":                               false,
-		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&charset=utf8mb4&loc=UTC":       false,
-		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&loc=Europe%2FLondon":           true,
-		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&loc=Local&charset=utf8mb4&x=1": true,
+	for dsn, ok := range map[string]bool{
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true":                               true,
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&charset=utf8mb4&loc=UTC":       true,
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&loc=Europe%2FLondon":           false,
+		"saas_svc:" + secret + "@tcp(pxc:3306)/saas?parseTime=true&loc=Local&charset=utf8mb4&x=1": false,
 	} {
-		var err error
-		logged := captureStderr(t, func() { err = checkDSN(dsn) })
-		if err != nil {
+		err := checkDSN(dsn)
+		if ok && err != nil {
 			t.Errorf("checkDSN(%q) = %v", dsn, err)
 		}
-		if got := strings.Contains(logged, "SAASAPI_DSN sets loc="); got != warn {
-			t.Errorf("checkDSN(%q) warned %t, want %t (log %q)", dsn, got, warn, logged)
+		if !ok && (err == nil || !strings.Contains(err.Error(), "SAASAPI_DSN") || !strings.Contains(err.Error(), "loc=UTC")) {
+			t.Errorf("checkDSN(%q) = %v, want an error naming SAASAPI_DSN and loc=UTC", dsn, err)
 		}
-		if strings.Contains(logged, secret) {
-			t.Errorf("checkDSN(%q) logged the password", dsn)
+		if err != nil && strings.Contains(err.Error(), secret) {
+			t.Errorf("checkDSN(%q) error carries the password", dsn)
 		}
 	}
 }

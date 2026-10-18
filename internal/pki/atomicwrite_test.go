@@ -1,6 +1,10 @@
 package pki
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -170,5 +174,50 @@ func TestTenantAccountJWTRewriteNeverDropsRevocations(t *testing.T) {
 	wg.Wait()
 	if n := lost.Load(); n > 0 {
 		t.Fatalf("tenant %q's Account JWT came back without the denied sprout's revocation %d times (re-minted from a partly written account.jwt)", tenantID, n)
+	}
+}
+
+// Security review 2026-10, I12: writeFileAtomic and writeFileOnce fsync
+// the directory after the rename or link, so the new entry is durable.
+func TestAtomicWritesSyncTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	var synced []string
+	orig := syncDir
+	syncDir = func(d string) error {
+		synced = append(synced, d)
+		return orig(d)
+	}
+	t.Cleanup(func() { syncDir = orig })
+
+	path := filepath.Join(dir, "user.jwt")
+	for _, write := range []func(string, []byte, os.FileMode) error{writeFileAtomic, writeFileOnce} {
+		synced = nil
+		_ = os.Remove(path)
+		if err := write(path, []byte("jwt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if len(synced) != 1 || synced[0] != dir {
+			t.Errorf("directory syncs %v, want one of %s", synced, dir)
+		}
+		if b, err := os.ReadFile(path); err != nil || string(b) != "jwt" {
+			t.Errorf("written file: %q, %v", b, err)
+		}
+	}
+	// A credential directory that does not exist yet: each new
+	// directory's entry is synced in its parent, then the file's.
+	synced = nil
+	nested := filepath.Join(dir, "a", "b", "user.jwt")
+	if err := writeFileAtomic(nested, []byte("jwt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{dir, filepath.Join(dir, "a"), filepath.Join(dir, "a", "b")}
+	slices.Sort(synced)
+	if !slices.Equal(synced, want) {
+		t.Errorf("directory syncs %v, want %v", synced, want)
+	}
+	if runtime.GOOS != "windows" {
+		if err := orig(filepath.Join(dir, "missing")); err == nil {
+			t.Error("syncing a directory that does not exist succeeded")
+		}
 	}
 }

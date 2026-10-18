@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/yogzblr/imas/internal/accountloader"
+	"github.com/yogzblr/imas/internal/accountrank/accountranktest"
 	"github.com/yogzblr/imas/internal/objectstore"
 	"github.com/yogzblr/imas/internal/objectstore/objectstoretest"
 )
@@ -823,5 +824,37 @@ func TestPushAccountUpdateSupersededJWT(t *testing.T) {
 	}
 	if n := e.seq.count("push "); n != 0 {
 		t.Fatalf("an older JWT was pushed: %v", e.seq.all())
+	}
+}
+
+// Security review 2026-10, L16: the accounts bucket reader refuses an
+// object issued in the year 3000, so it neither blocks a current publish
+// nor is taken as the account's JWT, and ReconcileAll never writes a
+// future-dated copy this farmer holds over the bucket's.
+func TestFutureDatedAccountJWTNeverWins(t *testing.T) {
+	e := newPubEnv(t)
+	planted, held := newAccount(t), newAccount(t)
+	e.seed(t, planted, e.tr.signAt(t, planted, accountranktest.Year3000, false))
+	if got, err := e.p.Current(context.Background(), planted); err != nil || got != "" {
+		t.Fatalf("Current over a year-3000 object = %q, %v; want none", got, err)
+	}
+	current := e.tr.signAt(t, planted, time.Now().Unix(), false)
+	if err := e.p.Publish(context.Background(), planted, current); err != nil {
+		t.Fatalf("publishing a current JWT over a year-3000 object: %v", err)
+	}
+	if e.object(t, planted) != current {
+		t.Error("the year-3000 object beat a current publish")
+	}
+
+	bucketCopy := e.tr.signAt(t, held, 100, false)
+	e.seed(t, held, bucketCopy)
+	e.p.local = func() ([]string, error) {
+		return []string{e.tr.signAt(t, held, accountranktest.Year3000, false)}, nil
+	}
+	if err := e.p.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if e.object(t, held) != bucketCopy {
+		t.Error("ReconcileAll wrote a year-3000 JWT over the bucket's copy")
 	}
 }

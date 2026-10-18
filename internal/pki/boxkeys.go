@@ -227,6 +227,18 @@ func isDeadlockError(err error) bool {
 	return errors.As(err, &me) && me.Number == mysqlDeadlock
 }
 
+// mysqlNoSuchTable is the driver's error number for a table that does
+// not exist (ER_NO_SUCH_TABLE).
+const mysqlNoSuchTable = 1146
+
+// isMissingTableError reports whether err is, or wraps, the driver's
+// error number 1146: the table does not exist. Only that number: a
+// permission, connection or any other error is not taken for it.
+func isMissingTableError(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == mysqlNoSuchTable
+}
+
 // revokeSproutBoxKeysTx revokes every box key of sproutID in tenantID
 // inside tx, active and grace alike: DeleteNKey and AcceptNKey's replace
 // path (retireSproutTx). The rows are kept, revoked, so a key that was

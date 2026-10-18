@@ -388,11 +388,17 @@ func TestEnsureSaaSAPICredential_NoStateNoRevocation(t *testing.T) {
 	}
 }
 
-// TestEnsureSaaSAPICredential_StateReadErrorStillMints: a failed state
-// read is logged; the credential is still minted.
+// TestEnsureSaaSAPICredential_StateReadErrorStillMints: with the SYS
+// Account JWT held, a failed state read is logged and the credential is
+// still minted; the revocations on the held JWT stay. (Without a held or
+// bucket SYS Account JWT the same failure fails closed:
+// TestLostSysAccountJWTRebuiltFromDatabase.)
 func TestEnsureSaaSAPICredential_StateReadErrorStillMints(t *testing.T) {
 	setupTestPKI(t)
 	clearExternalSeedEnv(t)
+	if _, err := ensurePlatformAuth(); err != nil {
+		t.Fatal(err)
+	}
 	orig := readSaaSAPICredentialState
 	readSaaSAPICredentialState = func(context.Context) (*SaaSAPICredentialState, error) {
 		return nil, errors.New("boom")

@@ -25,8 +25,9 @@
 // the owner are bound arguments.
 //
 // Times are on the caller's clock (New's now), stored UTC at lease_until's
-// millisecond precision. As with the outbox lease, replica clocks must
-// agree to well within the TTL.
+// millisecond precision; farmer and saasapi refuse a DSN whose loc is not
+// UTC (internal/mysqldsn), so every replica reads them alike. As with the
+// outbox lease, replica clocks must agree to well within the TTL.
 package lease
 
 import (

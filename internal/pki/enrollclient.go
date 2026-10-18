@@ -85,6 +85,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1181,24 +1182,20 @@ func RunGatewayJWTRefresher(ctx context.Context, sproutID string, retryDelay tim
 }
 
 // writeFileAtomic writes data to path via a temp file in the same
-// directory and a rename, so a crash never leaves a truncated credential
-// behind, and a concurrent reader sees the old contents or the new, never
-// a partial file.
+// directory and a rename, then fsyncs the directory (syncDir), so a crash
+// or power loss never leaves a truncated credential behind or loses the
+// new one, and a concurrent reader sees the old contents or the new,
+// never a partial file.
 //
-// FLAG FOR SECURITY REVIEW. Core's trust material goes through it too:
-// every Operator, Account and User JWT and every seed jwtauth.go,
-// jwtusers.go, tenant.go and saasapi_user.go persist. With a plain
-// os.WriteFile (truncate, then write) a read could land in between, and
-// the readers that bootstrap that material (ensureNatsAuth,
-// ensureTenantAccountMaterial) treat a JWT that doesn't decode as missing
-// and mint a fresh one: an Account JWT without the revocations it
-// carried, written back and pushed to the bus as the tenant's claims.
+// FLAG FOR SECURITY REVIEW. It writes the sprout's credentials and pins:
+// its User and gateway JWTs, its box keys and the tenant X25519 key it
+// pinned (enrollclient.go, sproutbox.go). Farmer writes no file (E3).
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if path == "" {
 		return errors.New("pki: no path configured")
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAllDurable(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
@@ -1225,7 +1222,57 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+// mkdirAllDurable is os.MkdirAll(dir, 0o755) that also fsyncs the parent
+// of every directory it creates, so a new credential directory's own
+// entry survives a power loss along with the file written into it
+// (syncDir covers only the entries inside dir).
+func mkdirAllDurable(dir string) error {
+	var created []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Lstat(d); !os.IsNotExist(err) {
+			break
+		}
+		created = append(created, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, d := range created {
+		if err := syncDir(filepath.Dir(d)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncDir fsyncs dir, so a rename or link into it survives a power loss
+// (security review 2026-10, I12): without it the new directory entry can
+// be lost even though the file's data was synced. Windows has no
+// directory fsync (FlushFileBuffers refuses a directory handle) and NTFS
+// journals the rename itself, so there it does nothing. A variable so a
+// test can see when it runs.
+var syncDir = func(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return fmt.Errorf("pki: syncing directory %s: %w", dir, err)
+	}
+	return d.Close()
 }
 
 // writeFileOnce is writeFileAtomic that fails with an os.IsExist error
@@ -1235,7 +1282,7 @@ func writeFileOnce(path string, data []byte, perm os.FileMode) error {
 		return errors.New("pki: no path configured")
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := mkdirAllDurable(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
@@ -1260,7 +1307,10 @@ func writeFileOnce(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	// Link, unlike Rename, refuses to replace an existing path.
-	return os.Link(tmpPath, path)
+	if err := os.Link(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
 }
 
 // checkRefreshTenant checks tenantID, the tenant a /v1/refresh response

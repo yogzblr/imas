@@ -200,7 +200,9 @@ database:
   # otherwise.
   host: ""
   port: 3306
-  # go-sql-driver DSN parameters, shared by both DSNs.
+  # go-sql-driver DSN parameters, shared by both DSNs. loc must be UTC
+  # (or absent, the driver's default): farmer and saasapi refuse to start
+  # with any other, and so does this chart.
   params: "parseTime=true&charset=utf8mb4&loc=UTC"
   farmer:
     name: farmer

@@ -86,9 +86,8 @@ var allowedFileWrites = []string{
 	// The atomic and write-once helpers (packageFileWriteCalls): the
 	// temp file is made next to the target. Their callers below are the
 	// sprout's and the CLI's.
-	"internal/pki/enrollclient.go:writeFileAtomic:os.MkdirAll#1",
+	"internal/pki/enrollclient.go:mkdirAllDurable:os.MkdirAll#1",
 	"internal/pki/enrollclient.go:writeFileAtomic:os.CreateTemp#1",
-	"internal/pki/enrollclient.go:writeFileOnce:os.MkdirAll#1",
 	"internal/pki/enrollclient.go:writeFileOnce:os.CreateTemp#1",
 	// The sprout's PKI dir and enrolment state: sprout only.
 	"internal/pki/busconnect.go:persistBusURLs:pki.writeFileAtomic#1",

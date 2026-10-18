@@ -205,7 +205,8 @@ type Config struct {
 	// e.g. "saas_svc:pass@tcp(pxc-cluster:3306)/saas?parseTime=true&loc=UTC".
 	// parseTime=true is required: OpenDB refuses a DSN without it, since
 	// every DATETIME column would otherwise fail to scan into time.Time.
-	// loc should be UTC (the driver's default); OpenDB warns otherwise.
+	// loc must be UTC (or absent, the driver's default); OpenDB refuses
+	// any other.
 	DSN string
 
 	ReadTimeout  time.Duration

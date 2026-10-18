@@ -63,6 +63,9 @@ func setupTenantIsolationPKI(t *testing.T) {
 	}
 	pki.SetDB(gdb)
 	t.Cleanup(func() { pki.SetDB(nil) })
+	// No saas schema in sqlite: no SaaS API credential recorded
+	// (pki.UseSaaSAPICredentialState).
+	t.Cleanup(pki.UseSaaSAPICredentialState(nil))
 	// Sprout User JWTs live in a bucket (pki.MintOrReuseUserJWT).
 	pki.SetSproutJWTStore(objectstoretest.NewStore(t))
 	t.Cleanup(func() { pki.SetSproutJWTStore(nil) })
