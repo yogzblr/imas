@@ -23,6 +23,9 @@
 //   - tenants offboarded for SAASAPI_TENANT_PURGE_AFTER: a purge job is
 //     started (S6), at most one pending per tenant and a new one at most
 //     daily after a failure. See sweepTenantPurges (tenant_purge.go).
+//   - terminal rows older than SAASAPI_TERMINAL_ROW_RETENTION: deleted,
+//     batched and paced, every hour (U4). Nothing is sent. See
+//     retention.go.
 //
 // Every item and job is still claimed by the same conditional UPDATE the
 // original dispatch uses, so a sweeper and a live dispatcher, or two
@@ -200,6 +203,14 @@ func StartOutboxSweeper(ctx context.Context) (wait func()) {
 	sw := &sweeper{d: db, nc: bus, readers: rolloutReaders{jobs: jobStatusReader, facts: sproutFactsReader}, s: outboxSettings}
 	log.Infof("saasapi: outbox sweeper running every %s on %s (lease TTL %s, max %d attempts)",
 		sw.s.Interval, replicaName, sw.s.LeaseTTL, sw.s.MaxAttempts)
+	// Terminal rows are removed on a loop of their own: a run paces its
+	// deletes and can take seconds, which must not delay a re-dispatch.
+	// It needs no bus.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sw.runPruneLoop(ctx)
+	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

@@ -5,6 +5,7 @@ import (
 
 	"github.com/yogzblr/imas/internal/natsbootstrap"
 	"github.com/yogzblr/imas/internal/pki"
+	"github.com/yogzblr/imas/internal/retention"
 	"github.com/yogzblr/imas/internal/sproutrelease"
 	"github.com/yogzblr/imas/internal/versitysetup"
 )
@@ -27,6 +28,10 @@ import (
 //     Gateway (internal/versitysetup): the gateway pods' init container
 //     that writes its IAM file, and the createBuckets hook Job. FLAG FOR
 //     SECURITY REVIEW. They read only their flags and mounted files.
+//   - log-retention: the chart's log retention CronJob
+//     (logShipping.retention, internal/retention): deletes the log bucket's
+//     objects older than the retention. It reads only its flags and its
+//     mounted credential.
 func runPreConfigSubcommand(args []string, stdout, stderr io.Writer) (code int, ok bool) {
 	if len(args) == 0 {
 		return 0, false
@@ -42,6 +47,8 @@ func runPreConfigSubcommand(args []string, stdout, stderr io.Writer) (code int, 
 		return versitysetup.RunIAM(args[1:], stderr), true
 	case versitysetup.BucketsCommand:
 		return versitysetup.RunBuckets(args[1:], stderr), true
+	case retention.LogRetentionCommand:
+		return retention.RunLogRetention(args[1:], stderr), true
 	}
 	return 0, false
 }

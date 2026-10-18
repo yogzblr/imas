@@ -243,3 +243,66 @@ setting). For each item:
 - Tests render the chart with each retention value set and unset; the
   environment variable reaches the pod; a lifecycle or sweep test proves an
   expired object or row is removed and a younger one is kept.
+
+Brief corrections (U4, as built):
+
+- The inventory is `docs/retention.md` (what, where, default, setting),
+  with the chart's values in `deploy/helm/farmer/README.md`, "Data
+  retention". Settings: `farmer.retention.jobLogTTL`
+  (`IMAS_JOB_LOG_TTL`), `farmer.retention.recipeAuditDays`
+  (`IMAS_RECIPE_AUDIT_RETENTION_DAYS`), `farmer.retention.boxKeyGrace`
+  (`IMAS_BOX_KEY_GRACE_DURATION`), `saasapi.retention.terminalRows`
+  (`SAASAPI_TERMINAL_ROW_RETENTION`), `logShipping.retention.days`, and
+  the unchanged `saasapi.tenantPurge.after`.
+- Service and audit logs: nothing shipped logs on main (P25's Fluent Bit
+  half was open). U4 builds it in the farmer chart, `logShipping`, off by
+  default like `versity`: Fluent Bit tails the namespace's container logs
+  and writes them under `<prefix><YYYY>/<MM>/<DD>/` of `logShipping.bucket`
+  on the object store farmer uses. Retention is not a bucket lifecycle
+  rule: Versity Gateway v1.8.0, the production object store's front
+  (D18), answers `PutBucketLifecycleConfiguration` with `NotImplemented`
+  (RustFS accepts it), and the code speaks S3 only (D15). It is a daily
+  CronJob, `farmer log-retention` (`internal/retention`), that deletes the
+  days older than the retention, with a credential of its own that may
+  list and delete under the prefix and cannot read a log; the shipper's
+  may only put there. The nats chart is unchanged: the bus keeps no data
+  (resolver on an `emptyDir`, logs on stdout, no JetStream), and the DMZ's
+  only path into the core object store is a read-only credential (D22),
+  so the DMZ cluster's logs stay with its own collector (D16, "or the
+  cluster's own"). The UAT hubs do not turn shipping on: their clusters
+  are destroyed after each run.
+- Recipe audit objects: an in-process sweep in farmer, daily under a
+  job lease, by the day in the key. A lifecycle rule could not match
+  `tenants/<id>/recipe-audit/` (the tenant comes before the date), and
+  the gateway has none. Farmer's recipe bucket credential already has
+  delete there (S6); saasapi's still cannot read or delete a record.
+- "`0` or empty means the documented default": except where the brief
+  itself says otherwise (recipe audit, `0` keeps for ever). Farmer's
+  `joblogttl` used to read `0` as "never expire", and a value that did
+  not parse became `0` silently; both are now the default (720h), and a
+  bad value stops farmer. `boxkeygraceduration` had no bounds; it is now
+  10m (twice the sealed messages' ±5 minute window) to 720h.
+- "Finished jobs" in the SaaS database are `provisioning_jobs`. S6's
+  decision 1 keeps them as the tombstone's record, so only the jobs of a
+  pending, active or failed tenant are removed; an offboarding,
+  offboarded or purged tenant's stay. "Expired registration keys and join
+  tokens" are one table, `saas.enrollment_keys`; its rows go with the
+  same setting, 90 days after their expiry.
+- "By the existing outbox sweeper": a loop of its own inside it
+  (`StartOutboxSweeper`), hourly, because the prune paces its deletes
+  and needs no bus, and must not delay a re-dispatch.
+- Staged recipe copies are one object per sprout, rewritten by every
+  cook and deleted with the sprout; the sprout refuses one older than
+  `stagedrecipemaxage` (1h). Not history, so no time setting.
+- Sprout box-key history: the setting that decides how long a previous
+  key is kept usable is `boxkeygraceduration`, now a chart value. Revoked
+  rows are kept on purpose, like revoked NKeys: they are what stops a
+  revoked key from being accepted again, so they get no deletion
+  setting.
+- Heartbeat and replay keys in Valkey: their TTLs are protocol windows,
+  not retention (the replay claims must cover the ±5 minute window, the
+  presence TTL matches the heartbeat interval compiled into sprouts), so
+  they stay constants, listed with the reason in `docs/retention.md`.
+- Not in the brief's list: superseded sprout JWT objects were kept until
+  the tenant purge. A re-mint now deletes the object it replaced
+  (`internal/pki/jwtusers.go`), so the bucket holds one JWT per sprout.

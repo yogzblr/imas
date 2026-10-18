@@ -518,6 +518,11 @@ writer (accountStore.credentialsSecret) and the DMZ bus's accounts reader
 {{- $rd := .Values.versity.accountsReader -}}
 {{- $_ := set $u "accounts-reader" (dict "secret" $rd.credentialsSecret "id" $rd.accessKeyIdKey "key" $rd.secretAccessKeyKey "value" "versity.accountsReader.credentialsSecret") -}}
 {{- end -}}
+{{- if and (include "imas-farmer.s3UsesVersity" .) (include "imas-farmer.logShipping.ownOutput" .) -}}
+{{- $l := .Values.logShipping -}}
+{{- $_ := set $u "logs-writer" (dict "secret" $l.credentialsSecret "id" $l.accessKeyIdKey "key" $l.secretAccessKeyKey "value" "logShipping.credentialsSecret") -}}
+{{- $_ := set $u "logs-retention" (dict "secret" $l.retention.credentialsSecret "id" $l.retention.accessKeyIdKey "key" $l.retention.secretAccessKeyKey "value" "logShipping.retention.credentialsSecret") -}}
+{{- end -}}
 {{- toYaml $u -}}
 {{- end }}
 
@@ -590,6 +595,21 @@ files/objectstore-policies/saasapi-recipes.json, the same reviewed policy.
 {{- $buckets = append $buckets (dict "name" $os.sproutJWTBucket "statements" (list
   (dict "sid" "FarmerBucket" "user" "farmer" "actions" $listS "resources" (list (printf "arn:aws:s3:::%s" $os.sproutJWTBucket)))
   (dict "sid" "FarmerSproutJWTs" "user" "farmer" "actions" $rw "resources" (list (printf "arn:aws:s3:::%s/*" $os.sproutJWTBucket))))) -}}
+{{- if include "imas-farmer.logShipping.ownOutput" . -}}
+{{- $l := .Values.logShipping -}}
+{{- /* The shipper only adds objects; the retention CronJob only lists the
+bucket and deletes under the prefix. Neither reads a log. The policies are
+files/objectstore-policies/logs-*.json, the ones a store other than the
+gateway is given. */ -}}
+{{- $logs := list -}}
+{{- range $user, $file := dict "logs-writer" "logs-writer.json" "logs-retention" "logs-retention.json" -}}
+{{- $pol := $.Files.Get (printf "files/objectstore-policies/%s" $file) | replace "LOG_BUCKET" (toString $l.bucket) | replace "LOG_PREFIX" (toString $l.prefix) | fromJson -}}
+{{- range $pol.Statement -}}
+{{- $logs = append $logs (dict "sid" (printf "%s%s" (ternary "LogsWriter" "LogsRetention" (eq $user "logs-writer")) .Sid) "user" $user "actions" .Action "resources" .Resource) -}}
+{{- end -}}
+{{- end -}}
+{{- $buckets = append $buckets (dict "name" $l.bucket "statements" $logs) -}}
+{{- end -}}
 {{- end -}}
 {{- if include "imas-farmer.accountsUseVersity" . -}}
 {{- $b := .Values.accountStore.bucket -}}
@@ -872,6 +892,7 @@ Render-time validation. Everything here fails the render with an
 explanation rather than deploying something that silently can't work.
 */}}
 {{- define "imas-farmer.validate" -}}
+{{- include "imas-farmer.retention.validate" . -}}
 {{- if hasKey .Values "postgresql" -}}
 {{- fail "postgresql.* is not a value of this chart: imas's farmer and saas schemas live in one PXC (Percona XtraDB Cluster), not Postgres (docs/design/imas-machine-manager-api-design.md). The bundled database toggle is pxc.enabled; an external one is database.host/existingSecret." -}}
 {{- end -}}

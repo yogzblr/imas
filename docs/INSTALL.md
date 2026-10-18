@@ -561,6 +561,11 @@ stops automatic purges; the operator route still works. Details:
 [`api/saasapi.md`](api/saasapi.md#tenants), and the OpenBao side in
 [`OPENBAO-RUNBOOK.md`](OPENBAO-RUNBOOK.md) section 5.3.
 
+How long everything else is kept while a tenant exists (job records 30
+days, recipe audit records 365 days, finished actions, provisioning jobs
+and expired enrollment keys 90 days, shipped logs 30 days) and the Helm
+value that changes each is [`retention.md`](retention.md).
+
 ## Update sprouts
 
 A sprout updates itself from the package repository it was installed from,

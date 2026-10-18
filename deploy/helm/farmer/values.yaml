@@ -332,6 +332,10 @@ accountStore:
 #                    the accounts bucket
 #   accounts-reader  versity.accountsReader.credentialsSecret: get, list
 #                    on the accounts bucket (the DMZ bus, design D22)
+#   logs-writer      logShipping.credentialsSecret (with logShipping):
+#                    put under logShipping.prefix of the log bucket
+#   logs-retention   logShipping.retention.credentialsSecret: list the
+#                    log bucket, delete under logShipping.prefix
 # Every user is role "user": it reaches only what its buckets' policies
 # grant. The createBuckets hook Job creates the buckets (Azure Blob
 # containers) with the root credential and writes those policies.
@@ -383,8 +387,9 @@ versity:
     accessKeyIdKey: access-key-id
     secretAccessKeyKey: secret-access-key
   # The hook Job (`farmer versity-buckets`, post-install/post-upgrade)
-  # that creates objectStore.bucket, .jobBucket, .sproutJWTBucket and
-  # accountStore.bucket on the gateway and writes their bucket policies.
+  # that creates objectStore.bucket, .jobBucket, .sproutJWTBucket,
+  # accountStore.bucket and logShipping.bucket (with logShipping) on the
+  # gateway and writes their bucket policies.
   # Every run replaces the policies with the chart's, so a removed grant
   # goes too. Bucket names must be valid Azure Blob container names.
   createBuckets:
@@ -450,6 +455,115 @@ versity:
     # on 443 only. Narrow it to the storage account's addresses (or a
     # private endpoint's) as ipBlock peers.
     azureEgress: []
+
+# ---------------------------------------------------------------------------
+# Log shipping (design D16; README.md, "Log shipping and retention"):
+# Fluent Bit (Apache-2.0, DEPENDENCIES.md) on every node tails the
+# container logs of this release's namespace (farmer's, saasapi's and
+# every other pod's: service logs and the audit log, all JSON on stdout)
+# and writes them, gzipped, to `bucket` on the object store farmer uses
+# (objectStore.endpoint, or the Versity Gateway with versity.enabled),
+# under <prefix><YYYY>/<MM>/<DD>/<pod>-<time>-<uuid>.gz. Off by default.
+#
+# Retention: the log retention CronJob (`farmer log-retention`) deletes
+# the days older than retention.days (default 30), with a credential of
+# its own that may list and delete there and nothing else. Not a bucket
+# lifecycle rule: Versity Gateway v1.8.0 does not implement one.
+#
+# With versity.enabled the createBuckets Job also creates `bucket`, with
+# a policy for two users: logs-writer (credentialsSecret: PutObject under
+# prefix) and logs-retention (retention.credentialsSecret: list the
+# bucket, DeleteObject under prefix). Elsewhere give the two credentials
+# those grants on the store (files/objectstore-policies/logs-*.json).
+#
+# existingConfigMap replaces the chart's Fluent Bit configuration (key
+# fluent-bit.yaml), to send the logs elsewhere without a chart change
+# (D16); retention is then the destination's own, and the CronJob is not
+# rendered.
+# FLAG FOR SECURITY REVIEW: the shipper reads every container log of the
+# namespace on its node (a hostPath of /var/log, read-only) and runs as
+# root to do so, with no capabilities.
+# ---------------------------------------------------------------------------
+logShipping:
+  enabled: false
+  image:
+    repository: docker.io/fluent/fluent-bit
+    tag: "4.2.0"
+    digest: "sha256:aff743e1a5e61d036d10a4472d67cdd7a6b408c92218eb86e3f301e2bac7817a"
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  # The log bucket; must differ from every other bucket of the chart, and
+  # be a valid Azure Blob container name with versity.enabled.
+  bucket: imas-logs
+  # The key root of every log object, ending in "/".
+  prefix: logs/
+  # The region the S3 output signs for (versity.region with the gateway).
+  region: us-east-1
+  # Existing Secret with the writer's access key pair (Fluent Bit's
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY): PutObject under prefix
+  # only. Required when enabled; must differ from every other component's.
+  credentialsSecret: ""
+  accessKeyIdKey: access-key-id
+  secretAccessKeyKey: secret-access-key
+  # Host log files tailed. Empty: /var/log/containers/*_<namespace>_*.log,
+  # this release's namespace.
+  paths: []
+  # An object is written when this much is buffered, or uploadTimeout
+  # after its first record, whichever is first.
+  totalFileSize: 50M
+  uploadTimeout: 10m
+  # A ConfigMap of your own with key fluent-bit.yaml, used instead of the
+  # chart's. Empty: the chart's.
+  existingConfigMap: ""
+  retention:
+    # Days a log object is kept, by the day in its key: a whole number,
+    # 1..3650; 0 or null is the default, 30.
+    days: 30
+    # The CronJob's schedule (UTC unless timeZone is set).
+    schedule: "17 3 * * *"
+    timeZone: ""
+    # Existing Secret with the retention credential: ListBucket on the
+    # bucket and DeleteObject under prefix, nothing else. Required when
+    # enabled; must differ from credentialsSecret.
+    credentialsSecret: ""
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+    serviceAccountName: imas-log-retention
+    timeout: 30m
+    backoffLimit: 2
+    activeDeadlineSeconds: 2400
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  serviceAccountName: imas-log-shipper
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  # Root, to read the node's container logs (root-owned, 0640); no
+  # capabilities and a read-only root filesystem.
+  securityContext:
+    runAsUser: 0
+    runAsNonRoot: false
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+    seccompProfile: { type: RuntimeDefault }
+  # Extra environment of the shipper, e.g. a credential an
+  # existingConfigMap's output reads.
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  # The default tolerates every taint, so every node, control plane
+  # included, ships its pods' logs.
+  tolerations:
+    - operator: Exists
+  priorityClassName: ""
+  networkPolicy:
+    # Extra egress rules of the shipper, e.g. for an existingConfigMap's
+    # destination.
+    extraEgress: []
 
 # ---------------------------------------------------------------------------
 # farmer (cmd/farmer)
@@ -523,6 +637,26 @@ farmer:
     # refresher, account push), a quoted Go duration. Empty: farmer's
     # default, 120s.
     leaseTTL: ""
+  # How long farmer keeps data (docs/retention.md, U4). Each value emits
+  # its variable; null or "" emits nothing and farmer uses the same
+  # default. A value farmer refuses (out of range, not a duration) stops
+  # it at startup with a message naming the variable.
+  retention:
+    # IMAS_JOB_LOG_TTL: a job's records and step events (the job bucket's
+    # jobs/<tenant>/<sprout>/<jid>/ objects and its job_status row) are
+    # deleted this long after the job's last activity, by the hourly job
+    # reaper. A quoted Go duration, 1h..87600h; "0" is the default, 720h.
+    jobLogTTL: "720h"
+    # IMAS_RECIPE_AUDIT_RETENTION_DAYS: days the recipe audit records
+    # (tenants/<tenant>/recipe-audit/<day>/ in objectStore.bucket) are
+    # kept; farmer's daily sweep deletes older days. A whole number,
+    # 1..3650; 0 keeps them for ever.
+    recipeAuditDays: 365
+    # IMAS_BOX_KEY_GRACE_DURATION: how long a sprout's previous box public
+    # key stays valid after the sprout rotates it (rows of
+    # pki_sprout_box_keys in state grace, revoked after it). A quoted Go
+    # duration, 10m..720h; "0" is the default, 24h.
+    boxKeyGrace: "24h"
   # Per-tenant bus connections (connected on first use). One is closed
   # once unused for idleTTL and with no sprout heartbeat for
   # heartbeatWindow; the next use dials it again. Quoted Go durations.
@@ -807,6 +941,18 @@ saasapi:
     # SAASAPI_TENANT_PURGE_AFTER: the retention delay, a Go duration.
     # Default 720h (30 days), 1h..8760h.
     after: null
+  # How long the SaaS database keeps terminal rows (internal/saasapi
+  # retention.go; docs/retention.md, U4). The outbox sweeper deletes them
+  # hourly, at most 500 rows per statement with a pause between
+  # statements, so it never locks a table.
+  retention:
+    # SAASAPI_TERMINAL_ROW_RETENTION: finished action batches and items,
+    # finished provisioning jobs of tenants that are not offboarding,
+    # offboarded or purged (those are the tombstone's record), and
+    # enrollment keys (join tokens) past their expiry, once they are this
+    # old. A Go duration, 24h..87600h; null or "" emits nothing, "0" is
+    # the default, 2160h (90 days).
+    terminalRows: "2160h"
   # The operator plane (internal/saasapi NewOperatorServer, API design
   # §2.5): sprout release registration and revoke, on its own HTTPS
   # listener and its own Service (<release>-saasapi-operator), never the

@@ -35,3 +35,10 @@ farmer:
   bootstrapAdmin:
     pubkey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     boxpub: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+# Log shipping (design D16) through the gateway: the createBuckets Job
+# creates the log bucket and its two users' policies.
+logShipping:
+  enabled: true
+  credentialsSecret: imas-logs-writer
+  retention:
+    credentialsSecret: imas-logs-retention

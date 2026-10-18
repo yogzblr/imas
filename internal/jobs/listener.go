@@ -10,8 +10,10 @@ package jobs
 // farmer-side. Jobs can be retrieved from the farmer with the imas job
 // command.
 
-// Job data expiration is configurable via the joblogttl setting on both the
-// farmer (Store.StartReaperCtx) and the sprout (StartSproutReaper).
+// Job data expiration is configurable on both the farmer
+// (Store.StartReaperCtx: IMAS_JOB_LOG_TTL, the chart's
+// farmer.retention.jobLogTTL, or config key joblogttl; default 720h) and
+// the sprout (StartSproutReaper: config key joblogttl). docs/retention.md.
 
 import (
 	"bytes"
