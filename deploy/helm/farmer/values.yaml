@@ -638,9 +638,12 @@ farmer:
     # default, 120s.
     leaseTTL: ""
   # How long farmer keeps data (docs/retention.md, U4). Each value emits
-  # its variable; null or "" emits nothing and farmer uses the same
-  # default. A value farmer refuses (out of range, not a duration) stops
-  # it at startup with a message naming the variable.
+  # its variable, which wins over the config file; null or "" emits
+  # nothing, and farmer reads its config file key (joblogttl,
+  # recipeauditretentiondays, boxkeygraceduration, settable through
+  # farmer.extraConfig) or, without one, uses the same default. A value
+  # farmer refuses (out of range, not a duration) stops it at startup
+  # with a message naming the variable or key.
   retention:
     # IMAS_JOB_LOG_TTL: a job's records and step events (the job bucket's
     # jobs/<tenant>/<sprout>/<jid>/ objects and its job_status row) are
