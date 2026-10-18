@@ -85,7 +85,10 @@ jobs:
           [ "${#msis[@]}" -eq 1 ] || { echo "::error::expected exactly one MSI in dist, found ${#msis[@]}: ${msis[*]}"; exit 1; }
           name="$(basename "${msis[0]}")"
           line="$(grep -E "^[0-9a-f]{64}  ${name//./\\.}\$" dist/checksums.txt || true)"
-          [ -n "$line" ] && [ "$(wc -l <<<"$line")" -eq 1 ] || { echo "::error::checksums.txt does not list $name exactly once"; exit 1; }
+          if [ -z "$line" ] || [ "$(wc -l <<<"$line")" -ne 1 ]; then
+            echo "::error::checksums.txt does not list $name exactly once"
+            exit 1
+          fi
           (cd dist && sha256sum --check --strict <<<"$line")
           (cd dist && sha256sum --check --strict --ignore-missing checksums.txt)
 
