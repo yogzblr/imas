@@ -85,6 +85,38 @@ Scope: `.github/workflows` (`release.yml`, `publish-packages.yml`,
   and a local `goreleaser release --snapshot --clean` in the session; it does
   not publish anything.
 
+Brief corrections (V2, decided by the order in ORCHESTRATOR.md rule 6):
+
+- **Buildkite.** On main the OS packages (deb, rpm, the NuGet/winget feed)
+  are published to the Buildkite package registries and the sprout installs
+  and self-updates from them; only the charts moved to GHCR (UAT.10). So
+  "point charts and packages at GHCR/GitHub" means the chart packages: the
+  stale chart references (`uat/README.md` item 8, the `imas_sprout` role
+  defaults, the `release.yml` header, the UAT.5 prompt in
+  `docs/claude-code-parallel-build-plan.md`) now name GHCR, and the
+  Buildkite references for OS packages stay, because they are correct.
+- **Chart signature identity.** The charts are signed by
+  `publish-packages.yml`, not `release.yml`. The pinned identity is
+  `https://github.com/yogzblr/imas/.github/workflows/publish-packages.yml@refs/tags/vX.Y.Z`,
+  exact for each version (no regex at all, which is stricter than "a
+  `refs/tags/v*` ref"); checksums and images are pinned the same way to
+  `release.yml@refs/tags/vX.Y.Z`. `packaging/release/cosign-identity.sh`
+  prints both, and Publish packages now runs only on `refs/tags/<tag>` (a
+  run by hand starts from the tag, no longer from `main`). No `uat/` or
+  Ansible script verifies a chart signature on main, so only the workflow
+  and the docs carry the command.
+- **Package link check.** GitHub's packages REST API takes only a personal
+  access token (classic), not the workflow's `GITHUB_TOKEN`, so the link is
+  checked anonymously: the repository's package page,
+  `https://github.com/yogzblr/imas/pkgs/container/charts%2F<chart>`, exists
+  only for a package linked to the repository, and the manifest's
+  `org.opencontainers.image.source` must name it.
+- **Release notes.** The owner step is in `docs/RELEASING.md` and, as the
+  owner decision says, in every release's notes (`.goreleaser.yaml`
+  `release.footer`).
+- **Snapshot.** The local run is `goreleaser release --snapshot --clean
+  --skip=sign`, as the workflow runs it: snapshots do not sign (PR #75).
+
 ## V3: triage, issues and the findings table (P11, P14)
 
 Scope: `docs/`, small code moves named below, GitHub issues.

@@ -33,8 +33,12 @@ sprout release it was tested with (API design §2.5).
 - Tags are annotated and immutable. Never move or reuse one: Buildkite
   registries reject a package version they already hold, GHCR would let a
   chart tag be pushed again (and so moved), and
-  signatures are bound to the tag. A bad release is fixed forward with the
-  next patch, and withdrawn with the revoke call (below).
+  signatures are bound to the tag. The workflows refuse it too:
+  `release.yml` fails when the tag already has a release built from another
+  commit, and `publish-packages.yml` never pushes a chart version GHCR
+  already holds (see [A tag never moves](#a-tag-never-moves)). A bad release
+  is fixed forward with the next pre-release or patch, and withdrawn with the
+  revoke call (below).
 - The tag is the only source of the version. Everything derives from it,
   with the leading `v` dropped except where noted:
 
@@ -74,16 +78,17 @@ registry that has returned HTTP 500 for its `index.yaml` for hours, so
 nothing could `helm pull` from it) is **superseded for charts** and left as
 it is; `packaging/buildkite/publish-helm.sh` is removed. The charts go to
 GHCR; see [Helm charts on GHCR](#helm-charts-on-ghcr). If the `goreleaser`
-environment has deployment branch or tag rules, they must allow `v*` tags
-(Release, and Publish packages on a published release) and `main`
-(Publish packages run by hand).
+environment has deployment branch or tag rules, they must allow `v*` tags:
+Release and Publish packages run only on a tag ref (a published release,
+or a run by hand with *Use workflow from* set to the tag).
 
 **Reviewer handover.** The environment's required reviewer is the owner today (one maintainer, Prevent self-review off). When a second maintainer joins, add them as a reviewer and turn Prevent self-review on, so a person other than the one who pushed the tag approves the release. The key needs no change for that: it is held by the environment, not by a person.
 
 **Manual gate (set 2026-10-05).** The `goreleaser` environment has the
 repository owner as a **required reviewer**, with **Prevent self-review**
 off (there is one maintainer) and deployment rules allowing the tag pattern
-`v*` and the branch `main`. Both workflows run in this environment, so every
+`v*` (the branch `main` may stay allowed; neither workflow runs on it any
+more). Both workflows run in this environment, so every
 Release run (a pushed `v*` tag, a release created in the GitHub UI, or a
 manual dispatch) and every Publish packages run stops at "Waiting for
 review" before any job step runs; approve it under **Review deployments**,
@@ -103,10 +108,19 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
 - Images: `ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,migrate}:X.Y.Z`,
   each a linux/amd64 + linux/arm64 manifest list, cosign-signed; `:latest`
   moves for finals only.
-- The keyless cosign signer identity, which `publish-packages.yml` and
-  `SECURITY.md` both verify:
-  `^https://github\.com/yogzblr/imas/\.github/workflows/release\.yml@refs/tags/v[0-9].*$`
+- The keyless cosign signer identities, exact strings and never a pattern,
+  pinned to the workflow and the release's own tag ref. For tag `vX.Y.Z`:
+  - `checksums.txt` and the images:
+    `https://github.com/yogzblr/imas/.github/workflows/release.yml@refs/tags/vX.Y.Z`
+  - the Helm charts:
+    `https://github.com/yogzblr/imas/.github/workflows/publish-packages.yml@refs/tags/vX.Y.Z`
+
   with issuer `https://token.actions.githubusercontent.com`.
+  `packaging/release/cosign-identity.sh <release.yml|publish-packages.yml> vX.Y.Z`
+  prints the identity (and `--issuer` the issuer); `publish-packages.yml`
+  passes it to `--certificate-identity`, and so do the commands here and in
+  `SECURITY.md`. A signature made by a branch run, by another workflow or
+  under another tag does not verify.
 
 ## Steps
 
@@ -138,7 +152,9 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
    `gpg-public-key.asc`, before `sha256sum --check`), uploads rpm/deb/winget
    to Buildkite, and last packages the
    `farmer` and `nats` charts, pushes them to GHCR as OCI charts and signs
-   them (see [Helm charts on GHCR](#helm-charts-on-ghcr)), with the sprout
+   them (see [Helm charts on GHCR](#helm-charts-on-ghcr)), then checks
+   anonymously that each chart can be pulled and its package is linked to
+   this repository, with the sprout
    release (version, `min_sprout_version`, packages, and `checksums.txt`
    with its signature, which the stamp verifies with `gpg` against
    `gpg-public-key.asc` and the sprout verifies again before an update)
@@ -150,12 +166,16 @@ What a release carries, for version `X.Y.Z` (tag `vX.Y.Z`):
    the sprout release with saasapi; tenants then approve and roll it out in
    waves (API design §1.8).
 
-To re-run a failed publish: Actions, **Publish packages**, *Run workflow*
-with the tag. If the rpm, deb and NuGet uploads already succeeded and only the
+To re-run a failed publish: Actions, **Publish packages**, *Run workflow*,
+with *Use workflow from* set to the **tag** and the same tag as input (a run
+from a branch fails at *Check publish secrets*: the charts are signed with
+the identity of this workflow at `refs/tags/<tag>`). If the rpm, deb and NuGet uploads already succeeded and only the
 Helm step failed, tick **only_helm** so those are not uploaded again (Buildkite
 rejects a version it already holds). **only_helm** keeps its meaning: it skips
 the rpm, deb, NuGet and winget uploads and publishes only the charts, now to
-GHCR.
+GHCR. A chart version already on GHCR and signed by this tag's run is not
+pushed again; one that is there unsigned, or signed by anything else, fails
+the run (fix forward with the next tag).
 
 ## Fleet signing keyring
 
@@ -217,25 +237,88 @@ the Buildkite `imashelm` registry:
   `--chart-registry OCI_BASE`, both defaulting to
   `oci://ghcr.io/yogzblr/charts`. They replace `IMAS_HELM_REPO_URL` and
   `--chart-repo-url`, which were removed rather than kept as a second way.
-- **Owner, once per chart package, after the first push:** a package pushed
-  by a workflow is **private**. In GitHub, *Packages*, `charts/farmer` and
-  `charts/nats`, *Package settings*, *Change visibility*, set **Public**.
-  Until then an anonymous `helm pull` fails and the UAT install scripts say
-  the chart package may still be private. Check, too, that each package
-  is linked to this repository (*Connect repository*) so that later pushes by
-  this workflow's `GITHUB_TOKEN` are accepted; this has not been tried.
-- **Verify a signature** (identity is `publish-packages.yml`; a run by hand
-  from a branch signs under that branch's ref, so the ref is not pinned):
+- **The workflow checks what consumers get.** After the push, *Check the
+  charts are public and linked to the repository* runs
+  `packaging/helm/ghcr-chart.sh check <chart> <version> <digest>` for each
+  chart with no credential at all: it pulls the chart anonymously (registry
+  token, manifest, chart layer) and requires the digest that was pushed and
+  signed, requires the manifest's `org.opencontainers.image.source` to be
+  `https://github.com/yogzblr/imas` (from `Chart.yaml` `sources`), and
+  requires the package's page under this repository,
+  `https://github.com/yogzblr/imas/pkgs/container/charts%2F<chart>`, which
+  GitHub serves only for a package linked to it. It fails the run, saying
+  what to do, while either is not so. The run's `GITHUB_TOKEN` cannot change
+  a package's visibility or link (owner decision V2), so that is this owner
+  step:
+- **Owner, once per chart package, after its first push** (every release's
+  notes repeat this step and the signer identities: `.goreleaser.yaml`
+  `release.footer`): a package pushed
+  by a workflow is **private**, and the check above fails until:
+  1. *Public:* on GitHub, *Packages*, `charts/farmer` (then `charts/nats`),
+     *Package settings*
+     (`https://github.com/users/yogzblr/packages/container/charts%2Ffarmer/settings`),
+     *Danger Zone*, *Change visibility*, **Public**. Until then an anonymous
+     `helm pull` fails and the UAT install scripts say the chart package may
+     still be private.
+  2. *Linked:* on the same page, *Connect repository*, `yogzblr/imas` (a
+     package first pushed by this workflow is usually linked already), and
+     under *Manage Actions access* give `yogzblr/imas` the **Write** role, so
+     later pushes by the workflow's `GITHUB_TOKEN` are accepted.
+  3. Run **Publish packages** again from the tag with **only_helm**: the
+     charts already pushed and signed by this tag's run are not pushed again,
+     and the check passes. To check by hand, with the digest from the run's
+     log: `packaging/helm/ghcr-chart.sh check farmer X.Y.Z sha256:<digest>`.
+- **Verify a signature**, with the identity pinned to `publish-packages.yml`
+  at the release's tag (the workflow runs on no other ref):
 
   ```sh
   cosign verify ghcr.io/yogzblr/charts/farmer@sha256:<digest> \
-    --certificate-identity-regexp '^https://github\.com/yogzblr/imas/\.github/workflows/publish-packages\.yml@.+$' \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    --certificate-identity "$(packaging/release/cosign-identity.sh publish-packages.yml vX.Y.Z)" \
+    --certificate-oidc-issuer "$(packaging/release/cosign-identity.sh --issuer)"
   ```
 
-  The digest is in the publish run's log (`pushed and signed ...`).
-- GHCR does not reject a tag that exists: pushing again moves it. Never
-  re-push a released chart version; fix forward with the next tag.
+  that is, `--certificate-identity
+  https://github.com/yogzblr/imas/.github/workflows/publish-packages.yml@refs/tags/vX.Y.Z`.
+  The digest is in the publish run's log (`pushed and signed ...`), or
+  `packaging/helm/ghcr-chart.sh digest farmer X.Y.Z`. Charts of `v0.1.0-rc.13`
+  and earlier were signed by runs from `main`
+  (`publish-packages.yml@refs/heads/main`) and do not verify with a tag
+  identity; the pinned identity holds from the first release after it.
+- GHCR does not reject a tag that exists: pushing again moves it. The
+  workflow never pushes a version GHCR already holds; never push one by
+  hand either. Fix forward with the next tag.
+
+## A tag never moves
+
+A release, its signatures and every sprout that trusts them are bound to
+the commit its tag named when it was built. Moving the tag (`git tag -f`,
+`git push --force`) would make a second Release run rebuild the same
+version from other code. So `release.yml` refuses it: *Check the tag has not
+moved* (`packaging/release/check-release-tag.sh`) looks up the tag's
+release, drafts included, before anything is built, and fails when
+
+- the release records another commit (GoReleaser writes the commit it built
+  from into the release's `target_commitish`, `.goreleaser.yaml`), or
+- the release records no commit (made before this check, or in the GitHub
+  UI) but already has assets, so what it was built from cannot be checked.
+
+A re-run on the same commit, and a release made in the GitHub UI that has
+no assets yet, pass. If the check fails because the tag was moved by
+mistake, put it back (`git push --force origin <commit>:refs/tags/vX.Y.Z`,
+the commit the message names) and stop there. Otherwise, **cut a new
+pre-release instead of moving the tag**:
+
+1. Fix on `main` by PR (or on the release branch, see [Hotfixes](#hotfixes)).
+2. Take the next number: if `v0.1.0-rc.14` is out, the next is
+   `v0.1.0-rc.15` (`git tag --list 'v0.1.0-rc.*' --sort=-v:refname | head -1`
+   shows the last one). For a final that was already released, the next
+   patch, `v0.1.1`.
+3. `git tag -a v0.1.0-rc.15 -m "imas v0.1.0-rc.15" <commit> && git push origin v0.1.0-rc.15`,
+   and follow [Steps](#steps) from step 3.
+4. Leave the old tag and its release as they are. If the old release is a
+   draft that must not be published, delete the draft (not the tag). If it
+   was published and is bad, withdraw its sprout release with the revoke
+   call ([Compatibility](#compatibility)).
 
 ## First release checklist
 
@@ -291,19 +374,19 @@ step's result differs from "look for", stop and fix by PR before going on.
    `uploading to release` lines. A run on a branch fails at `Check the ref`.
 7. **Check the draft release.** It is a draft and marked pre-release, with
    the 47 assets listed under [Settings](#settings). Download and verify it
-   the way `publish-packages.yml` will:
+   the way `publish-packages.yml` will (from the repository root):
 
    ```bash
+   IDENTITY="$(packaging/release/cosign-identity.sh release.yml "$TAG")"
+   ISSUER="$(packaging/release/cosign-identity.sh --issuer)"
    gh release download "$TAG" --repo yogzblr/imas --dir rc
    cd rc && sha256sum --check --strict checksums.txt
    gpg --verify checksums.txt.sig checksums.txt
-   IDENTITY='^https://github\.com/yogzblr/imas/\.github/workflows/release\.yml@refs/tags/v[0-9].*$'
-   ISSUER=https://token.actions.githubusercontent.com
    cosign verify-blob --bundle checksums.txt.sigstore.json \
-     --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
+     --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
    for img in farmer sprout saasapi farmerbus migrate; do
      cosign verify "ghcr.io/yogzblr/imas-$img:$V" \
-       --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null &&
+       --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null &&
      docker buildx imagetools inspect "ghcr.io/yogzblr/imas-$img:$V" | grep -E 'Platform: +linux/(amd64|arm64)'
    done
    ```
@@ -313,12 +396,13 @@ step's result differs from "look for", stop and fix by PR before going on.
    visibility and its link to the repository: Helm installs pull these
    images, so they must be public unless every cluster has a pull secret.
    A failure here costs nothing yet: delete the draft, fix by PR, and tag
-   `v0.1.0-rc.2` (never move a tag).
+   `v0.1.0-rc.2` (never move a tag: [A tag never moves](#a-tag-never-moves)).
 8. **Publish the draft**, leaving *Set as a pre-release* ticked.
    *Look for:* a **Publish packages** run that is **skipped**: pre-releases
    are not published to Buildkite automatically.
-9. **Actions, Publish packages, Run workflow** (from `main`) with tag
-   `v0.1.0-rc.1`. This is the deliberate publish of a pre-release.
+9. **Actions, Publish packages, Run workflow**, *Use workflow from* the tag
+   `v0.1.0-rc.1`, with tag `v0.1.0-rc.1`. This is the deliberate publish of
+   a pre-release. A run from `main` fails at *Check publish secrets*.
    *Look for:* `Check publish secrets` passes; `sha256sum --check` prints
    `OK` for every package; the cosign step prints `verified imas-<img>:0.1.0-rc.1`
    five times; one MSI, the winget nupkgs built; rpm and deb uploads to
@@ -326,13 +410,16 @@ step's result differs from "look for", stop and fix by PR before going on.
    installer download check; `stamp-sprout-release.sh` writes
    `sprout-release.json`, `helm lint` passes for both charts, and
    `farmer-0.1.0-rc.1.tgz` and `nats-0.1.0-rc.1.tgz` are pushed to
-   `oci://ghcr.io/yogzblr/charts` and signed (`pushed and signed ...`).
+   `oci://ghcr.io/yogzblr/charts` and signed (`pushed and signed ...`), and
+   *Check the charts are public and linked to the repository* prints
+   `pulled ... anonymously` and `... is public and linked to yogzblr/imas`
+   for both (it fails until the owner step below is done).
    Buildkite rejects a package version it already holds, so if the rpm/deb
    upload fails part-way, delete what was uploaded for `0.1.0-rc.1` in
    Buildkite before running it again, or fix forward with `v0.1.0-rc.2`. A
    failed chart push can be repeated with **only_helm**. After the first
-   successful push, make each chart package public once (see
-   [Helm charts on GHCR](#helm-charts-on-ghcr)).
+   push, make each chart package public and check its link once, then run
+   again with **only_helm** (see [Helm charts on GHCR](#helm-charts-on-ghcr)).
 10. **Install from the registries** on a scratch host: the rpm or deb from
     `imasrpm`/`imasdeb` (package version `0.1.0~rc.1+git`, which sorts
     before the final's `0.1.0+git`), and the

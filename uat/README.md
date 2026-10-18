@@ -126,11 +126,17 @@ a credential with the old plain subject `repo:OWNER/REPO:environment:...`, which
    narrower alternative is a second application with a custom role that can
    read and delete resource groups and what is in them (open question in the
    UAT.6 PR).
-8. **The release under test** must have a published GitHub release, and its
-   packages and charts must be in Buildkite (`publish-packages.yml` ran to the
-   end). A pre-release is not published automatically: run Publish packages
-   by hand for it, or the Windows sprouts cannot find the NuGet package
-   (`uat/enroll/README.md`, "Windows with a pre-release tag").
+8. **The release under test** must have a published GitHub release, its OS
+   packages must be in the Buildkite package registries (`imasdeb`,
+   `imasrpm`, `imasnget`), and its Helm charts on GHCR
+   (`oci://ghcr.io/yogzblr/charts/farmer` and `.../nats`), public and linked
+   to this repository: `publish-packages.yml` ran to the end, its last step,
+   *Check the charts are public and linked to the repository*, included
+   (`docs/RELEASING.md`, "Helm charts on GHCR"). A pre-release is not
+   published automatically: run Publish packages by hand for it, from the
+   tag (*Use workflow from*: the tag), or the Windows sprouts cannot find
+   the NuGet package (`uat/enroll/README.md`, "Windows with a pre-release
+   tag").
 
 ## Running it
 

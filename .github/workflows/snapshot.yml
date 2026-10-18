@@ -1,29 +1,33 @@
 name: Snapshot Build
 
-# Manual-only. It runs GoReleaser OSS (MIT), so no licence key is needed, and
-# it needs no secrets: it neither signs nor publishes. The check of the
-# release config, MSI and checksums that runs on pull requests is
-# goreleaser-check.yml; this workflow adds the images.
+# Manual-only (workflow_dispatch). It runs GoReleaser OSS (MIT), so no licence
+# key is needed, and it needs no secrets: it neither signs nor publishes. The
+# check of the release config, MSI and checksums that runs on pull requests
+# is goreleaser-check.yml; this workflow adds the images. It is the optional
+# pre-flight of docs/RELEASING.md, "First release checklist", step 3.
 #
-# What a snapshot run does: builds everything release.yml builds (binaries,
+# What a snapshot run does: builds everything release.yml builds, the way
+# release.yml builds it (REL.1/REL.2: the same Go, msitools for the MSI
+# build hook, QEMU and buildx for the images, the same GoReleaser): binaries,
 # archives, rpm/deb/apk, the imas-sprout MSI, checksums.txt and the
-# linux/amd64 + linux/arm64 images, loaded into the runner's Docker only).
-# --skip=publish skips GoReleaser's whole publish stage: no GitHub release, no
-# image or manifest push, and so no docker_signs either (they are part of
-# that stage, and there is nothing pushed for them to sign).
+# linux/amd64 + linux/arm64 images, loaded into the runner's Docker only
+# (skip_push is {{ .IsSnapshot }} on every docker and docker_manifest). It
+# also runs the release's checks that need no secret: the packaged fleet
+# signing keyring parses and every package installs it (release.yml's
+# "Check the fleet signing keyring", without IMAS_RELEASE because the
+# development tree may hold an empty one, owner decision T1), the package
+# contents, the MSI and its checksums.txt line, and the ten images.
 #
-# --skip=sign: snapshots don't sign checksums.txt (decided 2026-10-03, PR
-# #75). Keyless cosign would write a public Sigstore Rekor entry for every
-# run, and GPG would need the release key here. Signing is exercised by
-# release.yml itself; the first tag is a pre-release so that a signing
-# failure costs only a deleted draft (docs/RELEASING.md, "First release
-# checklist").
+# --snapshot implies --skip=announce,publish,validate: no GitHub release, no
+# image or manifest push, and so no docker_signs either (they are part of the
+# publish stage). --skip=sign: snapshots don't sign checksums.txt (decided
+# 2026-10-03, PR #75). Keyless cosign would write a public Sigstore Rekor
+# entry for every run, and GPG would need the release key here. Signing is
+# exercised by release.yml itself; a release is tagged as a pre-release
+# first, so that a signing failure costs only a deleted draft
+# (docs/RELEASING.md, "First release checklist").
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  # pull_request:
-  #   branches: [main]
 
 permissions:
   contents: read
@@ -42,11 +46,17 @@ jobs:
         with:
           go-version: stable
 
+      # As release.yml's "Check the fleet signing keyring", minus
+      # IMAS_RELEASE (an empty development keyring passes here).
+      - name: Check the fleet signing keyring
+        run: go test -count=1 -run 'TestPackagedKeyring|TestPackagingInstallsTheKeyring' ./packaging/test
+
       # The sprout-windows-pkg build hook (packaging/windows/build-msi.sh)
       # builds the imas-sprout MSI with msitools' wixl, and its
-      # post-process step uses msibuild/msiinfo.
+      # post-process step uses msibuild/msiinfo. rpm lists .rpm contents for
+      # check-package-contents.sh.
       - name: Install msitools
-        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools
+        run: sudo apt-get update -q && sudo apt-get install -y -q wixl msitools rpm
 
       # The dockers entries build with buildx, half of them for linux/arm64.
       # Set up the same builder as release.yml so the snapshot builds the
@@ -57,11 +67,38 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Test GoReleaser
+      # No GITHUB_TOKEN: a snapshot talks to no GitHub API.
+      - name: Snapshot release
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean --skip=publish,sign
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          args: release --snapshot --clean --skip=sign
+
+      - name: Check the deb/rpm/apk contents
+        run: packaging/check-package-contents.sh dist
+
+      - name: Check the MSI and checksums.txt
+        run: |
+          set -euo pipefail
+          mapfile -t msis < <(find dist -name '*.msi')
+          [ "${#msis[@]}" -eq 1 ] || { echo "::error::expected exactly one MSI in dist, found ${#msis[@]}: ${msis[*]}"; exit 1; }
+          name="$(basename "${msis[0]}")"
+          line="$(grep -E "^[0-9a-f]{64}  ${name//./\\.}\$" dist/checksums.txt || true)"
+          [ -n "$line" ] && [ "$(wc -l <<<"$line")" -eq 1 ] || { echo "::error::checksums.txt does not list $name exactly once"; exit 1; }
+          (cd dist && sha256sum --check --strict <<<"$line")
+          (cd dist && sha256sum --check --strict --ignore-missing checksums.txt)
+
+      # Five images, amd64 and arm64 each, built and loaded, none pushed.
+      - name: Check the images
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version dist/metadata.json)"
+          for img in farmer sprout saasapi farmerbus migrate; do
+            for arch in amd64 arm64; do
+              ref="ghcr.io/yogzblr/imas-${img}:${version}-${arch}"
+              got="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ref")" || { echo "::error::$ref was not built"; exit 1; }
+              [ "$got" = "linux/${arch}" ] || { echo "::error::$ref is $got, want linux/${arch}"; exit 1; }
+              echo "built $ref ($got)"
+            done
+          done

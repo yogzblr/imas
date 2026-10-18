@@ -262,7 +262,8 @@ reason whenever the target is a pre-release.
 
 If the feed lacks the `.nupkg`, there are two options:
 
-- Publish it with `workflow_dispatch` of Publish packages for that tag.
+- Publish it with `workflow_dispatch` of Publish packages for that tag, run
+  from the tag itself (*Use workflow from*: the tag; `docs/RELEASING.md`).
 - Pass `--windows-msi-url <the release's MSI asset> --windows-msi-sha256 <from checksums.txt>`.
   The role then installs that MSI and points the sprout's update repository
   at the asset's directory (`flat`). That's fine for enrolment, but not for

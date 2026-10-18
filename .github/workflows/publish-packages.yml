@@ -17,17 +17,29 @@ name: Publish packages
 #   nats    deploy/helm/nats     -> oci://ghcr.io/yogzblr/charts/nats
 # Chart version and appVersion are the release version, which is also the
 # tag of the GHCR images the charts default to (0.1.0-rc.5 for v0.1.0-rc.5).
-# Each pushed chart is signed by digest with keyless cosign. A chart
-# package is private after its first push: the owner makes it public once,
-# in its GHCR package settings (docs/RELEASING.md). Before anything is published
-# the keyless cosign signatures are verified: the checksums bundle and each
-# imas-* image on GHCR must have been signed by release.yml on a v* tag.
+# Each pushed chart is signed by digest with keyless cosign; its signer
+# identity is this workflow at the release's tag ref, exactly
+# (packaging/release/cosign-identity.sh publish-packages.yml vX.Y.Z), so this
+# workflow runs only on refs/tags/<tag>. A chart version GHCR already holds
+# is never pushed again (GHCR would move the tag): if it is there and signed
+# by this tag's run, the push is skipped. After the push every chart is
+# checked as a consumer gets it (packaging/helm/ghcr-chart.sh check):
+# pulled anonymously, the digest that was signed, its package linked to
+# this repository. A chart package is private after its first push and the
+# run's GITHUB_TOKEN cannot change that, so the check fails until the owner
+# sets the package public and links it, once (docs/RELEASING.md, "Helm
+# charts on GHCR"); then run this workflow again from the tag with
+# only_helm. Before anything is published the keyless cosign signatures are
+# verified: the checksums bundle and each imas-* image on GHCR must have
+# been signed by release.yml on this tag
+# (packaging/release/cosign-identity.sh release.yml vX.Y.Z), exactly.
 #
 # Runs when a maintainer publishes the draft release that release.yml
 # (goreleaser) creates, so nothing reaches the registries before that
 # review. Prereleases are skipped (their MSI version equals the final
 # release's, and winget would offer them as the newest version); publish one
-# deliberately with workflow_dispatch. workflow_dispatch also re-runs a
+# deliberately with workflow_dispatch, run from the tag (Use workflow from:
+# tag vX.Y.Z), with the same tag as input. workflow_dispatch also re-runs a
 # failed publish for a tag. Packages are taken from the release's assets and
 # checked against its checksums.txt.
 #
@@ -42,7 +54,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish, e.g. v1.2.3"
+        description: "Release tag to publish, e.g. v1.2.3; run the workflow from that same tag (Use workflow from: tag)"
         required: true
         type: string
       only_helm:
@@ -95,6 +107,13 @@ jobs:
             v[0-9]*) ;;
             *) echo "::error::'$TAG' is not a release tag (want vX.Y.Z)"; exit 1 ;;
           esac
+          # The charts' signer identity is this workflow at refs/tags/<tag>
+          # (packaging/release/cosign-identity.sh). A release event runs on
+          # the tag's ref; a run by hand must be started from the tag.
+          if [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::run Publish packages from the tag it publishes (Use workflow from: tag $TAG), not $GITHUB_REF: the charts are signed with the identity of this workflow at refs/tags/$TAG"
+            exit 1
+          fi
 
       # The packaging scripts as of the release being published.
       - name: Checkout
@@ -135,23 +154,25 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      # Keyless: the signer must be release.yml in this repo, run on a v* tag,
-      # via GitHub's OIDC issuer. Nothing is published if any check fails.
+      # Keyless: the signer must be release.yml in this repo, run on this
+      # very tag, via GitHub's OIDC issuer: an exact identity, no pattern.
+      # Nothing is published if any check fails.
       - name: Verify cosign signatures (checksums and images)
         env:
-          IDENTITY: ^https://github\.com/yogzblr/imas/\.github/workflows/release\.yml@refs/tags/v[0-9].*$
-          ISSUER: https://token.actions.githubusercontent.com
           GH_ACTOR: ${{ github.actor }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          IDENTITY="$(packaging/release/cosign-identity.sh release.yml "$TAG")"
+          ISSUER="$(packaging/release/cosign-identity.sh --issuer)"
+          echo "signer: $IDENTITY"
           cosign verify-blob --bundle dist/checksums.txt.sigstore.json \
-            --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
             dist/checksums.txt
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
           for img in farmer sprout saasapi farmerbus migrate; do
             cosign verify "ghcr.io/yogzblr/imas-${img}:${TAG#v}" \
-              --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
+              --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
             echo "verified imas-${img}:${TAG#v}"
           done
 
@@ -224,36 +245,73 @@ jobs:
       # is rewritten, to "_"; the release versions have none). The login
       # password goes through stdin, never argv. docker login gives cosign
       # (which reads the Docker config, not Helm's) the same credential, as
-      # in the verify step above. Unlike Buildkite, GHCR does not reject a
-      # version it already holds: pushing again moves the tag, so a tag is
-      # never reused (docs/RELEASING.md).
+      # in the verify step above. GHCR does not reject a version it already
+      # holds: pushing again would move the tag. So a version that is
+      # already there is not pushed: if this tag's run signed it (an
+      # only_helm run after the check below failed), it is kept; anything
+      # else fails and the release is fixed forward with the next tag
+      # (docs/RELEASING.md).
       - name: Publish Helm charts to GHCR (OCI) and sign them
         env:
           GH_TOKEN: ${{ github.token }}
           GH_ACTOR: ${{ github.actor }}
           OCI_BASE: oci://ghcr.io/yogzblr/charts
-          IDENTITY: ^https://github\.com/yogzblr/imas/\.github/workflows/publish-packages\.yml@.+$
-          ISSUER: https://token.actions.githubusercontent.com
         run: |
           set -euo pipefail
           version="${TAG#v}"
+          IDENTITY="$(packaging/release/cosign-identity.sh publish-packages.yml "$TAG")"
+          ISSUER="$(packaging/release/cosign-identity.sh --issuer)"
+          echo "signer: $IDENTITY"
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GH_ACTOR" --password-stdin
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
           shopt -s nullglob
           charts=(dist/charts/*.tgz)
           [ "${#charts[@]}" -eq 2 ] || { echo "::error::expected 2 packaged charts, found ${#charts[@]}"; exit 1; }
+          : > dist/charts/pushed.txt
           for pkg in "${charts[@]}"; do
             name="$(basename "$pkg" ".tgz")"
             name="${name%-"$version"}"
             case "$name" in farmer|nats) ;; *) echo "::error::unexpected chart package $pkg"; exit 1 ;; esac
-            helm push "$pkg" "$OCI_BASE" 2>&1 | tee "push-$name.log"
-            digest="$(sed -n 's/^Digest: *//p' "push-$name.log" | tail -n 1)"
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in the helm push output for $name"; exit 1; }
             ref="${OCI_BASE#oci://}/${name}"
-            # Keyless, by digest, as release.yml signs the images: the
-            # identity is this workflow (see docs/RELEASING.md to verify).
-            cosign sign --yes "${ref}@${digest}"
-            cosign verify "${ref}@${digest}" \
-              --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
-            echo "pushed and signed oci://${ref}:${version} (${digest})"
+            rc=0
+            existing="$(GHCR_USER="$GH_ACTOR" GHCR_TOKEN="$GH_TOKEN" packaging/helm/ghcr-chart.sh digest "$name" "$version")" || rc=$?
+            case "$rc" in
+              0)
+                if ! cosign verify "${ref}@${existing}" \
+                    --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null; then
+                  echo "::error::oci://${ref}:${version} is already on GHCR (${existing}) and not signed by this tag's run: it is not pushed again (that would move the tag). Release the fix as the next tag (docs/RELEASING.md, \"A tag never moves\")"
+                  exit 1
+                fi
+                digest="$existing"
+                echo "oci://${ref}:${version} is already on GHCR, signed by this tag's run (${digest}): not pushed again"
+                ;;
+              3)
+                helm push "$pkg" "$OCI_BASE" 2>&1 | tee "push-$name.log"
+                digest="$(sed -n 's/^Digest: *//p' "push-$name.log" | tail -n 1)"
+                [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest in the helm push output for $name"; exit 1; }
+                # Keyless, by digest, as release.yml signs the images.
+                cosign sign --yes "${ref}@${digest}"
+                cosign verify "${ref}@${digest}" \
+                  --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" >/dev/null
+                echo "pushed and signed oci://${ref}:${version} (${digest})"
+                ;;
+              *) echo "::error::could not tell whether oci://${ref}:${version} is on GHCR"; exit 1 ;;
+            esac
+            echo "$name $digest" >> dist/charts/pushed.txt
           done
+
+      # As a consumer gets them: no credential at all. Fails, saying what the
+      # owner must do, while a package is private or not linked to this
+      # repository; the workflow's token cannot change either (owner
+      # decision V2). After the owner step, run this workflow again from the
+      # tag with only_helm: the push above is then skipped, and this passes.
+      - name: Check the charts are public and linked to the repository
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          failed=0
+          while read -r name digest; do
+            packaging/helm/ghcr-chart.sh check "$name" "$version" "$digest" || failed=1
+          done < dist/charts/pushed.txt
+          [ "$(wc -l < dist/charts/pushed.txt)" -eq 2 ] || { echo "::error::expected 2 pushed charts"; exit 1; }
+          exit "$failed"

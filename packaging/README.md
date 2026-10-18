@@ -9,7 +9,8 @@ What each release builds, and how it gets to hosts:
    the release's packages, checks them against its `checksums.txt`, and
    uploads them to the Buildkite Package Registries. Prereleases are
    skipped unless published deliberately with `workflow_dispatch`, which also
-   re-runs a failed publish for a tag.
+   re-runs a failed publish for a tag; a run by hand starts from the tag
+   (*Use workflow from*: the tag), the only ref the workflow accepts.
 
 | Package | Formats | Built by | Published to |
 |---|---|---|---|
@@ -272,10 +273,15 @@ It needs:
 
 The Helm charts are no longer in this list. They go to GHCR as OCI charts
 (`oci://ghcr.io/yogzblr/charts/{farmer,nats}`), pushed and cosign-signed by
-the same workflow's last steps; `packaging/buildkite/publish-helm.sh` was
+the same workflow's last steps, signed with the identity of
+`publish-packages.yml` at the release's tag
+(`packaging/release/cosign-identity.sh`), and then checked anonymously,
+pullable and linked to this repository (`packaging/helm/ghcr-chart.sh`);
+`packaging/buildkite/publish-helm.sh` was
 removed and the Buildkite `imashelm` registry is superseded for charts
 (`docs/RELEASING.md`, "Helm charts on GHCR"). `only_helm` skips the uploads
-above and publishes only the charts.
+above and publishes only the charts; a chart version already on GHCR and
+signed by this tag's run is not pushed again.
 
 `DRY_RUN=1` lists what would be uploaded. If a package type is missing, or an
 upload returns non-2xx (including a duplicate version), the job fails.

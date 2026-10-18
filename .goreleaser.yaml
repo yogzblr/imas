@@ -711,6 +711,22 @@ release:
   extra_files:
     - glob: ./dist/imas-sprout-*-windows-x64.msi
   draft: true
+  # The commit the release is built from, recorded on the release. A
+  # GitHub release otherwise names only its tag, which can be moved:
+  # release.yml's "Check the tag has not moved"
+  # (packaging/release/check-release-tag.sh) compares this with the commit
+  # a later run of the same tag would build, and refuses another one.
+  target_commitish: "{{ .FullCommit }}"
+  # In every release's notes (owner decision V2): how to verify the charts,
+  # and the owner step the workflow cannot do, since its GITHUB_TOKEN cannot
+  # change a package's visibility or link. docs/RELEASING.md, "Helm charts
+  # on GHCR", has the full text.
+  footer: |
+    ## Helm charts
+
+    `oci://ghcr.io/yogzblr/charts/farmer` and `oci://ghcr.io/yogzblr/charts/nats`, version `{{ .Version }}`, are pushed when this release is published (Publish packages; a pre-release by hand, from the tag). Pull them anonymously at that exact version. Each is signed by digest with keyless cosign; verify with `--certificate-identity https://github.com/yogzblr/imas/.github/workflows/publish-packages.yml@refs/tags/{{ .Tag }}` and `--certificate-oidc-issuer https://token.actions.githubusercontent.com`. Checksums and images: `--certificate-identity https://github.com/yogzblr/imas/.github/workflows/release.yml@refs/tags/{{ .Tag }}`.
+
+    **Owner step, once per chart package:** a chart package pushed for the first time is private, and Publish packages fails at "Check the charts are public and linked to the repository" until, on GitHub, Packages, `charts/farmer` and `charts/nats`, Package settings: Change visibility to **Public**, Connect repository `yogzblr/imas`, and under Manage Actions access give `yogzblr/imas` the Write role. Then run Publish packages again from the tag with `only_helm`.
   # Support for nightlies
   prerelease: auto
 
