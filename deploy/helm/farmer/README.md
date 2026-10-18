@@ -1603,11 +1603,11 @@ values:
 | `saasapi.retention.terminalRows` | `SAASAPI_TERMINAL_ROW_RETENTION` | `2160h` | finished action batches and items, finished provisioning jobs, expired enrollment keys |
 | `logShipping.retention.days` | the CronJob's `-days` | `30` | service and audit logs in the log bucket |
 
-null or `""` emits no variable and the binary uses the same default.
-For farmer's three, a variable wins over farmer's config file, and with
-none farmer reads the config file key (`joblogttl`,
-`recipeauditretentiondays`, `boxkeygraceduration`, which
-`farmer.extraConfig` can set) before its default. `0` is the default too,
+null or `""` emits no variable. saasapi then uses its default;
+`logShipping.retention.days` renders `-days=30`. Farmer's three fall back
+to farmer's config file key (`joblogttl`, `recipeauditretentiondays`,
+`boxkeygraceduration`, which `farmer.extraConfig` can set), and only
+without one to farmer's default; a set variable wins over the key. `0` is the default too,
 except for `recipeAuditDays`, where it keeps the records for ever. The render refuses a value of the wrong type; the
 binary refuses one out of range at startup, naming the variable.
 
