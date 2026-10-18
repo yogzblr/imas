@@ -2408,7 +2408,9 @@ expects, replica counts of one, resource requests small enough for a D2s_v5. (2)
 uat/hub/dmz/install.sh that installs the chart from the published release named by release_tag
 (the chart version and the image tag both equal the tag without the leading v; never latest;
 pull the chart from the Buildkite imashelm registry the release publishes to, and say which URL
-you used and how a pre-release chart version is selected), waits for farmerbus and Envoy to be
+you used and how a pre-release chart version is selected) [superseded by UAT.10: the charts are
+OCI charts on GHCR, oci://ghcr.io/yogzblr/charts, pulled anonymously by exact version;
+docs/RELEASING.md, "Helm charts on GHCR"], waits for farmerbus and Envoy to be
 Ready, and exposes Envoy as the contract says. (3) A check script that, from the runner,
 confirms the Envoy listener answers TLS with the UAT CA, that an unauthenticated request to the
 files route and to the websocket route is refused (the jwt_authn gate), and that the enroll

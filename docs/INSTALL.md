@@ -59,8 +59,9 @@ makes each chart package public once, in its GHCR package settings, after the
 first push. The Buildkite Helm registry `imashelm` is superseded for charts
 and no longer receives them. Verify signatures as described in
 [`SECURITY.md`](../SECURITY.md); the charts are signed by digest the same
-way (identity: `publish-packages.yml`, see
-[`docs/RELEASING.md`](RELEASING.md)).
+way (identity:
+`https://github.com/yogzblr/imas/.github/workflows/publish-packages.yml@refs/tags/vX.Y.Z`,
+exactly, for chart version `X.Y.Z`; see [`docs/RELEASING.md`](RELEASING.md)).
 
 To build every binary from source, run `make` on Linux (or `GOOS=linux make`
 elsewhere); binaries land in `bin/`. You need a Go toolchain

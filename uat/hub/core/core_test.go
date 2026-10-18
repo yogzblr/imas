@@ -357,6 +357,39 @@ func TestValidateObjectStore(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// A script that backgrounds kubectl port-forward and polls its log with
+// sed must create the log first: the shell opens the redirect only in the
+// forked child, so the first sed can run before the file exists, and
+// under set -e and pipefail the script then exits with nothing but sed's
+// error (seen as a flaky TestValidateObjectStore on a loaded machine).
+func TestPortForwardLogExistsBeforeKubectl(t *testing.T) {
+	scripts, err := filepath.Glob("*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pf := regexp.MustCompile(`(?m)^\s*kubectl [^>]*port-forward [^>]*(>>?)"([^"]+)" 2>&1 &$`)
+	found := 0
+	for _, s := range scripts {
+		b, err := os.ReadFile(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range pf.FindAllSubmatchIndex(b, -1) {
+			found++
+			log := string(b[m[4]:m[5]])
+			if m[3]-m[2] != 2 {
+				t.Errorf("%s: kubectl port-forward truncates %s with >; create it first and append with >>", s, log)
+			}
+			if !strings.Contains(string(b[:m[0]]), `: >"`+log+`"`) {
+				t.Errorf("%s: %s is not created (: >\"%s\") before kubectl port-forward starts", s, log, log)
+			}
+		}
+	}
+	if found < 2 {
+		t.Errorf("found %d backgrounded kubectl port-forward lines, want at least 2 (operator-release.sh, validate-object-store.sh)", found)
+	}
+}
+
 // TestStatusLine: check.sh's "must refuse" checks compare the status and
 // the error code of saasapi's JSON body (P13), so a 401 from anything but
 // saasapi does not pass as saasapi's refusal.

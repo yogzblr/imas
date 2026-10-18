@@ -15,8 +15,16 @@ name: Release
 #
 # Run it on a tag ref (Use workflow from: tag vX.Y.Z), not a branch: the
 # keyless cosign signatures are bound to this workflow *and* its ref, and
-# publish-packages.yml only accepts refs/tags/v*. "Check the ref" refuses
-# anything else before anything is built.
+# publish-packages.yml verifies them against exactly
+# https://github.com/yogzblr/imas/.github/workflows/release.yml@refs/tags/vX.Y.Z
+# (packaging/release/cosign-identity.sh). "Check the ref" refuses anything
+# else before anything is built.
+#
+# A tag never moves (docs/RELEASING.md, "A tag never moves"): a second push
+# of an existing tag starts this workflow again, and "Check the tag has not
+# moved" fails it when that tag already has a release built from another
+# commit (packaging/release/check-release-tag.sh; GoReleaser records the
+# commit as the release's target_commitish).
 #
 # The sprout's update trust root is gated twice (security review L5,
 # docs/RELEASING.md "Fleet signing keyring"), with the sprout's own parse and
@@ -31,7 +39,8 @@ name: Release
 # signed multi-arch images to GHCR
 # (ghcr.io/yogzblr/imas-{farmer,sprout,saasapi,farmerbus,migrate}).
 # Publishing that release (a maintainer's review step) is what uploads the OS
-# packages and then the Helm charts to Buildkite: see publish-packages.yml.
+# packages to the Buildkite package registries and then the Helm charts to
+# GHCR (oci://ghcr.io/yogzblr/charts): see publish-packages.yml.
 on:
   workflow_dispatch:
   push:
@@ -71,6 +80,13 @@ jobs:
             refs/tags/v[0-9]*) ;;
             *) echo "::error::run Release on a vX.Y.Z tag (Use workflow from: tag), not $GITHUB_REF"; exit 1 ;;
           esac
+
+      # Before GoReleaser, which would otherwise find the tag's release by
+      # name and rebuild it from whatever commit the tag points at now.
+      - name: Check the tag has not moved
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: packaging/release/check-release-tag.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
 
       # L5: a release may not ship a keyring with no key (the development
       # tree may, until the release GPG public key is added: owner decision

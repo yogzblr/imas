@@ -64,19 +64,29 @@ sha256sum -c checksums.txt --ignore-missing
 #### Cosign (keyless)
 Release checksums and container images are also signed keylessly with
 [cosign](https://docs.sigstore.dev/), by the `release.yml` workflow of this
-repository on a `v*` tag. No key to fetch: you verify the signer's identity.
+repository on the release's own tag; the Helm charts
+(`oci://ghcr.io/yogzblr/charts/{farmer,nats}`) by its `publish-packages.yml`
+workflow on the same tag. No key to fetch: you verify the signer's identity,
+an exact string pinned to the workflow and the tag ref, never a pattern
+(`packaging/release/cosign-identity.sh <workflow> <tag>` prints it).
 ```bash
-IDENTITY='^https://github\.com/yogzblr/imas/\.github/workflows/release\.yml@refs/tags/v[0-9].*$'
+TAG=v1.0.0
+IDENTITY="https://github.com/yogzblr/imas/.github/workflows/release.yml@refs/tags/${TAG}"
 ISSUER=https://token.actions.githubusercontent.com
 
 # The release checksums (then check your download against them as above)
-curl -LO https://github.com/yogzblr/imas/releases/download/v1.0.0/checksums.txt.sigstore.json
+curl -LO "https://github.com/yogzblr/imas/releases/download/${TAG}/checksums.txt.sigstore.json"
 cosign verify-blob --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
+  --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" checksums.txt
 
 # A container image (farmer, sprout, saasapi, farmerbus, migrate)
-cosign verify ghcr.io/yogzblr/imas-farmer:1.0.0 \
-  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
+cosign verify "ghcr.io/yogzblr/imas-farmer:${TAG#v}" \
+  --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
+
+# A Helm chart (farmer, nats), by the digest the publish run logs
+cosign verify "ghcr.io/yogzblr/charts/farmer@sha256:<digest>" \
+  --certificate-identity "https://github.com/yogzblr/imas/.github/workflows/publish-packages.yml@refs/tags/${TAG}" \
+  --certificate-oidc-issuer "$ISSUER"
 ```
 
 ### Trust Verification

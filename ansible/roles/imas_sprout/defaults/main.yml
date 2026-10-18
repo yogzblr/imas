@@ -97,9 +97,12 @@ imas_sprout_disable_shell: false
 
 # --- Package ------------------------------------------------------------------
 
-# Buildkite organization that owns the imasdeb/imasrpm/imasnget registries
+# Buildkite organization that owns the imasdeb/imasrpm/imasnget package
+# registries the sprout installs from
 # (https://packages.buildkite.com/yogzblr/imasdeb, .../imasrpm,
-# .../imasnget; Helm charts are in .../imashelm).
+# .../imasnget). The Helm charts are not there: they are OCI charts on GHCR,
+# oci://ghcr.io/yogzblr/charts/{farmer,nats} (docs/RELEASING.md, "Helm charts
+# on GHCR"); this role installs no chart.
 imas_buildkite_org: yogzblr
 
 # "" installs whatever the repo's newest version is, once. Set a version to
