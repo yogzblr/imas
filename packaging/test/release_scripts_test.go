@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -248,14 +249,28 @@ cat "` + filepath.Join(dir, "releases.json") + `"
 // fakeGHCR is the part of GHCR's distribution API and GitHub's package
 // page ghcr-chart.sh uses.
 type fakeGHCR struct {
-	private    bool   // anonymous token requests are DENIED
-	linked     bool   // the repository package page exists
-	source     string // org.opencontainers.image.source
-	versions   map[string]bool
-	manifest   []byte
-	layer      []byte
+	private     bool   // anonymous token requests are DENIED
+	linked      bool   // the repository package page exists
+	source      string // org.opencontainers.image.source
+	tokenStatus int    // when set, /token answers this status (an outage)
+	tokenBody   string // when set, /token answers 200 with this body
+	versions    map[string]bool
+	manifest    []byte
+	layer       []byte
+
+	// Written by the handler goroutine, read by the test once the script
+	// has exited: guarded, since the only order between the two runs
+	// through the curl process.
+	mu         sync.Mutex
 	sawBasic   bool
 	sawPackage string
+}
+
+// seen reports what the handler saw.
+func (f *fakeGHCR) seen() (basic bool, pkg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sawBasic, f.sawPackage
 }
 
 func (f *fakeGHCR) handler(t *testing.T) http.Handler {
@@ -268,7 +283,17 @@ func (f *fakeGHCR) handler(t *testing.T) http.Handler {
 				return
 			}
 			_, _, basic := r.BasicAuth()
+			f.mu.Lock()
 			f.sawBasic = f.sawBasic || basic
+			f.mu.Unlock()
+			if f.tokenStatus != 0 {
+				w.WriteHeader(f.tokenStatus)
+				return
+			}
+			if f.tokenBody != "" {
+				fmt.Fprint(w, f.tokenBody)
+				return
+			}
 			if f.private && !basic {
 				http.Error(w, `{"errors":[{"code":"DENIED"}]}`, http.StatusForbidden)
 				return
@@ -291,8 +316,11 @@ func (f *fakeGHCR) handler(t *testing.T) http.Handler {
 		case path == "/storage/layer":
 			w.Write(f.layer)
 		case strings.HasPrefix(path, "/yogzblr/imas/pkgs/container/"):
-			f.sawPackage = strings.TrimPrefix(path, "/yogzblr/imas/pkgs/container/")
-			if !f.linked || f.sawPackage != "charts%2Ffarmer" {
+			pkg := strings.TrimPrefix(path, "/yogzblr/imas/pkgs/container/")
+			f.mu.Lock()
+			f.sawPackage = pkg
+			f.mu.Unlock()
+			if !f.linked || pkg != "charts%2Ffarmer" {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
@@ -346,16 +374,16 @@ func TestGHCRChart(t *testing.T) {
 		if code != 0 || !strings.Contains(got, "pulled oci://") || !strings.Contains(got, "public and linked to yogzblr/imas") {
 			t.Fatalf("got %q (exit %d)", got, code)
 		}
-		if f.sawPackage != "charts%2Ffarmer" {
-			t.Errorf("package page asked for %q, want charts%%2Ffarmer", f.sawPackage)
+		if _, pkg := f.seen(); pkg != "charts%2Ffarmer" {
+			t.Errorf("package page asked for %q, want charts%%2Ffarmer", pkg)
 		}
 	})
 	t.Run("check ignores the run's credential", func(t *testing.T) {
 		f := newFakeGHCR(t)
 		f.private = true
 		got, code := run(t, f, []string{"GHCR_USER=bot", "GHCR_TOKEN=secret"}, "check", "farmer", "0.1.0-rc.14", digestOf(f.manifest))
-		if code != 1 || f.sawBasic {
-			t.Fatalf("a private package passed the anonymous check with the run's credential: %q (exit %d, basic auth %v)", got, code, f.sawBasic)
+		if basic, _ := f.seen(); code != 1 || basic {
+			t.Fatalf("a private package passed the anonymous check with the run's credential: %q (exit %d, basic auth %v)", got, code, basic)
 		}
 	})
 	for _, tc := range []struct {
@@ -411,11 +439,49 @@ func TestGHCRChart(t *testing.T) {
 		f := newFakeGHCR(t)
 		f.private = true
 		got, code := run(t, f, []string{"GHCR_USER=bot", "GHCR_TOKEN=secret"}, "digest", "farmer", "0.1.0-rc.14")
-		if code != 0 || !f.sawBasic || got != digestOf(f.manifest)+"\n" {
-			t.Fatalf("got %q (exit %d, basic auth %v)", got, code, f.sawBasic)
+		if basic, _ := f.seen(); code != 0 || !basic || got != digestOf(f.manifest)+"\n" {
+			t.Fatalf("got %q (exit %d, basic auth %v)", got, code, basic)
 		}
 		if got, code := run(t, f, nil, "digest", "farmer", "0.1.0-rc.14"); code != 3 {
 			t.Errorf("anonymous, private: got %q (exit %d), want exit 3 (not visible)", got, code)
+		}
+	})
+	// Only a 401/403 token answer or a 404 manifest means "not on GHCR"
+	// (exit 3, and the workflow pushes). An outage, another status or a
+	// token answer without a token may hide a version that is there, so it
+	// fails (exit 1) and nothing is pushed again.
+	t.Run("digest fails on anything but a refusal or a 404", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			setup func(*fakeGHCR)
+		}{
+			{"token 503", func(f *fakeGHCR) { f.tokenStatus = http.StatusServiceUnavailable }},
+			{"token 429", func(f *fakeGHCR) { f.tokenStatus = http.StatusTooManyRequests }},
+			{"token 500", func(f *fakeGHCR) { f.tokenStatus = http.StatusInternalServerError }},
+			{"token body without a token", func(f *fakeGHCR) { f.tokenBody = `{"errors":[]}` }},
+		} {
+			f := newFakeGHCR(t)
+			tc.setup(f)
+			for _, cred := range [][]string{nil, {"GHCR_USER=bot", "GHCR_TOKEN=secret"}} {
+				got, code := run(t, f, cred, "digest", "farmer", "0.1.0-rc.14")
+				if code != 1 || !strings.Contains(got, "cannot tell whether 0.1.0-rc.14 is there, so nothing is pushed") {
+					t.Errorf("%s (credential %v): got %q (exit %d), want exit 1", tc.name, cred != nil, got, code)
+				}
+			}
+			if got, code := run(t, f, nil, "check", "farmer", "0.1.0-rc.14", digestOf(f.manifest)); code != 1 || strings.Contains(got, "private") {
+				t.Errorf("%s: check got %q (exit %d), want exit 1 without blaming visibility", tc.name, got, code)
+			}
+		}
+		// No registry at all.
+		got, code := runScript(t, []string{"IMAS_GHCR_URL=http://127.0.0.1:1"}, script, "digest", "farmer", "0.1.0-rc.14")
+		if code != 1 || !strings.Contains(got, "nothing is pushed") {
+			t.Errorf("unreachable registry: got %q (exit %d), want exit 1", got, code)
+		}
+		// A 401 is a refusal, as GHCR's 403 is.
+		f := newFakeGHCR(t)
+		f.tokenStatus = http.StatusUnauthorized
+		if got, code := run(t, f, nil, "digest", "farmer", "0.1.0-rc.14"); code != 3 {
+			t.Errorf("token 401: got %q (exit %d), want exit 3", got, code)
 		}
 	})
 	t.Run("usage", func(t *testing.T) {

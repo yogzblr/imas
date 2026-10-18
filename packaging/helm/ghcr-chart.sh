@@ -5,7 +5,10 @@
 #
 # digest <chart> <version>
 #   Print the manifest digest of oci://ghcr.io/yogzblr/charts/<chart>:<version>
-#   and exit 0, or exit 3 when that version is not on GHCR. Uses the
+#   and exit 0, or exit 3 when that version is not on GHCR (GHCR refuses a
+#   token with 401/403, or the manifest is 404); any other answer, a network
+#   error included, exits 1, so a version that may exist is never pushed
+#   again. Uses the
 #   credential in GHCR_USER/GHCR_TOKEN when set (the publish run's
 #   GITHUB_TOKEN, so a private package is seen too), anonymous otherwise.
 #   publish-packages.yml calls it before pushing, so a version GHCR already
@@ -60,6 +63,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # token <repo> <anonymous:true|false>: a pull token for <repo> on stdout.
+# Returns 1 when GHCR refuses the token (401/403: no such package, or a
+# private one), 4 for anything else (no answer, another status, no token in
+# the body), which never counts as "not there".
 token() {
 	local auth=()
 	if [ "$2" = "false" ] && [ -n "${GHCR_TOKEN:-}" ]; then
@@ -67,9 +73,13 @@ token() {
 	fi
 	local code
 	code="$(curl -sS -o "$work/token.json" -w '%{http_code}' "${auth[@]}" \
-		"${registry}/token?scope=repository:${1}:pull&service=${service}")" || return 1
-	[ "$code" = "200" ] || return 1
-	jq -er '.token // .access_token' "$work/token.json"
+		"${registry}/token?scope=repository:${1}:pull&service=${service}")" || return 4
+	case "$code" in
+	200) ;;
+	401 | 403) return 1 ;;
+	*) return 4 ;;
+	esac
+	jq -er '.token // .access_token' "$work/token.json" || return 4
 }
 
 # manifest <repo> <reference> <token>: writes $work/manifest, prints the HTTP status.
@@ -102,7 +112,13 @@ if [ "$cmd" = "digest" ]; then
 	# push of a chart) and, anonymously, for a private one. Either way
 	# nothing visible holds this version; a push the credential may not make
 	# is refused by GHCR itself.
-	tok="$(token "$repo" "$anonymous")" || exit 3
+	rc=0
+	tok="$(token "$repo" "$anonymous")" || rc=$?
+	case "$rc" in
+	0) ;;
+	1) exit 3 ;;
+	*) die "could not get a GHCR pull token for ${oci} (no answer, or not 200/401/403): cannot tell whether ${version} is there, so nothing is pushed" ;;
+	esac
 	code="$(manifest "$repo" "$version" "$tok")" || die "could not reach ${registry}"
 	case "$code" in
 	200) ;;
@@ -119,8 +135,13 @@ settings="${web}/users/${chart_path%%/*}/packages/container/${package//\//%2F}/s
 private_fix="the owner must make the package public once: on GitHub, Packages, ${package}, Package settings (${settings}), Danger Zone, Change visibility, Public. Then run Publish packages again from the tag with only_helm ticked: a version already on GHCR and signed by this tag's run is not pushed again"
 
 # 1. Anonymous pull.
-tok="$(token "$repo" true)" ||
-	die "${oci}:${version} cannot be pulled anonymously (GHCR refused an anonymous token: the package is private): ${private_fix}"
+rc=0
+tok="$(token "$repo" true)" || rc=$?
+case "$rc" in
+0) ;;
+1) die "${oci}:${version} cannot be pulled anonymously (GHCR refused an anonymous token: the package is private): ${private_fix}" ;;
+*) die "could not get an anonymous GHCR pull token for ${oci} (no answer, or not 200/401/403); run the check again" ;;
+esac
 code="$(manifest "$repo" "$version" "$tok")" || die "could not reach ${registry}"
 [ "$code" = "200" ] ||
 	die "${oci}:${version} cannot be pulled anonymously (HTTP $code for its manifest): ${private_fix}"

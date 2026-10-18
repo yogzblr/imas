@@ -90,7 +90,7 @@ jobs:
             exit 1
           fi
           (cd dist && sha256sum --check --strict <<<"$line")
-          (cd dist && sha256sum --check --strict --ignore-missing checksums.txt)
+          (cd dist && sha256sum --check --strict checksums.txt)
 
       # Five images, amd64 and arm64 each, built and loaded, none pushed.
       - name: Check the images
