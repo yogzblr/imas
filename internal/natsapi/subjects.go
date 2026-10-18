@@ -83,6 +83,9 @@ const (
 	MethodJobsDelete    = "jobs.delete"
 	MethodJobsCancel    = "jobs.cancel"
 	MethodJobsForSprout = "jobs.forsprout"
+	// MethodJobsFollow forwards a job's step events, or every job's, to
+	// the caller over the sealed farmer-to-CLI leg (jobsfollow.go).
+	MethodJobsFollow = "jobs.follow"
 
 	// Props
 	MethodPropsGetAll = "props.getall"
@@ -296,7 +299,7 @@ func AllMethods() []string {
 		MethodTestPing,
 		MethodCmdRun,
 		MethodCook, MethodCookResync,
-		MethodJobsList, MethodJobsGet, MethodJobsDelete, MethodJobsCancel, MethodJobsForSprout,
+		MethodJobsList, MethodJobsGet, MethodJobsDelete, MethodJobsCancel, MethodJobsForSprout, MethodJobsFollow,
 		MethodPropsGetAll, MethodPropsGet, MethodPropsSet, MethodPropsDelete,
 		MethodCohortsList, MethodCohortsGet, MethodCohortsResolve, MethodCohortsRefresh, MethodCohortsValidate,
 		MethodAuthLogin, MethodAuthWhoAmI, MethodAuthListUsers, MethodAuthAddUser, MethodAuthRemoveUser, MethodAuthExplain,

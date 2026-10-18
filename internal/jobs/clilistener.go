@@ -1,55 +1,29 @@
 package jobs
 
 import (
-	"encoding/json"
-	"strings"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/log"
 )
 
-// CLIListener subscribes to NATS job result subjects and records them
-// into a CLIStore. It is used by the imas CLI to maintain a local
-// copy of job execution data.
+// CLIListener records job results into a CLIStore. It is used by the
+// imas CLI to maintain a local copy of job execution data. It reads no
+// bus subject itself: the CLI holds no tenant key, so it gets step events
+// from farmer over the sealed farmer-to-CLI leg (internal/api/client's
+// FollowJobs) and hands each one to Record.
 type CLIListener struct {
 	store   *CLIStore
-	nc      *nats.Conn
-	sub     *nats.Subscription
 	userKey string
 }
 
 // NewCLIListener creates a listener that will record job results into the
 // given CLIStore. userKey is the public key of the current CLI user.
-func NewCLIListener(store *CLIStore, nc *nats.Conn, userKey string) *CLIListener {
+func NewCLIListener(store *CLIStore, userKey string) *CLIListener {
 	return &CLIListener{
 		store:   store,
-		nc:      nc,
 		userKey: userKey,
 	}
-}
-
-// SubscribeAll subscribes to all job completion events. This is useful for
-// background recording of all job activity visible to the current user.
-func (l *CLIListener) SubscribeAll() error {
-	sub, err := l.nc.Subscribe("imas.cook.*.*", l.handleStepCompletion)
-	if err != nil {
-		return err
-	}
-	l.sub = sub
-	return nil
-}
-
-// SubscribeJob subscribes only to completion events for a specific JID.
-func (l *CLIListener) SubscribeJob(jid string) error {
-	topic := "imas.cook.*." + jid
-	sub, err := l.nc.Subscribe(topic, l.handleStepCompletion)
-	if err != nil {
-		return err
-	}
-	l.sub = sub
-	return nil
 }
 
 // RecordJobInit records the initial metadata for a job that the current
@@ -69,28 +43,9 @@ func (l *CLIListener) RecordJobInit(jid, recipe string, sproutIDs []string) {
 	}
 }
 
-// Stop unsubscribes the listener from NATS.
-func (l *CLIListener) Stop() {
-	if l.sub != nil {
-		l.sub.Unsubscribe()
-	}
-}
-
-func (l *CLIListener) handleStepCompletion(msg *nats.Msg) {
-	// Subject: imas.cook.<sproutID>.<jid>
-	parts := strings.Split(msg.Subject, ".")
-	if len(parts) < 4 {
-		return
-	}
-	sproutID := parts[2]
-	jid := parts[3]
-
-	var step cook.StepCompletion
-	if err := json.Unmarshal(msg.Data, &step); err != nil {
-		log.Errorf("CLI job store: failed to unmarshal step: %v", err)
-		return
-	}
-
+// Record appends one step event of job jid on sproutID, as farmer
+// forwarded it.
+func (l *CLIListener) Record(sproutID, jid string, step cook.StepCompletion) {
 	if err := l.store.AppendStep(sproutID, jid, step); err != nil {
 		log.Errorf("CLI job store: failed to append step for %s/%s: %v", sproutID, jid, err)
 	}

@@ -12,7 +12,6 @@ import (
 	apitypes "github.com/yogzblr/imas/internal/api/types"
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/cook"
-	"github.com/yogzblr/imas/internal/facts"
 	"github.com/yogzblr/imas/internal/ingredients/cmd"
 	"github.com/yogzblr/imas/internal/ingredients/test"
 	"github.com/yogzblr/imas/internal/shell"
@@ -41,19 +40,13 @@ func natsInit(ctx context.Context, nc *nats.Conn) error {
 		log.Tracef("Successfully published startup message on `%s`.", startupEvent)
 	}
 
-	// Publish system facts on startup, then keep re-publishing them: farmer's
-	// props for them expire (see factsloop.go).
-	if pubErr := publishFacts(nc, sproutID); pubErr != nil {
-		log.Errorf("failed to publish system facts: %v", pubErr)
-	}
+	// Publish system facts, sealed, on startup, then keep re-publishing
+	// them: farmer's props for them expire (see factsloop.go).
 	go runFactsRepublisher(ctx, nc, sproutID, factsRepublishInterval)
 
-	// Respond to on-demand facts requests from the farmer.
+	// Answer on-demand facts requests with the same sealed report.
 	_, err = nc.Subscribe("imas.sprouts."+sproutID+".facts.request", func(m *nats.Msg) {
-		fresh := facts.Collect()
-		fresh.SproutID = sproutID
-		b, _ := json.Marshal(fresh)
-		m.Respond(b)
+		answerFactsRequest(m, sproutID)
 	})
 	if err != nil {
 		return err

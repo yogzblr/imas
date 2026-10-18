@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/nats-io/nkeys"
 	"github.com/taigrr/jety"
+	"github.com/valkey-io/valkey-go"
+
+	"github.com/yogzblr/imas/internal/heartbeat"
 	"github.com/yogzblr/imas/internal/pki"
 )
 
@@ -293,4 +297,42 @@ func setDangerouslyAllowRoot(t *testing.T, enabled bool) {
 	t.Cleanup(func() {
 		jety.Set("dangerously_allow_root", false)
 	})
+}
+
+// A sprout farmer refused a plaintext facts report or step event from is
+// shown as needing an upgrade, in sprouts.get and sprouts.list (U3).
+func TestSproutsShowUpgradeRequired(t *testing.T) {
+	pkiDir := setupNatsAPIPKI(t)
+	setDangerouslyAllowRoot(t, true)
+	SetConnGetter(nil)
+	mr := miniredis.RunT(t)
+	c, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat.SetClient(c)
+	t.Cleanup(func() { heartbeat.SetClient(nil); c.Close() })
+	writeTestSproutKey(t, pkiDir, "accepted", "old-01", generateTestNKey(t))
+	writeTestSproutKey(t, pkiDir, "accepted", "new-01", generateTestNKey(t))
+	tenant := pki.CurrentTenantID()
+	heartbeat.MarkUpgradeRequired(tenant, "old-01", heartbeat.UpgradeKindCookStep)
+
+	params, _ := json.Marshal(pki.KeyManager{SproutID: "old-01"})
+	result, err := handleSproutsGet(tenant, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.(SproutInfo).UpgradeRequired; got != heartbeat.UpgradeKindCookStep {
+		t.Fatalf("sprouts.get upgrade_required = %q", got)
+	}
+	list, err := handleSproutsList(adminCaller(t, tenant), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range list.(map[string][]SproutInfo)["sprouts"] {
+		want := map[string]string{"old-01": heartbeat.UpgradeKindCookStep}[s.ID]
+		if s.UpgradeRequired != want {
+			t.Errorf("sprouts.list %s upgrade_required = %q, want %q", s.ID, s.UpgradeRequired, want)
+		}
+	}
 }

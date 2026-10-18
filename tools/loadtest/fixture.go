@@ -30,6 +30,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,7 @@ import (
 	nats_server "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/pki/natskeys"
@@ -147,13 +149,18 @@ func newTrust(operatorSigning, sysAccount nkeys.KeyPair) (*trust, error) {
 // tenantFixture is one load-test tenant: an Account with a delegated
 // signing key, and the requester that plays core in it.
 type tenantFixture struct {
-	name       string
-	accountPub string
-	signing    nkeys.KeyPair
-	signingPub string
-	accountJWT string
-	coreJWT    string
-	coreSeed   string
+	name string
+	// boxPub is the tenant's box public key the fixture sprouts seal to:
+	// generated here, since a local run has no farmer. boxPriv is its
+	// private half, which only the harness's tests read (to open what
+	// the sprouts sealed).
+	boxPub, boxPriv *[32]byte
+	accountPub      string
+	signing         nkeys.KeyPair
+	signingPub      string
+	accountJWT      string
+	coreJWT         string
+	coreSeed        string
 }
 
 func (tr *trust) newTenant(name string) (*tenantFixture, error) {
@@ -168,7 +175,11 @@ func (tr *trust) newTenant(name string) (*tenantFixture, error) {
 	if err != nil {
 		return nil, err
 	}
-	tf := &tenantFixture{name: name, signing: signing}
+	boxPub, boxPriv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	tf := &tenantFixture{name: name, signing: signing, boxPub: boxPub, boxPriv: boxPriv}
 	tf.accountPub, _ = acct.PublicKey()
 	tf.signingPub, _ = signing.PublicKey()
 	ac := jwt.NewAccountClaims(tf.accountPub)
@@ -201,11 +212,21 @@ func (tf *tenantFixture) mintUser(name string, perms jwt.Permissions) (userJWT, 
 // sproutCred is one simulated sprout's identity. Gateway is the gateway
 // JWT farmer issued with an enrolled sprout's User JWT (none for a
 // fixture sprout); it is sent on a wss:// connection, as a sprout does.
+// Box is what it seals its facts with, as a sprout does (U3).
 type sproutCred struct {
 	ID      string
 	JWT     string
 	Seed    string
 	Gateway string
+	Box     sproutBox
+}
+
+// sproutBox is a simulated sprout's payload-encryption keys: its own box
+// private key and the tenant it pinned, with that tenant's box public key.
+type sproutBox struct {
+	TenantID  string
+	TenantPub *[32]byte
+	Priv      *[32]byte
 }
 
 // sproutID is the ID of simulated sprout i under prefix.
@@ -229,7 +250,12 @@ func (tf *tenantFixture) mintSprouts(prefix string, n int) ([]sproutCred, error)
 					errs <- err
 					return
 				}
-				creds[i] = sproutCred{ID: id, JWT: j, Seed: s}
+				var priv [32]byte
+				if _, err := rand.Read(priv[:]); err != nil {
+					errs <- err
+					return
+				}
+				creds[i] = sproutCred{ID: id, JWT: j, Seed: s, Box: sproutBox{TenantID: tf.name, TenantPub: tf.boxPub, Priv: &priv}}
 			}
 		}()
 	}

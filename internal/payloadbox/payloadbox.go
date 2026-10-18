@@ -136,6 +136,16 @@ const (
 	// (internal/pki's enroll.go). Sealed under that key, so only its
 	// holder (or the tenant key's) could have produced it.
 	PurposeEnrollProof = "s2f.enroll.proof"
+	// PurposeFacts is a sprout's facts report on
+	// imas.sprouts.<id>.facts (cmd/sprout's factsloop.go,
+	// internal/facts's listener.go). One-way, fire-and-forget: farmer
+	// accepts it inside the freshness window, once.
+	PurposeFacts = "s2f.facts"
+	// PurposeCookStep is a sprout's cook step event on
+	// imas.cook.<id>.<jid> (internal/cook's stepevent.go), read by
+	// farmer's job listeners. One-way: farmer accepts it inside the
+	// freshness window, once cluster-wide.
+	PurposeCookStep = "s2f.cook.step"
 )
 
 // Control-plane purposes (docs/design/imas-payload-encryption-design.md,
@@ -157,6 +167,12 @@ const (
 	// key of their own, sealed under their current key: the CLI's
 	// counterpart of PurposeBoxKeySubmit (imas auth rotate-key).
 	PurposeCLIUserKeySubmit = "c2f.userkey.pub"
+	// PurposeCLICookStep is a cook step event farmer opened (s2f.cook.step)
+	// and forwards to a CLI user who asked to follow it (jobs.follow),
+	// sealed to that user's CLI box key and naming the follow request's
+	// ID (ReplyTo). The leg the imas CLI and imas serve read step events
+	// on: neither holds a tenant key.
+	PurposeCLICookStep = "f2c.cook.step"
 
 	// The SaaS API's requests on internal.tenant.provision,
 	// internal.tenant.deprovision, internal.tenant.purge and

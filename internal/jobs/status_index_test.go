@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
-	"github.com/nats-io/nats.go"
 	"gorm.io/gorm"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -240,7 +239,7 @@ func TestListenerIndexesUnderRegisteredTenant(t *testing.T) {
 	recordJobCreation("t_list", "web-01", cook.RecipeEnvelope{JobID: jid, Steps: []cook.Step{{ID: "s1"}}})
 	for _, step := range []cook.StepCompletion{stepEvent("s1", cook.StepCompleted), stepEvent("completed-"+jid, cook.StepCompleted)} {
 		b, _ := json.Marshal(step)
-		logJobs("t_list", &nats.Msg{Subject: "imas.cook.web-01." + jid, Data: b})
+		logJobs("t_list", sealedMsg(t, "t_list", "imas.cook.web-01."+jid, b))
 	}
 	if got := indexStatus(t, gdb, "t_list", "web-01", jid); got != JobIndexStatusSucceeded {
 		t.Fatalf("status %q, want succeeded", got)

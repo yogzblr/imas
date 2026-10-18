@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 	"github.com/yogzblr/imas/internal/log"
 
@@ -54,73 +53,24 @@ var cmdCook = &cobra.Command{
 				log.Fatal(err)
 			}
 		}
-		// topic: imas.cook."+envelope.JobID+"."+pki.GetSproutID()
 		jid := results.JID
 		nc, err := client.NewNatsClient()
 		if err != nil {
 			log.Fatal(err)
 		}
 		finished := make(chan struct{}, 1)
-		completions := make(chan cook.SproutStepCompletion)
-		topic := fmt.Sprintf("imas.cook.*.%s", jid)
 		completionSteps := make(map[string][]cook.StepCompletion)
-		sub, err := nc.Subscribe(topic, func(msg *nats.Msg) {
-			var step cook.StepCompletion
-			err := json.Unmarshal(msg.Data, &step)
-			if err != nil {
-				log.Errorf("Error unmarshalling message: %v\n", err)
-				return
-			}
-			subComponents := strings.Split(msg.Subject, ".")
-			sproutID := subComponents[2]
-
-			completions <- cook.SproutStepCompletion{SproutID: sproutID, CompletedStep: step}
-			if string(step.ID) == fmt.Sprintf("completed-%s", jid) {
-				return
-			} else if string(step.ID) == fmt.Sprintf("start-%s", jid) {
-				return
-			}
-
-			switch outputMode {
-			case "json":
-			case "":
-				fallthrough
-			case "text":
-				var b strings.Builder
-				b.WriteString(fmt.Sprintf("%s::%s\n", sproutID, jid))
-				b.WriteString(fmt.Sprintf("ID: %s\n", step.ID))
-				switch step.CompletionStatus {
-				case cook.StepCompleted:
-					b.WriteString(color.GreenString(fmt.Sprintf("\tResult: %s\n", "Success")))
-				case cook.StepFailed:
-					b.WriteString(color.RedString(fmt.Sprintf("\tResult: %s\n", "Failure")))
-				case cook.StepSkipped:
-					b.WriteString(color.YellowString(fmt.Sprintf("\tResult: %s\n", "Skipped")))
-				default:
-					b.WriteString(color.YellowString(fmt.Sprintf("\tResult: %s\n", "Unknown")))
-				}
-				b.WriteString("\tExecution Notes: \n")
-				for _, change := range step.Changes {
-					b.WriteString(fmt.Sprintf("\t\t%s\n", change))
-				}
-				if !step.Started.IsZero() {
-					b.WriteString(fmt.Sprintf("\tStarted:  %s\n", step.Started.Format(time.RFC3339)))
-					b.WriteString(fmt.Sprintf("\tDuration: %s\n", step.Duration.Round(time.Millisecond)))
-				}
-				b.WriteString("----------\n")
-				printTex.Lock()
-				fmt.Print(b.String())
-				printTex.Unlock()
-			}
-		})
+		// Step events come from farmer over the sealed farmer-to-CLI leg
+		// (jobs.follow): sprouts seal them to the tenant key, which this
+		// CLI doesn't hold. Followed before the trigger, so no event is
+		// missed; farmer's follow ends once it has been idle for as long
+		// as this command waits.
+		stream, err := client.FollowJobs(nc, jid, client.FollowOptions{Idle: time.Duration(cookTimeout) * time.Second})
 		if err != nil {
-			log.Printf("Error subscribing to %s: %v\n", topic, err)
-			log.Fatal(err)
+			log.Fatalf("Failed to follow job %s: %v", jid, err)
 		}
-		// The step events above are read in plaintext until Decision D
-		// (docs/design/imas-payload-encryption-design.md); the trigger
-		// is sealed, and farmer takes it only from this user. Sent on nc,
-		// after the subscription, so no event is missed.
+		defer stream.Stop()
+		// The trigger is sealed, and farmer takes it only from this user.
 		targetedSprouts, err := client.TriggerCook(nc, jid)
 		if err != nil {
 			log.Fatalf("Failed to trigger cook: %v", err)
@@ -130,28 +80,31 @@ var cmdCook = &cobra.Command{
 		}
 
 		// Record job locally with per-user tracking.
+		var cliListener *jobs.CLIListener
 		if cliStorePath, pathErr := jobs.DefaultCLIStorePath(); pathErr == nil {
 			if cliStore, storeErr := jobs.NewCLIStore(cliStorePath); storeErr == nil {
 				userKey, _ := auth.GetPubkey()
-				cliListener := jobs.NewCLIListener(cliStore, nc, userKey)
+				cliListener = jobs.NewCLIListener(cliStore, userKey)
 				cliListener.RecordJobInit(jid, string(cmdCook.Recipe), targetedSprouts)
-				if subErr := cliListener.SubscribeJob(jid); subErr != nil {
-					log.Errorf("CLI job store: failed to subscribe: %v", subErr)
-				} else {
-					defer cliListener.Stop()
-				}
 			}
 		}
 
 		localTimeout := time.After(time.Duration(cookTimeout) * time.Second)
 		dripTimeout := time.After(120 * time.Second)
 		concurrent := 0
-		defer sub.Unsubscribe()
 		defer nc.Flush()
 	waitLoop:
 		for {
 			select {
-			case completion := <-completions:
+			case ev, ok := <-stream.Events:
+				if !ok {
+					break waitLoop
+				}
+				completion := cook.SproutStepCompletion{SproutID: ev.SproutID, CompletedStep: ev.Step}
+				if cliListener != nil {
+					cliListener.Record(completion.SproutID, jid, completion.CompletedStep)
+				}
+				printCookStep(completion.SproutID, jid, completion.CompletedStep)
 				if string(completion.CompletedStep.ID) == fmt.Sprintf("start-%s", jid) {
 					concurrent++
 				}
@@ -220,6 +173,44 @@ var cmdCook = &cobra.Command{
 			}
 		}
 	},
+}
+
+// printCookStep prints one step event of job jid on sproutID, in text
+// output mode; the start and completed bookends print nothing.
+func printCookStep(sproutID, jid string, step cook.StepCompletion) {
+	if string(step.ID) == fmt.Sprintf("completed-%s", jid) || string(step.ID) == fmt.Sprintf("start-%s", jid) {
+		return
+	}
+	switch outputMode {
+	case "", "text":
+	default:
+		return
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%s::%s\n", sproutID, jid))
+	b.WriteString(fmt.Sprintf("ID: %s\n", step.ID))
+	switch step.CompletionStatus {
+	case cook.StepCompleted:
+		b.WriteString(color.GreenString(fmt.Sprintf("\tResult: %s\n", "Success")))
+	case cook.StepFailed:
+		b.WriteString(color.RedString(fmt.Sprintf("\tResult: %s\n", "Failure")))
+	case cook.StepSkipped:
+		b.WriteString(color.YellowString(fmt.Sprintf("\tResult: %s\n", "Skipped")))
+	default:
+		b.WriteString(color.YellowString(fmt.Sprintf("\tResult: %s\n", "Unknown")))
+	}
+	b.WriteString("\tExecution Notes: \n")
+	for _, change := range step.Changes {
+		b.WriteString(fmt.Sprintf("\t\t%s\n", change))
+	}
+	if !step.Started.IsZero() {
+		b.WriteString(fmt.Sprintf("\tStarted:  %s\n", step.Started.Format(time.RFC3339)))
+		b.WriteString(fmt.Sprintf("\tDuration: %s\n", step.Duration.Round(time.Millisecond)))
+	}
+	b.WriteString("----------\n")
+	printTex.Lock()
+	fmt.Print(b.String())
+	printTex.Unlock()
 }
 
 func init() {

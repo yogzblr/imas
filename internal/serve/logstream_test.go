@@ -15,11 +15,6 @@ import (
 	"github.com/yogzblr/imas/internal/cook"
 )
 
-// mockMsg creates a nats.Msg with the given subject and data.
-func mockMsg(subject string, data []byte) *nats.Msg {
-	return &nats.Msg{Subject: subject, Data: data}
-}
-
 func newTestHub() *logHub {
 	return &logHub{
 		clients: make(map[*logClient]struct{}),
@@ -99,31 +94,6 @@ func TestMatchesFilter(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("matchesFilter(%+v, %q, %q) = %v, want %v",
 					tt.entry, tt.level, tt.source, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSplitSubject(t *testing.T) {
-	tests := []struct {
-		input string
-		want  []string
-	}{
-		{"imas.cook.sprout1.jid123", []string{"imas", "cook", "sprout1", "jid123"}},
-		{"single", []string{"single"}},
-		{"a.b", []string{"a", "b"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := splitSubject(tt.input)
-			if len(got) != len(tt.want) {
-				t.Fatalf("splitSubject(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("splitSubject(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
-				}
 			}
 		})
 	}
@@ -359,25 +329,19 @@ func TestWebSocketSourceFilter(t *testing.T) {
 	}
 }
 
-func TestParseCookEvent_ValidMessage(t *testing.T) {
-	h := newTestHub()
-
-	msg := mockMsg(
-		"imas.cook.sprout-1.jid-001",
-		[]byte(`{
-			"id": "install-nginx",
-			"completionStatus": 2,
-			"changesMade": true,
-			"changes": ["installed nginx 1.25"],
-			"started": "2026-01-01T00:00:00Z",
-			"duration": 5000000000
-		}`),
-	)
-
-	entry := h.parseCookEvent(msg)
-	if entry == nil {
-		t.Fatal("expected non-nil entry")
+func TestCookEntry_ChangesMade(t *testing.T) {
+	var step cook.StepCompletion
+	if err := json.Unmarshal([]byte(`{
+		"id": "install-nginx",
+		"completionStatus": 2,
+		"changesMade": true,
+		"changes": ["installed nginx 1.25"],
+		"started": "2026-01-01T00:00:00Z",
+		"duration": 5000000000
+	}`), &step); err != nil {
+		t.Fatal(err)
 	}
+	entry := cookEntry(cook.FollowedStepEvent{SproutID: "sprout-1", JobID: "jid-001", EventID: "e1", Step: step})
 	if entry.Source != "sprout" {
 		t.Errorf("expected source 'sprout', got %q", entry.Source)
 	}
@@ -395,65 +359,74 @@ func TestParseCookEvent_ValidMessage(t *testing.T) {
 	}
 }
 
-func TestParseCookEvent_ErrorStep(t *testing.T) {
-	h := newTestHub()
-
-	// StepCompletion.Error is an error interface which won't unmarshal
-	// from JSON directly. When error is nil but status is Failed,
-	// check level is correct. The actual NATS messages have Error as nil
-	// in JSON; the level determination checks step.Error != nil.
-	msg := mockMsg(
-		"imas.cook.sprout-2.jid-002",
-		[]byte(`{
-			"id": "bad-step",
-			"completionStatus": 3,
-			"changesMade": false,
-			"started": "2026-01-01T00:00:00Z"
-		}`),
-	)
-
-	entry := h.parseCookEvent(msg)
-	if entry == nil {
-		t.Fatal("expected non-nil entry")
-	}
-	// Since Error is nil in JSON (can't marshal error interface), level will be debug
-	// (no changes, no error). This is expected behavior.
-	if entry.Level != "debug" {
-		t.Errorf("expected level 'debug' for no-changes/no-error step, got %q", entry.Level)
+func TestCookEntry_Levels(t *testing.T) {
+	for _, c := range []struct {
+		step cook.StepCompletion
+		want string
+	}{
+		{cook.StepCompletion{ID: "bad", CompletionStatus: cook.StepFailed, Error: fmt.Errorf("exit 1")}, "error"},
+		{cook.StepCompletion{ID: "noop", CompletionStatus: cook.StepCompleted}, "debug"},
+	} {
+		if got := cookEntry(cook.FollowedStepEvent{SproutID: "s", JobID: "j", Step: c.step}).Level; got != c.want {
+			t.Errorf("%s: level %q, want %q", c.step.ID, got, c.want)
+		}
 	}
 }
 
-func TestParseCookEvent_InvalidJSON(t *testing.T) {
+// The hub reads step events only from its follow (farmer's sealed leg),
+// drops the duplicates two overlapping follows deliver, renews the
+// follow, and retries one farmer refused.
+func TestLogHubFollow(t *testing.T) {
+	type stream struct {
+		events  chan cook.FollowedStepEvent
+		stopped chan struct{}
+	}
+	streams := make(chan *stream, 8)
+	calls := 0
+	origFollow, origRenew, origRetry := followJobs, followRenewAfter, followRetryAfter
+	t.Cleanup(func() { followJobs, followRenewAfter, followRetryAfter = origFollow, origRenew, origRetry })
+	followRenewAfter, followRetryAfter = 50*time.Millisecond, 10*time.Millisecond
+	followJobs = func(*nats.Conn) (<-chan cook.FollowedStepEvent, func(), error) {
+		calls++
+		if calls == 1 {
+			return nil, nil, fmt.Errorf("farmer refused")
+		}
+		s := &stream{events: make(chan cook.FollowedStepEvent, 8), stopped: make(chan struct{})}
+		streams <- s
+		var once bool
+		return s.events, func() {
+			if !once {
+				once = true
+				close(s.stopped)
+				close(s.events)
+			}
+		}, nil
+	}
 	h := newTestHub()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { h.follow(nil, stop); close(done) }()
 
-	msg := mockMsg(
-		"imas.cook.sprout-1.jid-003",
-		[]byte(`not json`),
-	)
-
-	entry := h.parseCookEvent(msg)
-	if entry == nil {
-		t.Fatal("expected non-nil entry for invalid JSON (should produce warn)")
+	first := <-streams
+	ev := cook.FollowedStepEvent{SproutID: "web-01", JobID: "j1", EventID: "e1", Step: cook.StepCompletion{ID: "s1", ChangesMade: true}}
+	first.events <- ev
+	second := <-streams // the renewal, which overlaps the first
+	second.events <- ev // the same event again, through the overlap
+	second.events <- cook.FollowedStepEvent{SproutID: "web-01", JobID: "j1", EventID: "e2", Step: cook.StepCompletion{ID: "s2"}}
+	select {
+	case <-first.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first follow was not stopped after its renewal")
 	}
-	if entry.Level != "warn" {
-		t.Errorf("expected level 'warn', got %q", entry.Level)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(h.getRecent("", "", 0)) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
-	if entry.SourceID != "sprout-1" {
-		t.Errorf("expected sourceID 'sprout-1', got %q", entry.SourceID)
-	}
-}
-
-func TestParseCookEvent_TooFewSubjectParts(t *testing.T) {
-	h := newTestHub()
-
-	msg := mockMsg(
-		"imas.cook",
-		[]byte(`{}`),
-	)
-
-	entry := h.parseCookEvent(msg)
-	if entry != nil {
-		t.Error("expected nil entry for subject with too few parts")
+	close(stop)
+	<-done
+	got := h.getRecent("", "", 0)
+	if len(got) != 2 {
+		t.Fatalf("recent entries %v, want 2 (the duplicate dropped)", got)
 	}
 }
 

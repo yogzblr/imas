@@ -172,7 +172,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.DurationVar(&o.ReconnectBase, "reconnect-base", natsretry.DefaultBase, "the sprout's busreconnectbase")
 	fs.DurationVar(&o.ReconnectCap, "reconnect-cap", natsretry.DefaultCap, "the sprout's busreconnectcap")
 	fs.StringVar(&o.SourceIPs, "source-ips", "", "comma-separated local IPs to spread connections over (more than ~28k per destination needs several)")
-	fs.BoolVar(&o.Facts, "facts", true, "publish this host's facts once per sprout at connect, as a sprout does")
+	fs.BoolVar(&o.Facts, "facts", true, "publish this host's facts once per sprout at connect, sealed, as a sprout does")
 	fs.DurationVar(&o.Heartbeat, "heartbeat-interval", heartbeat.Interval, "how often each sprout publishes its heartbeat, as a sprout does (internal/heartbeat); 0 sends none")
 
 	fs.DurationVar(&o.Hold, "hold", 60*time.Second, "how long to hold the connections while measuring test.ping")
@@ -646,6 +646,7 @@ func run(ctx context.Context, o *options) (*result, error) {
 	}
 	res.SproutHeartbeats = fl.heartbeats.Load()
 	res.SproutHeartbeatErrors = fl.heartbeatErrors.Load()
+	res.Facts = fl.factsCost()
 	res.FinishedAt = time.Now()
 	res.evaluate(o.thresholds())
 	return res, nil
@@ -660,9 +661,9 @@ func rateString(r float64) string {
 
 // factsPayload is this host's facts, collected once: the size of the
 // facts a real sprout publishes at startup.
-func factsPayload() []byte {
-	b, _ := json.Marshal(facts.Collect())
-	return b
+func factsPayload() *facts.SystemFacts {
+	sf := facts.Collect()
+	return &sf
 }
 
 // waitConnected waits until every requester connection is up again.

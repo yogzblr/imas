@@ -17,6 +17,11 @@ type SproutInfo struct {
 	KeyState  string `json:"key_state"`
 	Connected bool   `json:"connected"`
 	NKey      string `json:"nkey,omitempty"`
+	// UpgradeRequired names the kind of message ("facts", "cook step")
+	// this sprout last sent in plaintext, which farmer refused: it runs a
+	// build older than sealed facts and step events and needs an upgrade
+	// (internal/heartbeat's upgrade marker). Empty otherwise.
+	UpgradeRequired string `json:"upgrade_required,omitempty"`
 }
 
 func handleSproutsList(c apiCaller, params json.RawMessage) (any, error) {
@@ -53,6 +58,7 @@ func handleSproutsList(c apiCaller, params json.RawMessage) (any, error) {
 		}
 		if e.state == "accepted" {
 			info.Connected = probeSprout(tenantID, e.id)
+			info.UpgradeRequired = upgradeRequired(tenantID, e.id)
 		}
 		sprouts = append(sprouts, info)
 	}
@@ -105,6 +111,7 @@ func handleSproutsGet(tenantID string, params json.RawMessage) (any, error) {
 
 	if keyState == "accepted" {
 		info.Connected = probeSprout(tenantID, km.SproutID)
+		info.UpgradeRequired = upgradeRequired(tenantID, km.SproutID)
 	}
 
 	return info, nil
@@ -122,6 +129,15 @@ func probeSprout(tenantID, sproutID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return heartbeat.IsOnline(ctx, tenantID, sproutID)
+}
+
+// upgradeRequired is the sprout's "needs an upgrade" marker
+// (heartbeat.UpgradeRequired): the kind of plaintext message farmer last
+// refused from it, or "".
+func upgradeRequired(tenantID, sproutID string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return heartbeat.UpgradeRequired(ctx, tenantID, sproutID)
 }
 
 func resolveKeyState(tenantID, sproutID string) string {

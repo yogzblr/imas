@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/yogzblr/imas/internal/cook"
 )
 
@@ -43,7 +41,7 @@ func (h *reconcileHarness) dispatch(jid string, at time.Time) {
 // event delivers one step event of jid at the harness's current time.
 func (h *reconcileHarness) event(jid, stepID string) {
 	b, _ := json.Marshal(cook.StepCompletion{ID: cook.StepID(stepID), CompletionStatus: cook.StepCompleted})
-	logJobs(reconcileTenant, &nats.Msg{Subject: "imas.cook." + reconcileSprout + "." + jid, Data: b})
+	logJobs(reconcileTenant, sealedMsg(h.t, reconcileTenant, "imas.cook."+reconcileSprout+"."+jid, b))
 }
 
 // runJob delivers a whole one-step job's events.
@@ -229,7 +227,7 @@ func TestReconcileWindow_PerTenant(t *testing.T) {
 	h.dispatch("j", h.now.Add(-2*time.Hour)) // t_a: late
 	recordJobCreation("t_b", reconcileSprout, cook.RecipeEnvelope{JobID: "j", Steps: []cook.Step{{ID: "s1"}}, DispatchedAt: h.now})
 	start, _ := json.Marshal(cook.StepCompletion{ID: "start-j"})
-	logJobs("t_b", &nats.Msg{Subject: "imas.cook." + reconcileSprout + ".j", Data: start})
+	logJobs("t_b", sealedMsg(t, "t_b", "imas.cook."+reconcileSprout+".j", start))
 	h.event("j", "start-j") // t_a's late start
 
 	if row, _ := indexRow(t, db, "t_b", reconcileSprout, "j"); !row.Started {

@@ -584,10 +584,10 @@ func RunSprout(ctx context.Context, nc busConn, sproutID string, interval time.D
 	}
 }
 
-// PurgeTenant deletes every presence key and acceptance marker of
-// tenantID's sprouts (S6: a purged tenant's live cache), on every Valkey
-// node, and returns how many keys of each kind it deleted
-// ("valkey.heartbeat", "valkey.accepted"). The keys are found by the
+// PurgeTenant deletes every presence key, acceptance marker and upgrade
+// marker (upgrade.go) of tenantID's sprouts (S6: a purged tenant's live
+// cache), on every Valkey node, and returns how many keys of each kind it
+// deleted ("valkey.heartbeat", "valkey.accepted", "valkey.upgrade"). The keys are found by the
 // tenant part of their hash tag, {<tenant_id>:, which ends at a ':' no
 // tenant ID contains, so no other tenant's key, even one for a sprout of
 // the same ID, matches.

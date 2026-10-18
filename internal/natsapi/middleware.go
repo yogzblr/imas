@@ -20,6 +20,7 @@ var natsActionMap = map[string]rbac.Action{
 	MethodJobsList:        rbac.ActionView,
 	MethodJobsGet:         rbac.ActionView,
 	MethodJobsForSprout:   rbac.ActionView,
+	MethodJobsFollow:      rbac.ActionView,
 	MethodPropsGetAll:     rbac.ActionView,
 	MethodPropsGet:        rbac.ActionView,
 	MethodCohortsList:     rbac.ActionView,

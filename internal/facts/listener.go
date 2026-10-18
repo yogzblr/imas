@@ -2,6 +2,7 @@ package facts
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/nats-io/nats.go"
 	log "github.com/yogzblr/imas/internal/log"
 
+	"github.com/yogzblr/imas/internal/heartbeat"
+	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki"
 	"github.com/yogzblr/imas/internal/props"
 )
@@ -55,9 +58,12 @@ const natsCoreQueueGroup = "imas-core"
 // imas.sprouts.<sprout_id>.facts subject (internal/pki/jwtusers.go), so the
 // subject is the only part of the message that says who sent it. See
 // handleFactsMsg.
+//
+// Every report is sealed by the sprout (payloadbox.PurposeFacts, security
+// review P6): see handleFactsMsg for what is accepted.
 func RegisterFarmerListener(tenantID string, nc *nats.Conn) {
 	_, err := nc.QueueSubscribe("imas.sprouts.*.facts", natsCoreQueueGroup, func(msg *nats.Msg) {
-		handleFactsMsg(tenantID, msg.Subject, msg.Data)
+		handleFactsMsg(tenantID, msg.Subject, msg.Header, msg.Data)
 	})
 	if err != nil {
 		log.Errorf("facts: failed to subscribe: %v", err)
@@ -79,41 +85,84 @@ func factsSubjectSproutID(subject string) (string, bool) {
 	return sid, true
 }
 
+// factsGuard is this replica's replay guard for facts reports, keyed on
+// (tenant_id, sprout_id, message id). In memory only: a report replayed
+// to another replica inside the window stores the same sprout's own,
+// recent facts again, which a cluster-wide claim per report (one Valkey
+// write per sprout per facts interval) would not be worth.
+var factsGuard = payloadbox.NewKeyedReplayGuard()
+
+// ErrPlaintextFacts: a facts report arrived without the payloadbox
+// marker. Refused from every sprout: there is no plaintext fallback, as
+// for cmd.run and cook. The sprout runs a build older than sealed facts
+// (heartbeat.MarkUpgradeRequired).
+var ErrPlaintextFacts = errors.New("facts: plaintext report refused; the sprout runs a build that can't seal its facts and needs an upgrade")
+
 // handleFactsMsg stores one facts publication for tenantID. FLAG FOR
-// SECURITY REVIEW (H2).
+// SECURITY REVIEW (H2, P6).
 //
 //   - The sprout is the subject's second token, validated with
 //     pki.IsValidSproutID. The NATS server enforced that the publisher may
-//     use that subject; nothing enforced anything about the body.
-//   - The body's sprout_id must equal it. A message whose body names
-//     another sprout (or none) is dropped whole, not stored under the
-//     subject's sprout: a sprout that sends someone else's ID is either
-//     broken or forging, and neither report is worth keeping.
+//     use that subject; the seal, not the subject, says who wrote it.
+//   - The report must be a payloadbox envelope (payloadbox.Header) that
+//     opens under one of the sprout's box keys on record, active or in
+//     grace, against the tenant's keys (pki.OpenFromSprout): purpose
+//     s2f.facts, tenant tenantID and sprout ID the subject's, no ReplyTo.
+//     A plaintext report is refused (ErrPlaintextFacts) and marks the
+//     sprout as needing an upgrade; anything that doesn't open is refused.
+//   - It must be fresh (IssuedAt within payloadbox.DefaultMaxSkew) and not
+//     seen before on this replica (factsGuard).
+//   - The sealed body's sprout_id must equal the subject's. A body that
+//     names another sprout (or none) is dropped whole.
 //   - Rows are written with props.SetPropForTenant, whose primary key is
 //     (tenant_id, sprout_id, name), so the store is keyed on the tenant of
 //     the connection the message arrived on and the subject's sprout,
 //     together.
-func handleFactsMsg(tenantID, subject string, data []byte) {
-	if tenantID == "" {
-		log.Error("facts: listener has no tenant, dropping message")
+//
+// A refused report changes nothing that was stored.
+func handleFactsMsg(tenantID, subject string, header nats.Header, data []byte) {
+	sf, err := openFactsMsg(tenantID, subject, header, data)
+	if err != nil {
+		log.Warnf("facts: refusing a report on %s (tenant %s): %v", subject, tenantID, err)
 		return
+	}
+	heartbeat.ClearUpgradeRequired(tenantID, sf.SproutID)
+	storeFacts(tenantID, *sf)
+	log.Noticef("facts: received system facts from %s (os=%s arch=%s)", sf.SproutID, sf.OS, sf.Arch)
+}
+
+// openFactsMsg runs every check handleFactsMsg lists and returns the
+// opened report.
+func openFactsMsg(tenantID, subject string, header nats.Header, data []byte) (*SystemFacts, error) {
+	if tenantID == "" {
+		return nil, errors.New("listener has no tenant")
 	}
 	sid, ok := factsSubjectSproutID(subject)
 	if !ok {
-		log.Warnf("facts: dropping message on unexpected subject %q", subject)
-		return
+		return nil, errors.New("unexpected subject")
+	}
+	if header.Get(payloadbox.Header) != payloadbox.HeaderBox1 {
+		heartbeat.MarkUpgradeRequired(tenantID, sid, heartbeat.UpgradeKindFacts)
+		return nil, ErrPlaintextFacts
+	}
+	msg, err := pki.OpenFromSprout(tenantID, sid, payloadbox.PurposeFacts, data)
+	if err != nil {
+		return nil, err
+	}
+	if msg.ReplyTo != "" {
+		return nil, payloadbox.ErrOpen
+	}
+	if err := factsGuard.Accept(msg, tenantID, sid); err != nil {
+		return nil, err
 	}
 	var sf SystemFacts
-	if unmarshalErr := json.Unmarshal(data, &sf); unmarshalErr != nil {
-		log.Errorf("facts: failed to unmarshal facts from %s: %v", sid, unmarshalErr)
-		return
+	if err := json.Unmarshal(msg.Body, &sf); err != nil {
+		return nil, fmt.Errorf("decoding the sealed report: %w", err)
 	}
 	if sf.SproutID != sid {
-		log.Warnf("facts: dropping facts published on %s's subject that name sprout %q in the body", sid, sf.SproutID)
-		return
+		return nil, fmt.Errorf("the sealed report names sprout %q", sf.SproutID)
 	}
-	storeFacts(tenantID, sf)
-	log.Noticef("facts: received system facts from %s (os=%s arch=%s)", sid, sf.OS, sf.Arch)
+	return &sf, nil
 }
 
 // storeFacts writes system facts into the props store, scoped to tenantID

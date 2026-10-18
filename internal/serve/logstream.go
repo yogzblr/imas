@@ -24,13 +24,15 @@ type LogEntry struct {
 	Message   string `json:"message"`
 }
 
-// logHub manages WebSocket subscribers for log streaming. It subscribes
-// to NATS cook events and fans out parsed log entries to all connected
-// WebSocket clients. Each client can filter by level and source.
+// logHub manages WebSocket subscribers for log streaming. It follows
+// every cook job the serve user may view over the sealed farmer-to-CLI
+// leg (client.FollowJobs, farmer's jobs.follow: sprouts seal their step
+// events to the tenant key, which imas serve doesn't hold) and fans out
+// log entries to all connected WebSocket clients. Each client can filter
+// by level and source.
 type logHub struct {
 	mu      sync.Mutex
 	clients map[*logClient]struct{}
-	sub     *nats.Subscription
 
 	// recentMu guards the recent log ring buffer.
 	recentMu sync.RWMutex
@@ -86,67 +88,118 @@ func getHub() *logHub {
 	return hub
 }
 
-// subscribeNATS subscribes to NATS cook event subjects and converts
-// them into LogEntry values for connected WebSocket clients.
+// followLease is how long each follow of every job lasts at farmer, and
+// followRenew how often the hub starts the next one: the two overlap, so
+// no event falls between them, and the hub drops the duplicates the
+// overlap delivers by event ID. followRetry is how soon a follow that
+// farmer refused is tried again.
+const (
+	followLease = 15 * time.Minute
+	followRenew = 10 * time.Minute
+	followRetry = 30 * time.Second
+)
+
+// followRenewAfter and followRetryAfter are the values used; tests shorten
+// them.
+var (
+	followRenewAfter = followRenew
+	followRetryAfter = followRetry
+)
+
+// followJobs starts a follow of every job and returns its events and the
+// function that stops it; a variable so tests can feed the hub without a
+// farmer.
+var followJobs = func(nc *nats.Conn) (<-chan cook.FollowedStepEvent, func(), error) {
+	s, err := client.FollowJobs(nc, "", client.FollowOptions{Max: followLease})
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.Events, s.Stop, nil
+}
+
+// subscribeNATS starts following every cook job over client.NatsConn.
 func (h *logHub) subscribeNATS() {
 	if client.NatsConn == nil {
 		log.Errorf("logstream: NATS connection not available; log streaming disabled")
 		return
 	}
-
-	sub, err := client.NatsConn.Subscribe("imas.cook.*.*", func(msg *nats.Msg) {
-		entry := h.parseCookEvent(msg)
-		if entry == nil {
-			return
-		}
-		h.storeRecent(*entry)
-		h.broadcast(*entry)
-	})
-	if err != nil {
-		log.Errorf("logstream: failed to subscribe to NATS cook events: %v", err)
-		return
-	}
-	h.sub = sub
-	log.Printf("logstream: subscribed to imas.cook.*.* for log streaming")
+	go h.follow(client.NatsConn, nil)
+	log.Printf("logstream: following cook step events from farmer (sealed) for log streaming")
 }
 
-// parseCookEvent converts a NATS cook message into a LogEntry.
-// Subject format: imas.cook.<sproutID>.<jid>
-func (h *logHub) parseCookEvent(msg *nats.Msg) *LogEntry {
-	parts := splitSubject(msg.Subject)
-	if len(parts) < 4 {
-		return nil
+// follow keeps a follow of every job running until stop closes: it starts
+// the next one every followRenew (or followRetry after a refusal) and
+// stops the one before once the next is in place.
+func (h *logHub) follow(nc *nats.Conn, stop <-chan struct{}) {
+	in := make(chan cook.FollowedStepEvent, sendBufSize)
+	seen := map[string]time.Time{}
+	var stopCur func()
+	start := func() time.Duration {
+		events, stopNext, err := followJobs(nc)
+		if err != nil {
+			log.Errorf("logstream: following cook step events: %v", err)
+			return followRetryAfter
+		}
+		go func() {
+			for ev := range events {
+				select {
+				case in <- ev:
+				case <-stop:
+					return
+				}
+			}
+		}()
+		if stopCur != nil {
+			stopCur()
+		}
+		stopCur = stopNext
+		return followRenewAfter
 	}
-	sproutID := parts[2]
-	jid := parts[3]
-
-	var step cook.StepCompletion
-	if err := json.Unmarshal(msg.Data, &step); err != nil {
-		return &LogEntry{
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Level:     "warn",
-			Source:    "sprout",
-			SourceID:  sproutID,
-			Message:   "failed to parse cook event for job " + jid,
+	timer := time.NewTimer(start())
+	defer timer.Stop()
+	defer func() {
+		if stopCur != nil {
+			stopCur()
+		}
+	}()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			timer.Reset(start())
+			for id, at := range seen {
+				if time.Since(at) > 2*followLease {
+					delete(seen, id)
+				}
+			}
+		case ev := <-in:
+			if _, dup := seen[ev.EventID]; dup {
+				continue
+			}
+			seen[ev.EventID] = time.Now()
+			entry := cookEntry(ev)
+			h.storeRecent(entry)
+			h.broadcast(entry)
 		}
 	}
+}
 
-	level := "info"
-	message := formatStepMessage(step, jid)
+// cookEntry converts a cook step event into a LogEntry.
+func cookEntry(ev cook.FollowedStepEvent) LogEntry {
+	step := ev.Step
+	level := "debug"
 	if step.Error != nil {
 		level = "error"
 	} else if step.ChangesMade {
 		level = "info"
-	} else {
-		level = "debug"
 	}
-
-	return &LogEntry{
+	return LogEntry{
 		Timestamp: step.Started.UTC().Format(time.RFC3339),
 		Level:     level,
 		Source:    "sprout",
-		SourceID:  sproutID,
-		Message:   message,
+		SourceID:  ev.SproutID,
+		Message:   formatStepMessage(step, ev.JobID),
 	}
 }
 
@@ -268,20 +321,6 @@ func matchesFilter(entry LogEntry, level, source string) bool {
 		}
 	}
 	return true
-}
-
-// splitSubject splits a NATS subject into its dot-delimited parts.
-func splitSubject(subject string) []string {
-	parts := make([]string, 0, 4)
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == '.' {
-			parts = append(parts, subject[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, subject[start:])
-	return parts
 }
 
 // HandleLogStream upgrades an HTTP request to a WebSocket connection

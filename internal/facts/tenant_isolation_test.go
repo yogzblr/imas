@@ -24,7 +24,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -335,24 +334,12 @@ func TestStoreFacts_TwoTenantsIsolated(t *testing.T) {
 	ncSproutB := dialTenantIsolationConn(t, sproutJWTB, sproutSeedB)
 	defer ncSproutB.Close()
 
-	sfA := SystemFacts{OS: "linux", Arch: "amd64", Hostname: "host-a", SproutID: sproutA}
-	dataA, err := json.Marshal(sfA)
-	if err != nil {
-		t.Fatalf("marshal tenant A facts: %v", err)
-	}
-	if err := ncSproutA.Publish("imas.sprouts."+sproutA+".facts", dataA); err != nil {
-		t.Fatalf("publishing tenant A facts: %v", err)
-	}
+	keys := newSealedFacts(t, tenantA, tenantB)
+	keys.enroll(tenantA, sproutA)
+	keys.enroll(tenantB, sproutB)
+	publishSealed(t, ncSproutA, sproutA, keys.seal(tenantA, sproutA, SystemFacts{OS: "linux", Arch: "amd64", Hostname: "host-a", SproutID: sproutA}))
 	ncSproutA.Flush()
-
-	sfB := SystemFacts{OS: "darwin", Arch: "arm64", Hostname: "host-b", SproutID: sproutB}
-	dataB, err := json.Marshal(sfB)
-	if err != nil {
-		t.Fatalf("marshal tenant B facts: %v", err)
-	}
-	if err := ncSproutB.Publish("imas.sprouts."+sproutB+".facts", dataB); err != nil {
-		t.Fatalf("publishing tenant B facts: %v", err)
-	}
+	publishSealed(t, ncSproutB, sproutB, keys.seal(tenantB, sproutB, SystemFacts{OS: "darwin", Arch: "arm64", Hostname: "host-b", SproutID: sproutB}))
 	ncSproutB.Flush()
 
 	// Give both listeners time to process — there's no ack for a fan-in

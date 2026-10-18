@@ -111,6 +111,7 @@ var userRoutes = map[string]userHandler{
 	MethodJobsList:      handleJobsList,
 	MethodJobsGet:       handleJobsGet,
 	MethodJobsForSprout: handleJobsListForSprout,
+	MethodJobsFollow:    handleJobsFollow,
 	MethodJobsDelete:    handleJobsDelete,
 	MethodJobsCancel:    handleJobsCancel,
 	MethodAuthLogin:     handleAuthLogin,

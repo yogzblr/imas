@@ -1,14 +1,20 @@
 package main
 
 import (
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/nacl/box"
 
+	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/fleetsign"
+	"github.com/yogzblr/imas/internal/payloadbox"
+	"github.com/yogzblr/imas/internal/pki"
 )
 
 func postJSON(h http.Handler, path, body string) *httptest.ResponseRecorder {
@@ -110,5 +116,44 @@ func TestSelfUpdateUnknownSprout(t *testing.T) {
 	_, h := newTestFarmer(t, 1)
 	if rec := postJSON(h, "/_stub/selfupdate", `{"sprout_id":"nobody","version":"v0.2.0"}`); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown sprout: %d", rec.Code)
+	}
+}
+
+// The stub records a step event only once it opens under its tenant key
+// and the sprout's box key, for the subject's job; plaintext and forged
+// events are dropped.
+func TestOpenStepEvent(t *testing.T) {
+	f, _ := newTestFarmer(t, 1)
+	sproutPub, sproutPriv, _ := box.GenerateKey(rand.Reader)
+	f.sproutBox["web-01"] = sproutPub
+	_, strangerPriv, _ := box.GenerateKey(rand.Reader)
+	tenantPub, err := pki.DecodeBoxPubKey(f.tenantBoxPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seal := func(priv *[32]byte, jid string) *nats.Msg {
+		msg, _ := payloadbox.NewMessage(payloadbox.PurposeCookStep, stubTenantID, "web-01", "",
+			cook.StepEvent{JobID: jid, Step: cook.StepCompletion{ID: "selfupdate-1", CompletionStatus: cook.StepCompleted}})
+		data, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: tenantPub, Priv: priv}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := nats.NewMsg(cook.StepEventSubject("web-01", "job-1"))
+		m.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+		m.Data = data
+		return m
+	}
+	step, jid, err := f.openStepEvent(seal(sproutPriv, "job-1"))
+	if err != nil || jid != "job-1" || !strings.Contains(string(step), `"ID":"selfupdate-1"`) {
+		t.Fatalf("honest event: %s %s %v", step, jid, err)
+	}
+	for name, m := range map[string]*nats.Msg{
+		"plaintext":       {Subject: cook.StepEventSubject("web-01", "job-1"), Data: []byte(`{"ID":"selfupdate-1"}`)},
+		"forged":          seal(strangerPriv, "job-1"),
+		"for another job": seal(sproutPriv, "job-2"),
+	} {
+		if _, _, err := f.openStepEvent(m); err == nil {
+			t.Errorf("%s event accepted", name)
+		}
 	}
 }

@@ -72,6 +72,7 @@ var readOnlyActions = map[string]bool{
 	"jobs.list":      true,
 	"jobs.get":       true,
 	"jobs.forsprout": true,
+	"jobs.follow":    true,
 	"props.getall":   true,
 	"props.get":      true,
 	"cohorts.list":   true,

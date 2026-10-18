@@ -127,3 +127,22 @@ func (s *Sprout) AnswerCooks(t testing.TB, nc *nats.Conn, answer func(cook.Recip
 	}
 	return pushed
 }
+
+// StepEvent is the sealed step event this sprout publishes for step of
+// job jid (cook.StepEvent under payloadbox.PurposeCookStep), as
+// cmd/sprout's cook does.
+func (s *Sprout) StepEvent(t testing.TB, jid string, step cook.StepCompletion) *nats.Msg {
+	t.Helper()
+	msg, err := payloadbox.NewMessage(payloadbox.PurposeCookStep, s.Tenant, s.ID, "", cook.StepEvent{JobID: jid, Step: step})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := payloadbox.Seal(msg, []payloadbox.KeyPair{{PeerPub: s.tenantPub, Priv: s.priv}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := nats.NewMsg(cook.StepEventSubject(s.ID, jid))
+	m.Header.Set(payloadbox.Header, payloadbox.HeaderBox1)
+	m.Data = data
+	return m
+}
