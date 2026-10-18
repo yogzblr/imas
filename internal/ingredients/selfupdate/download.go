@@ -32,18 +32,16 @@ import (
 //     another host. The sprout's JWT is never sent.
 //   - Only https is followed, for the repository URL, every URL its index
 //     names, and every redirect.
+//   - Every request has limits.request as its whole timeout, the package
+//     is capped at limits.packageBytes or the size the index declares for
+//     it, and the update as a whole at limits.budget (limits.go).
 //
 // Nothing a download returns is trusted until its SHA-256 matches the
 // signed checksums.txt: the indexes only say where to look.
 
 const (
-	// maxPackageBytes caps a downloaded package (and the .nupkg carrying
-	// an MSI). A sprout package is a few tens of MB; this only stops an
-	// endless response filling the disk.
-	maxPackageBytes = 512 << 20
-	downloadTimeout = 15 * time.Minute
-	maxRedirects    = 10
-	maxRepoURLLen   = 2048
+	maxRedirects  = 10
+	maxRepoURLLen = 2048
 	// repoUser is the basic-auth user name sent with the repo token: the
 	// one the Ansible role gives apt, yum and zypper for a private
 	// Buildkite registry.
@@ -55,10 +53,11 @@ const (
 // HTTPS server.
 var repoRootCAs *x509.CertPool
 
-// newRepoClient returns the client for repository requests.
-func newRepoClient() *http.Client {
+// newRepoClient returns the client for repository requests, each bounded
+// by timeout from the first byte sent to the last byte of the body read.
+func newRepoClient(timeout time.Duration) *http.Client {
 	return &http.Client{
-		Timeout: downloadTimeout,
+		Timeout: timeout,
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -85,9 +84,10 @@ func newRepoClient() *http.Client {
 	}
 }
 
-// get sends a GET for u and returns the response if it is a 200. The
-// caller closes the body.
-func (r repo) get(ctx context.Context, u *url.URL) (*http.Response, error) {
+// get sends a GET for u and returns the response if it is a 200. A 200
+// whose Content-Length is over maxBytes is refused before its body is
+// read. The caller closes the body.
+func (r repo) get(ctx context.Context, u *url.URL, maxBytes int64) (*http.Response, error) {
 	if u.Scheme != "https" || u.User != nil {
 		return nil, fmt.Errorf("selfupdate: refusing to fetch %s: not a plain https URL", redact(u))
 	}
@@ -107,8 +107,16 @@ func (r repo) get(ctx context.Context, u *url.URL) (*http.Response, error) {
 		resp.Body.Close()
 		return nil, &httpStatusError{url: redact(u), status: resp.StatusCode}
 	}
+	if resp.ContentLength > maxBytes {
+		resp.Body.Close()
+		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d byte limit", ErrTooLarge, redact(u), resp.ContentLength, maxBytes)
+	}
 	return resp, nil
 }
+
+// ErrTooLarge: the repository served, or its index declared, more than a
+// limit allows (limits.go).
+var ErrTooLarge = errors.New("selfupdate: the update repository's response is over its size limit")
 
 // httpStatusError is a non-200 answer from the repository.
 type httpStatusError struct {
@@ -120,29 +128,28 @@ func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("selfupdate: GET %s: HTTP %d", e.url, e.status)
 }
 
-// download fetches u into dest (which must not exist) and checks its
-// SHA-256 against wantSHA256, the signed checksums.txt line's hash. The file is
-// removed again on any error, so a file left at dest has exactly the
-// signed bytes.
-func (r repo) download(ctx context.Context, u *url.URL, dest, wantSHA256 string) error {
-	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
-	defer cancel()
-	resp, err := r.get(ctx, u)
+// download fetches u into dest (which must not exist), at most maxBytes,
+// and checks its SHA-256 against wantSHA256, the signed checksums.txt
+// line's hash. The file is removed again on any error, so a file left at
+// dest has exactly the signed bytes.
+func (r repo) download(ctx context.Context, u *url.URL, dest, wantSHA256 string, maxBytes int64) error {
+	resp, err := r.get(ctx, u, maxBytes)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	return writeVerified(resp.Body, dest, wantSHA256)
+	return redactedError(writeVerified(resp.Body, dest, wantSHA256, maxBytes))
 }
 
 // downloadFromNupkg fetches the .nupkg at u into dir, takes the entry
 // named fileName from the package root, and writes it to dest, checking
 // its SHA-256 against wantSHA256. The .nupkg itself is unsigned and only
-// a container: what is checked and installed is the MSI inside it.
+// a container: what is checked and installed is the MSI inside it. Both
+// the .nupkg and the MSI are capped at r.limits.packageBytes, and the MSI
+// also at the size its zip entry declares.
 func (r repo) downloadFromNupkg(ctx context.Context, u *url.URL, dir, fileName, dest, wantSHA256 string) error {
-	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
-	defer cancel()
-	resp, err := r.get(ctx, u)
+	maxBytes := r.limits.packageBytes
+	resp, err := r.get(ctx, u, maxBytes)
 	if err != nil {
 		return err
 	}
@@ -152,16 +159,16 @@ func (r repo) downloadFromNupkg(ctx context.Context, u *url.URL, dir, fileName, 
 		return fmt.Errorf("selfupdate: staging the NuGet package: %w", err)
 	}
 	defer os.Remove(nupkg.Name())
-	n, err := io.Copy(nupkg, io.LimitReader(resp.Body, maxPackageBytes+1))
+	n, err := io.Copy(nupkg, io.LimitReader(resp.Body, maxBytes+1))
 	resp.Body.Close()
 	if cerr := nupkg.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
-		return fmt.Errorf("selfupdate: downloading %s: %w", redact(u), err)
+		return redactedError(fmt.Errorf("selfupdate: downloading %s: %w", redact(u), err))
 	}
-	if n > maxPackageBytes {
-		return fmt.Errorf("selfupdate: %s is larger than %d bytes", redact(u), maxPackageBytes)
+	if n > maxBytes {
+		return fmt.Errorf("%w: %s is larger than %d bytes", ErrTooLarge, redact(u), maxBytes)
 	}
 
 	zr, err := zip.OpenReader(nupkg.Name())
@@ -181,17 +188,20 @@ func (r repo) downloadFromNupkg(ctx context.Context, u *url.URL, dir, fileName, 
 	if entry == nil {
 		return fmt.Errorf("%w: %s has no %s at its root", ErrNotInRepo, redact(u), fileName)
 	}
+	if entry.UncompressedSize64 > uint64(maxBytes) {
+		return fmt.Errorf("%w: %s in %s declares %d bytes, over the %d byte limit", ErrTooLarge, fileName, redact(u), entry.UncompressedSize64, maxBytes)
+	}
 	rc, err := entry.Open()
 	if err != nil {
 		return fmt.Errorf("selfupdate: opening %s in %s: %w", fileName, redact(u), err)
 	}
 	defer rc.Close()
-	return writeVerified(rc, dest, wantSHA256)
+	return writeVerified(rc, dest, wantSHA256, r.limits.declaredCap(int64(entry.UncompressedSize64)))
 }
 
-// writeVerified copies at most maxPackageBytes from src to a new file at
-// dest and checks its SHA-256. dest is removed on any error.
-func writeVerified(src io.Reader, dest, wantSHA256 string) (err error) {
+// writeVerified copies at most maxBytes from src to a new file at dest
+// and checks its SHA-256. dest is removed on any error.
+func writeVerified(src io.Reader, dest, wantSHA256 string, maxBytes int64) (err error) {
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("selfupdate: creating %s: %w", dest, err)
@@ -205,12 +215,12 @@ func writeVerified(src io.Reader, dest, wantSHA256 string) (err error) {
 		}
 	}()
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(src, maxPackageBytes+1))
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(src, maxBytes+1))
 	if err != nil {
 		return fmt.Errorf("selfupdate: downloading the package: %w", err)
 	}
-	if n > maxPackageBytes {
-		return fmt.Errorf("selfupdate: the package is larger than %d bytes", maxPackageBytes)
+	if n > maxBytes {
+		return fmt.Errorf("%w: the package is larger than %d bytes", ErrTooLarge, maxBytes)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != wantSHA256 {
 		return fmt.Errorf("%w: got %s, signed %s", ErrChecksumMismatch, got, wantSHA256)

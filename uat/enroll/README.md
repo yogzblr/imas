@@ -216,8 +216,10 @@ link already exists). It then polls `GET .../sprouts?asset_ids=...` until
 every sprout is `accepted` and `connected`. The asset id is the same one
 `uat/tests/harness` uses by default (`DefaultAssetID`), so when the harness
 links it again it gets 200, not a 409. That flag is farmer's view: the
-Valkey heartbeat key farmer keeps per `(tenant_id, sprout_id)` from the bus's
-connect events, which saasapi reads. It stays false if saasapi has no
+Valkey heartbeat key farmer keeps per `(tenant_id, sprout_id)`, set from the
+bus's connect events, refreshed by the sprout's heartbeats and removed only
+by the DISCONNECT of the connection that set it (`internal/heartbeat`), which
+saasapi reads. It stays false if saasapi has no
 `SAASAPI_VALKEY_ADDRS`. The batch-action scenarios address sprouts by asset
 id, so the links have to exist anyway. Scenario S3 ("new link: 201") has to
 unlink first (`DELETE .../asset-link`) or use an asset id of its own.

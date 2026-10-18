@@ -1,18 +1,12 @@
 package heartbeat
 
 // These tests cover this package's own logic (tenant/key scoping, and
-// mapping a CONNECT/DISCONNECT event to a real tenant + sprout ID) against
-// an in-memory PKI store. They deliberately don't exercise a real
-// Set/Del/Exists round trip: valkey-go's command builder needs an
-// unexported "no keyslot restriction" sentinel to build a valid command
-// outside of an actual client connection, and its ValkeyMessage
-// success-reply type has no exported constructor either — both are
-// internal to that package, so a faithful fake isn't buildable from here
-// without a live Valkey/Redis server (e.g. in a docker-compose-backed
-// integration test), which this unit test suite doesn't have.
-// IsOnline/handleConnect/handleDisconnect's nil-client short-circuit
-// (exercised below) is what every code path actually goes through when no
-// Valkey backend is configured, which is worth covering directly.
+// mapping a CONNECT/DISCONNECT event to a real tenant, sprout ID and
+// connection ID) against an in-memory PKI store, plus the nil-client
+// short-circuit every code path takes when no Valkey is configured. The
+// Valkey round trips are in heartbeat_refresh_test.go and
+// acceptmarker_test.go (miniredis) and presence_race_test.go (miniredis, a
+// real Valkey and a real Valkey Cluster).
 
 import (
 	"context"
@@ -59,14 +53,26 @@ func newTestPKIDB(t *testing.T) {
 	pki.NatsServer = nil
 }
 
+// testServerID stands in for a bus node's server ID in the events the
+// tests build.
+const testServerID = "NTESTSERVER"
+
 // connectEventJSON builds a $SYS.ACCOUNT.*.CONNECT/DISCONNECT event body
-// carrying both the connecting Account's pubkey ("acc") and the
-// authenticated user's pubkey ("user") — the two ClientInfo fields
+// carrying the connecting Account's pubkey ("acc"), the authenticated
+// user's pubkey ("user") and connection 1 on testServerID — the fields
 // sproutIDFromEvent reads.
 func connectEventJSON(t *testing.T, accountPub, userPub string) []byte {
 	t.Helper()
+	return connEventJSON(t, accountPub, userPub, testServerID, 1)
+}
+
+// connEventJSON is connectEventJSON for connection clientID on the bus
+// node serverID (server.id and client.id, as nats-server sends them).
+func connEventJSON(t *testing.T, accountPub, userPub, serverID string, clientID uint64) []byte {
+	t.Helper()
 	data, err := json.Marshal(map[string]any{
-		"client": map[string]string{"acc": accountPub, "user": userPub},
+		"server": map[string]any{"id": serverID, "name": "bus-0"},
+		"client": map[string]any{"acc": accountPub, "user": userPub, "id": clientID},
 	})
 	if err != nil {
 		t.Fatalf("marshaling event: %v", err)
@@ -92,7 +98,7 @@ func TestIsOnline_NilClient(t *testing.T) {
 func TestSproutIDFromEvent_MalformedJSON(t *testing.T) {
 	newTestPKIDB(t)
 
-	if _, _, ok := sproutIDFromEvent([]byte("{not json"), "CONNECT"); ok {
+	if _, _, _, ok := sproutIDFromEvent([]byte("{not json"), "CONNECT"); ok {
 		t.Error("expected ok=false for malformed event JSON")
 	}
 }
@@ -104,7 +110,7 @@ func TestSproutIDFromEvent_UnknownAccount(t *testing.T) {
 	// legacy current tenant's included, since ensureNatsAuth hasn't been
 	// bootstrapped here at all) — TenantIDForAccountPub must fail closed.
 	data := connectEventJSON(t, "UNKNOWN_ACCOUNT_PUBKEY", "UNKNOWN_USER_PUBKEY")
-	if _, _, ok := sproutIDFromEvent(data, "CONNECT"); ok {
+	if _, _, _, ok := sproutIDFromEvent(data, "CONNECT"); ok {
 		t.Error("expected ok=false for an Account pubkey that isn't any provisioned tenant")
 	}
 }
@@ -125,9 +131,12 @@ func TestSproutIDFromEvent_AcceptedSprout(t *testing.T) {
 	}
 
 	data := connectEventJSON(t, accountPub, "UPUBKEY123")
-	tenant, sproutID, ok := sproutIDFromEvent(data, "CONNECT")
+	tenant, sproutID, connID, ok := sproutIDFromEvent(data, "CONNECT")
 	if !ok {
 		t.Fatal("expected ok=true for an accepted sprout's pubkey")
+	}
+	if connID != testServerID+"/1" {
+		t.Errorf("connID = %q, want %q", connID, testServerID+"/1")
 	}
 	if tenant != pki.CurrentTenantID() {
 		t.Errorf("tenant = %q, want %q", tenant, pki.CurrentTenantID())
@@ -150,7 +159,7 @@ func TestSproutIDFromEvent_UnacceptedSproutNotOnline(t *testing.T) {
 	}
 
 	data := connectEventJSON(t, accountPub, "UPUBKEY456")
-	if _, _, ok := sproutIDFromEvent(data, "CONNECT"); ok {
+	if _, _, _, ok := sproutIDFromEvent(data, "CONNECT"); ok {
 		t.Error("expected ok=false for a sprout that isn't accepted yet")
 	}
 }
@@ -237,12 +246,12 @@ func TestSproutIDFromEvent_TwoTenantsSameSproutIDAndPubkey_DoNotCrossResolve(t *
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		tenant, sproutID, ok := sproutIDFromEvent(dataA, "CONNECT")
+		tenant, sproutID, _, ok := sproutIDFromEvent(dataA, "CONNECT")
 		results <- result{tenant, sproutID, ok}
 	}()
 	go func() {
 		defer wg.Done()
-		tenant, sproutID, ok := sproutIDFromEvent(dataB, "CONNECT")
+		tenant, sproutID, _, ok := sproutIDFromEvent(dataB, "CONNECT")
 		results <- result{tenant, sproutID, ok}
 	}()
 	wg.Wait()
@@ -265,8 +274,7 @@ func TestSproutIDFromEvent_TwoTenantsSameSproutIDAndPubkey_DoNotCrossResolve(t *
 
 	// Now prove the CONNECT/DISCONNECT key writes land under, and only
 	// under, their own tenant's heartbeat key by checking keyFor's output
-	// for each — the real Valkey write path (untestable here, see this
-	// file's header comment) uses exactly this key.
+	// for each — the Valkey write path uses exactly this key.
 	if keyFor("t_a", sharedSproutID) == keyFor("t_b", sharedSproutID) {
 		t.Fatal("expected distinct tenants to produce distinct heartbeat keys for the same sprout ID")
 	}

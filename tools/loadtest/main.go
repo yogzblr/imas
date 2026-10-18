@@ -41,6 +41,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 
 	"github.com/yogzblr/imas/internal/facts"
+	"github.com/yogzblr/imas/internal/heartbeat"
 	"github.com/yogzblr/imas/internal/natsretry"
 	"github.com/yogzblr/imas/internal/pki"
 )
@@ -89,6 +90,7 @@ type options struct {
 	ReconnectCap   time.Duration
 	SourceIPs      string
 	Facts          bool
+	Heartbeat      time.Duration
 
 	Hold            time.Duration
 	PingRate        float64
@@ -171,6 +173,7 @@ func defineFlags(fs *flag.FlagSet, o *options) {
 	fs.DurationVar(&o.ReconnectCap, "reconnect-cap", natsretry.DefaultCap, "the sprout's busreconnectcap")
 	fs.StringVar(&o.SourceIPs, "source-ips", "", "comma-separated local IPs to spread connections over (more than ~28k per destination needs several)")
 	fs.BoolVar(&o.Facts, "facts", true, "publish this host's facts once per sprout at connect, as a sprout does")
+	fs.DurationVar(&o.Heartbeat, "heartbeat-interval", heartbeat.Interval, "how often each sprout publishes its heartbeat, as a sprout does (internal/heartbeat); 0 sends none")
 
 	fs.DurationVar(&o.Hold, "hold", 60*time.Second, "how long to hold the connections while measuring test.ping")
 	fs.Float64Var(&o.PingRate, "ping-rate", 100, "test.ping requests per second during each latency window")
@@ -308,6 +311,9 @@ func (o *options) validate() error {
 	}
 	if o.PingRate <= 0 {
 		return errors.New("-ping-rate must be positive")
+	}
+	if o.Heartbeat < 0 {
+		return errors.New("-heartbeat-interval must not be negative (0 sends none)")
 	}
 	return nil
 }
@@ -556,7 +562,7 @@ func run(ctx context.Context, o *options) (*result, error) {
 	fo := fleetOptions{
 		Servers: servers, TLS: tlsCfg,
 		ReconnectBase: o.ReconnectBase, ReconnectCap: o.ReconnectCap,
-		ConnectTimeout: o.ConnectTimeout,
+		ConnectTimeout: o.ConnectTimeout, HeartbeatInterval: o.Heartbeat,
 	}
 	if o.Facts {
 		fo.Facts = factsPayload()
@@ -574,6 +580,7 @@ func run(ctx context.Context, o *options) (*result, error) {
 	wctx, stopWorkers := context.WithCancel(context.Background())
 	defer stopWorkers()
 	fl.startWorkers(wctx)
+	fl.startHeartbeats(wctx)
 	defer fl.Close()
 
 	// (a) connect and hold.
@@ -634,6 +641,11 @@ func run(ctx context.Context, o *options) (*result, error) {
 	}
 	res.SproutHandledPings = fl.pings.Load()
 	res.SlowConsumers = fl.slowConsumers.Load()
+	if o.Heartbeat > 0 {
+		res.HeartbeatInterval = o.Heartbeat.String()
+	}
+	res.SproutHeartbeats = fl.heartbeats.Load()
+	res.SproutHeartbeatErrors = fl.heartbeatErrors.Load()
 	res.FinishedAt = time.Now()
 	res.evaluate(o.thresholds())
 	return res, nil

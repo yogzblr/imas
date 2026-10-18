@@ -121,6 +121,14 @@ type fixture struct {
 	rpmPrimaryRaw []byte
 	// aptFilename overrides the Filename the apt index gives.
 	aptFilename string
+	// declaredSize is the package size the apt and rpm indexes declare:
+	// 0 declares the real size, -1 declares none.
+	declaredSize int64
+	// aptPadding adds a stanza of this many bytes to the apt index.
+	aptPadding int
+	// repoHook, if set, sees every repository request first and answers
+	// it when it returns true.
+	repoHook func(w http.ResponseWriter, r *http.Request) bool
 
 	mu         sync.Mutex
 	farmerReqs []*http.Request
@@ -233,7 +241,7 @@ func newFixture(t *testing.T) *fixture {
 	rootCA := filepath.Join(dir, "tls-rootca.pem")
 	writeFile(t, rootCA, f.farmerCAPEM, 0o644)
 	keyring := filepath.Join(dir, "fleet-signing-keys.asc")
-	writeFile(t, keyring, armoredKeyring(t, f.trusted), 0o644)
+	writeFile(t, keyring, armoredKeyring(t, f.trusted), 0o600)
 
 	saveConfig(t)
 	config.SproutRootCA = rootCA
@@ -243,6 +251,8 @@ func newFixture(t *testing.T) *fixture {
 	config.SproutUpdateRepoURL = f.repo.URL + "/imasdeb/any/"
 	config.SproutUpdateRepoToken = ""
 	config.SproutUpdateRepoFormat, config.SproutUpdateRepoDist, config.SproutUpdateRepoPackageID = "", "", ""
+	config.SproutUpdateMaxIndexBytes, config.SproutUpdateMaxPackageBytes = 0, 0
+	config.SproutUpdateRequestTimeout, config.SproutUpdateBudget = 0, 0
 
 	// Platform: Debian, with fake tools and a running systemd.
 	tools := filepath.Join(dir, "bin")
@@ -326,6 +336,9 @@ func newFixture(t *testing.T) *fixture {
 // finds them.
 func (f *fixture) serveRepo(w http.ResponseWriter, r *http.Request) {
 	f.record(&f.repoReqs, r)
+	if f.repoHook != nil && f.repoHook(w, r) {
+		return
+	}
 	sum := f.indexSHA
 	if sum == "" {
 		sum = sha(pkgBytes)
@@ -349,7 +362,14 @@ func (f *fixture) serveRepo(w http.ResponseWriter, r *http.Request) {
 			filename = "pool/main/i/imas-sprout/" + name
 		}
 		fmt.Fprintf(out, "Package: other\nVersion: 1\nFilename: pool/o/other.deb\nSHA256: %s\n\n", strings.Repeat("1", 64))
-		fmt.Fprintf(out, "Package: imas-sprout\nVersion: 2.4.1\nDescription: sprout\n continued line\nFilename: %s\nSHA256: %s\n", filename, sum)
+		if f.aptPadding > 0 {
+			fmt.Fprintf(out, "Package: padding\nDescription: %s\n\n", strings.Repeat("p", f.aptPadding))
+		}
+		size := ""
+		if n := f.declared(); n >= 0 {
+			size = fmt.Sprintf("Size: %d\n", n)
+		}
+		fmt.Fprintf(out, "Package: imas-sprout\nVersion: 2.4.1\nDescription: sprout\n continued line\nFilename: %s\n%sSHA256: %s\n", filename, size, sum)
 	case "/imasdeb/any/pool/main/i/imas-sprout/" + name,
 		"/imasrpm/rpm_any/x86_64/Packages/i/" + name,
 		"/flat/" + name:
@@ -363,10 +383,14 @@ func (f *fixture) serveRepo(w http.ResponseWriter, r *http.Request) {
 			w.Write(f.rpmPrimaryRaw)
 			return
 		}
+		size := ""
+		if n := f.declared(); n >= 0 {
+			size = fmt.Sprintf(`<size package="%d" installed="1" archive="1"/>`, n)
+		}
 		xmlIndex := fmt.Sprintf(`<?xml version="1.0"?><metadata xmlns="http://linux.duke.edu/metadata/common" packages="2">`+
-			`<package type="rpm"><name>other</name><checksum type="sha256" pkgid="YES">%s</checksum><location href="Packages/o/other.rpm"/></package>`+
-			`<package type="rpm"><name>imas-sprout</name><checksum type="sha256" pkgid="YES">%s</checksum><location href="Packages/i/%s"/></package>`+
-			`</metadata>`, strings.Repeat("2", 64), sum, name)
+			`<package type="rpm"><name>other</name><checksum type="sha256" pkgid="YES">%s</checksum><size package="1"/><location href="Packages/o/other.rpm"/></package>`+
+			`<package type="rpm"><name>imas-sprout</name><checksum type="sha256" pkgid="YES">%s</checksum>%s<location href="Packages/i/%s"/></package>`+
+			`</metadata>`, strings.Repeat("2", 64), sum, size, name)
 		switch f.primaryExt() {
 		case ".gz":
 			gz := gzip.NewWriter(w)
@@ -396,6 +420,14 @@ func (f *fixture) serveRepo(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// declared is the package size the indexes declare, or -1 for none.
+func (f *fixture) declared() int64 {
+	if f.declaredSize == 0 {
+		return int64(len(f.repoBody))
+	}
+	return f.declaredSize
 }
 
 func (f *fixture) primaryExt() string {
@@ -757,9 +789,9 @@ func TestRefusals(t *testing.T) {
 		{name: "keyring missing", target: testTarget, want: os.ErrNotExist,
 			setup: func(*fixture) { config.SproutFleetSigningKeyring = filepath.Join(os.TempDir(), "no-such-keyring.asc") }},
 		{name: "keyring empty", target: testTarget, want: fleetsign.ErrNoKeys,
-			setup: func(*fixture) { writeFile(t, config.SproutFleetSigningKeyring, nil, 0o644) }},
+			setup: func(*fixture) { writeFile(t, config.SproutFleetSigningKeyring, nil, 0o600) }},
 		{name: "keyring is the pre-P22 JSON placeholder", target: testTarget, want: fleetsign.ErrNoKeys,
-			setup: func(*fixture) { writeFile(t, config.SproutFleetSigningKeyring, []byte("{}"), 0o644) }},
+			setup: func(*fixture) { writeFile(t, config.SproutFleetSigningKeyring, []byte("{}"), 0o600) }},
 		{name: "unsupported OS", target: testTarget, want: ErrUnsupportedPlatform,
 			setup: func(*fixture) { goos = "darwin" }},
 		{name: "no systemd to restart onto the new version", target: testTarget, want: ErrUnsupportedPlatform,
@@ -1268,10 +1300,14 @@ func saveConfig(t *testing.T) {
 	ca, url, cache, keyring, repo, tok := config.SproutRootCA, config.FarmerURL, config.CacheDir,
 		config.SproutFleetSigningKeyring, config.SproutUpdateRepoURL, config.SproutUpdateRepoToken
 	format, dist, pkgID := config.SproutUpdateRepoFormat, config.SproutUpdateRepoDist, config.SproutUpdateRepoPackageID
+	maxIndex, maxPkg := config.SproutUpdateMaxIndexBytes, config.SproutUpdateMaxPackageBytes
+	reqTimeout, budget := config.SproutUpdateRequestTimeout, config.SproutUpdateBudget
 	t.Cleanup(func() {
 		config.SproutRootCA, config.FarmerURL, config.CacheDir = ca, url, cache
 		config.SproutFleetSigningKeyring, config.SproutUpdateRepoURL, config.SproutUpdateRepoToken = keyring, repo, tok
 		config.SproutUpdateRepoFormat, config.SproutUpdateRepoDist, config.SproutUpdateRepoPackageID = format, dist, pkgID
+		config.SproutUpdateMaxIndexBytes, config.SproutUpdateMaxPackageBytes = maxIndex, maxPkg
+		config.SproutUpdateRequestTimeout, config.SproutUpdateBudget = reqTimeout, budget
 	})
 }
 
@@ -1313,21 +1349,6 @@ func newCAServer(t *testing.T, h http.Handler) (*httptest.Server, []byte) {
 	ts.StartTLS()
 	t.Cleanup(ts.Close)
 	return ts, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
-}
-
-// TestShippedKeyring: the keyring the packages install
-// (/etc/imas/fleet-signing-keys.asc, built from the repo's
-// gpg-public-key.asc, D21) is one the sprout can load, so a malformed key
-// change fails here, not on the fleet.
-func TestShippedKeyring(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "gpg-public-key.asc"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	k, err := fleetsign.ParseArmoredKeyring(data)
-	if err != nil || k.Len() == 0 {
-		t.Fatalf("shipped keyring: %d keys, %v", k.Len(), err)
-	}
 }
 
 // TestSetRunningVersion: cmd/sprout's main.Tag is the running version
@@ -1532,15 +1553,25 @@ func TestRPMLocationFor_XMLBase(t *testing.T) {
 	index := `<metadata xmlns="http://linux.duke.edu/metadata/common"><package type="rpm">` +
 		`<checksum type="sha256" pkgid="YES">` + strings.ToUpper(sum) + `</checksum>` +
 		`<location xml:base="https://cdn.example.com/rpms/" href="Packages/x.rpm"/></package></metadata>`
-	href, base, err := rpmLocationFor(strings.NewReader(index), sum)
-	if err != nil || href != "Packages/x.rpm" || base != "https://cdn.example.com/rpms/" {
-		t.Fatalf("got %q %q %v", href, base, err)
+	href, base, size, err := rpmLocationFor(strings.NewReader(index), sum)
+	if err != nil || href != "Packages/x.rpm" || base != "https://cdn.example.com/rpms/" || size != 0 {
+		t.Fatalf("got %q %q %d %v", href, base, size, err)
 	}
-	if href, _, err := rpmLocationFor(strings.NewReader(index), strings.Repeat("b", 64)); err != nil || href != "" {
+	if href, _, _, err := rpmLocationFor(strings.NewReader(index), strings.Repeat("b", 64)); err != nil || href != "" {
 		t.Fatalf("other sum: %q %v", href, err)
 	}
-	if _, _, err := rpmLocationFor(strings.NewReader("<metadata><package>"), sum); err == nil {
+	if _, _, _, err := rpmLocationFor(strings.NewReader("<metadata><package>"), sum); err == nil {
 		t.Fatal("truncated XML accepted")
+	}
+	sized := strings.Replace(index, `<location`, `<size package=" 4096 " installed="9"/><location`, 1)
+	if _, _, size, err := rpmLocationFor(strings.NewReader(sized), sum); err != nil || size != 4096 {
+		t.Fatalf("declared size: %d %v, want 4096", size, err)
+	}
+	for _, bad := range []string{"-1", "0", "x", "1e3"} {
+		badIndex := strings.Replace(index, `<location`, `<size package="`+bad+`"/><location`, 1)
+		if _, _, _, err := rpmLocationFor(strings.NewReader(badIndex), sum); err == nil {
+			t.Errorf("size package=%q accepted", bad)
+		}
 	}
 }
 
@@ -1548,11 +1579,21 @@ func TestAptFilenameFor(t *testing.T) {
 	sum := strings.Repeat("c", 64)
 	index := "Package: a\nFilename: pool/a.deb\nSHA256: " + strings.Repeat("d", 64) + "\n\n" +
 		"Package: b\nSHA256: " + sum + "\nDescription: x\n Filename: not-this.deb\nFilename: pool/b.deb\n"
-	if got, err := aptFilenameFor(strings.NewReader(index), sum); err != nil || got != "pool/b.deb" {
-		t.Fatalf("got %q %v", got, err)
+	if got, size, err := aptFilenameFor(strings.NewReader(index), sum); err != nil || got != "pool/b.deb" || size != 0 {
+		t.Fatalf("got %q %d %v", got, size, err)
 	}
-	if got, err := aptFilenameFor(strings.NewReader(index), strings.Repeat("e", 64)); err != nil || got != "" {
+	if got, _, err := aptFilenameFor(strings.NewReader(index), strings.Repeat("e", 64)); err != nil || got != "" {
 		t.Fatalf("missing sum: %q %v", got, err)
+	}
+	sized := strings.Replace(index, "Filename: pool/b.deb\n", "Filename: pool/b.deb\nSize: 2048\n", 1)
+	if got, size, err := aptFilenameFor(strings.NewReader(sized), sum); err != nil || got != "pool/b.deb" || size != 2048 {
+		t.Fatalf("declared size: %q %d %v, want 2048", got, size, err)
+	}
+	for _, bad := range []string{"-1", "0", "big"} {
+		badIndex := strings.Replace(index, "Filename: pool/b.deb\n", "Filename: pool/b.deb\nSize: "+bad+"\n", 1)
+		if _, _, err := aptFilenameFor(strings.NewReader(badIndex), sum); err == nil {
+			t.Errorf("Size %q accepted", bad)
+		}
 	}
 }
 

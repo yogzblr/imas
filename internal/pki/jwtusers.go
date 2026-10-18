@@ -46,14 +46,22 @@ import (
 	"github.com/yogzblr/imas/internal/objectstore"
 )
 
-func allowAllPermissions() jwt.Permissions {
+// AllowAllPermissions is the grant of farmer's own User in each tenant
+// Account (farmerUserJWT): all of imas.> and its inboxes. Exported so
+// tools/loadtest's requester that plays core mints the same grant from
+// this one definition.
+func AllowAllPermissions() jwt.Permissions {
 	return jwt.Permissions{
 		Pub: jwt.Permission{Allow: jwt.StringList{"imas.>", "_INBOX.>"}},
 		Sub: jwt.Permission{Allow: jwt.StringList{"imas.>", "_INBOX.>"}},
 	}
 }
 
-func sproutPermissions(id string) jwt.Permissions {
+// SproutPermissions is the whole grant of sprout id's User JWT, the one
+// definition MintOrReuseUserJWT mints, the sprout checks its persisted JWT
+// against (SproutUserJWTHasFullGrant) and tools/loadtest's fixture mints
+// its simulated sprouts with.
+func SproutPermissions(id string) jwt.Permissions {
 	return jwt.Permissions{
 		Pub: jwt.Permission{Allow: jwt.StringList{
 			"imas.sprouts.announce." + id,
@@ -81,7 +89,8 @@ func sproutPermissions(id string) jwt.Permissions {
 			// it publishes still has to open at farmer. Before this grant
 			// shell couldn't work at all for a sprout with a per-sprout
 			// JWT. Already-enrolled sprouts get it through the
-			// MintOrReuseUserJWT re-mint on their next refresh and restart.
+			// MintOrReuseUserJWT re-mint on their next refresh, and reconnect
+			// with it at their next heartbeat (cmd/sprout's heartbeatGate).
 			SproutShellPublishGrant(id),
 			// Periodic liveness heartbeat (internal/heartbeat): exactly
 			// this sprout's own subject, never a wildcard, so one sprout
@@ -142,8 +151,9 @@ func sproutLogPublishGrant(id string) string {
 
 // SproutUserJWTGrantsLogs reports whether userJWT lets sprout id publish
 // its log entries. A sprout whose User JWT was minted before
-// sproutPermissions carried the grant keeps using it until a refresh
-// fetches the re-minted one and the sprout restarts; until then shipping
+// SproutPermissions carried the grant keeps using it until a refresh
+// fetches the re-minted one and the sprout reconnects with it (at its
+// next heartbeat, cmd/sprout's heartbeatGate); until then shipping
 // logs would draw a permissions violation for every entry.
 func SproutUserJWTGrantsLogs(userJWT, id string) bool {
 	uc, err := jwt.DecodeUserClaims(userJWT)
@@ -152,6 +162,21 @@ func SproutUserJWTGrantsLogs(userJWT, id string) bool {
 	}
 	grant := sproutLogPublishGrant(id)
 	return uc.Pub.Allow.Contains(grant) && !uc.Pub.Deny.Contains(grant)
+}
+
+// SproutUserJWTHasFullGrant reports whether userJWT carries exactly the
+// grant SproutPermissions(id) names, every subject and nothing else, the
+// same comparison MintOrReuseUserJWT makes before it reuses a JWT. A JWT
+// it reports false for is one farmer re-mints on the next refresh: any
+// grant added to SproutPermissions since the JWT was minted (heartbeat,
+// logs, box key, shell, or a later one) makes it stale, not only the
+// heartbeat grant.
+func SproutUserJWTHasFullGrant(userJWT, id string) bool {
+	uc, err := jwt.DecodeUserClaims(userJWT)
+	if err != nil {
+		return false
+	}
+	return reflect.DeepEqual(uc.Permissions, SproutPermissions(id))
 }
 
 // ensureUserGranted clears any revocation entry for pubkey in ac. It
@@ -205,7 +230,7 @@ func applyRevokedNKeys(ac *jwt.AccountClaims, revoked map[string]int64) bool {
 // if its revocation list changed. It starts from the newest of the held
 // and the accounts bucket's copy (loadTenantClaims). Comparing the
 // farmer's own User JWT's permissions on its next use is what makes a
-// change to allowAllPermissions reach it (farmerUserJWT). It reports
+// change to AllowAllPermissions reach it (farmerUserJWT). It reports
 // whether the Account JWT changed (i.e. whether ReloadNKeys needs to push
 // an update to the bus).
 func syncNatsAuth(mat *natsAuthMaterial) (bool, error) {
@@ -603,7 +628,7 @@ func GetSproutUserJWT(id string) (string, error) {
 	if row.State == stateAccepted {
 		return s.mintOrReuse(ctx, tenant, id, row.NKey)
 	}
-	signed, ok, err := s.reuse(ctx, tenant, id, row.NKey, sproutPermissions(id))
+	signed, ok, err := s.reuse(ctx, tenant, id, row.NKey, SproutPermissions(id))
 	if err != nil {
 		return "", err
 	}
@@ -660,7 +685,7 @@ func (s *sproutJWTStore) mintOrReuse(ctx context.Context, tenantID, sproutID, pu
 	if err := s.checkEligible(tenantID, sproutID, pubkey); err != nil {
 		return "", err
 	}
-	perms := sproutPermissions(sproutID)
+	perms := SproutPermissions(sproutID)
 	key := []any{tenantID, sproutID}
 
 	owner := s.callOwner()

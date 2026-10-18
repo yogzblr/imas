@@ -41,7 +41,7 @@ Only two of its Accounts could host the new credential:
      shutdown.
 - **tenant / legacy** (`tenantKP`/`tenantPub`/`tenantJWT`). This is the
   Account named by `config.FarmerOrganization`. Its Users are the legacy
-  tenant's sprouts, farmer (`allowAllPermissions()` = `imas.>` and
+  tenant's sprouts, farmer (`AllowAllPermissions()` = `imas.>` and
   `_INBOX.>`), and imas CLI admins (same permissions). Since Option A
   (`imas-tenant-context-threading.md`), it is one tenant among many. It
   has its own entry in `cmd/farmer/main.go`'s `tenantRegistry` (the

@@ -32,8 +32,8 @@ Owner decisions (2026-10-17, final):
 
 Scope: `internal/fleetsign`, `internal/ingredients/selfupdate`,
 `internal/api/handlers/update_manifest.go`, `packaging/`, `.goreleaser.yaml`,
-`.github/workflows` (release), `cmd/fleetreleaser`, `deploy/fleetreleaser`,
-`docs/`.
+`.github/workflows` (release), `docs/`. (`cmd/fleetreleaser` and
+`deploy/fleetreleaser` were removed with P22, PR #205.)
 
 - **L3.** The staging directory, its parent and the keyring file are checked
   with `Lstat`: owner is the effective uid, mode no looser than 0700 for the
@@ -42,13 +42,16 @@ Scope: `internal/fleetsign`, `internal/ingredients/selfupdate`,
   created fresh (never reused when it exists with another owner). Windows: the
   equivalent check (owner is SYSTEM or Administrators, no inherited write for
   Users), tested with a fake ACL reader so the test runs on Linux.
-- **L5.** `fleetsign.ParseKeyring` runs on the packaged keyring in `packaging/test`
-  (it parses and has the shape the sprout expects). The release workflow fails
-  when the keyring has no keys, and also when the release's `checksums.txt.sig`
-  does not verify against the keyring (a `go run` of the existing verify code,
-  not a new tool). The test on `{}` for the development tree passes; the release
-  step is what fails. Document the owner step (put the GPG public key in the
-  file) in `docs/RELEASING.md` or the file the release process lives in.
+- **L5.** `fleetsign.ParseArmoredKeyring` runs on the packaged keyring
+  (`gpg-public-key.asc`, which every package installs as
+  `/etc/imas/fleet-signing-keys.asc`) in `packaging/test` (it parses and has
+  the shape the sprout expects). The release workflow fails when the keyring
+  has no keys, and also when the release's `checksums.txt.sig` does not verify
+  against the keyring (a `go test` of `packaging/test` that runs the existing
+  verify code, `fleetsign.VerifyChecksums`, not a new tool). The test on `{}`
+  for the development tree passes; the release step is what fails. Document
+  the owner step (put the GPG public key in the file) in `docs/RELEASING.md`
+  or the file the release process lives in.
 - **L6.** The manifest cache is capped per tenant (default 256 entries per
   tenant, total cap kept) and "not found" is not cached. One tenant filling its
   share must not evict another's entries: test it with two tenants.
@@ -56,9 +59,10 @@ Scope: `internal/fleetsign`, `internal/ingredients/selfupdate`,
   tenant approval a barrier against a compromised saasapi; they say what it is.
   If `fleetreleaser` no longer exists on main, fix the remaining docs only.
 - **I4.** Bound a hostile repository: index at most 16 MiB, a package at most
-  the size the manifest declares (and never above 512 MiB), a request timeout
-  of 2 minutes with a total budget per update of 10 minutes that releases the
-  update lock when it runs out. All overridable by sprout config.
+  the size the repository's index declares for it (and never above 512 MiB),
+  a request timeout of 2 minutes with a total budget per update of 10 minutes
+  that releases the update lock when it runs out. All overridable by sprout
+  config.
 - **I5.** Remove the `artifact_url` mention in the signer policy, and either
   make `-tags no_self_update` do what it says (a file with that build tag that
   makes `selfupdate` unavailable) or remove the tag from CI and packaging and
@@ -69,6 +73,38 @@ Scope: `internal/fleetsign`, `internal/ingredients/selfupdate`,
   taken from the manifest with the one the sprout derives from the file name,
   and refuses when they differ. Add a test with an rc and the final of the same
   MAJOR.MINOR.PATCH. zypper's downgrade skip: test it with a fake `zypper`.
+
+Brief corrections (T1, decided by the code on main):
+
+- L5: there is no `fleetsign.ParseKeyring` and no `{}` JSON keyring on main.
+  P22 replaced `packaging/etc/fleet-signing-keys.json` with the armored GPG
+  keyring built from `gpg-public-key.asc`, parsed by `ParseArmoredKeyring`;
+  main already ships the release key in it. An empty keyring (`{}`, nothing,
+  or no key that can sign) is `ErrNoKeys`, which the development-tree test
+  allows and the release gate refuses. There is no verify `main` to `go run`,
+  so the release steps run the verify code as `go test ./packaging/test`.
+- L3: the keyring's 0600 needs the packages to install it 0600 (they
+  installed it 0644): `.goreleaser.yaml`, the Molecule and self-update e2e
+  nfpm specs, and `packaging/check-package-contents.sh`, which now checks
+  the mode. "The staging directory and its parent" are the per-update
+  directory and the staging root (`<cachedir>/selfupdate`), both 0700; the
+  cache directory above them, which the packages make 0755, must be the
+  sprout user's and not writable by group or others.
+- I4: the update manifest declares no package size (P22's seven-key wire
+  contract), so the package is bounded by the size the repository's index
+  declares (apt `Size`, rpm `size package`, the MSI's zip entry in the
+  NuGet package) and `sproutupdatemaxpackagebytes`. The budget covers the
+  update up to the installer; the installer keeps its own 10-minute timeout,
+  so the budget never kills `dpkg` or `rpm` part way.
+- I5 and L7: `cmd/fleetreleaser`, `deploy/fleetreleaser` and the signer
+  policy `imas-fleet-signer.hcl` were removed with P22, so there is no
+  `artifact_url` left to remove there. The standalone builds' `self_update`
+  tag was as unused as `no_self_update` and is removed too. L7's remaining
+  text was in the signing and payload-encryption designs, the SaaS API docs
+  and the `internal/natsapi` dispatch comment.
+- B8: a prerelease is still refused on Windows (owner decision, PR #86); the
+  file-name comparison runs first, so an rc and a final of one
+  MAJOR.MINOR.PATCH are told apart either way.
 
 ## T2: #139, test gaps, licence record (P14, P17, P8, P4)
 
@@ -94,6 +130,39 @@ Scope: `cmd/imas`, `internal/saasapi/sweeper_actions_test.go`, `packaging/test`,
 - **P4.** Recheck B4, B5/M6, B6 (accepted) and B8 (T1) on main and update the
   P4 text through the status fragment: what is closed, with the commit.
 
+Brief corrections (applied by T2, 2026-10-17, decided by the code on main):
+
+- **#139.** The loader (`config.LoadConfig`, `internal/config`) still
+  creates a missing file with `os.Create`; T2 only makes it close that file
+  (an open handle blocks the rename below on Windows). The CLI
+  creates the file 0600 (in a 0700 directory) before the loader runs
+  (`ensureConfigFile`, `cmd/imas/cmd/configperm.go`; installed with a hard
+  link, or created in place with O_EXCL where hard links are missing, so a
+  file another process created meanwhile is kept), so the loader only
+  ever finds the file and truncating it keeps 0600; `imas init` writes the
+  config through a 0600 temporary file renamed into place
+  (`writeConfigFile`). The private key itself is written by
+  `internal/auth` with jety's in-place write, into that 0600 file.
+- **P17, re-signs.** B5/M6 is already closed on main: every Account re-sign
+  waits for a strictly newer `iat` (`waitPastIssuedAt`, C2 `5f4858b` and E6
+  `aa1dd69`), with a source guard
+  (`TestEveryAccountResignWaitsPastIssuedAt`) and a behaviour test
+  (`TestEveryResignAdvancesIat`). The one re-sign the guard excepts, the
+  purge's minimal lock-out (`scrubTombstoneLocked`, S6, minted from fresh
+  claims), had no behaviour test; T2 adds it as a subtest. The tests are in
+  `internal/pki`, not in the scope list.
+- **P17, redial.** Farmer's redial lives in `cmd/farmer`
+  (`newTenantRegistry`, `connectTenantWithRetry`), not in the scope list;
+  the test is `cmd/farmer/tenantredial_test.go`, and `newTenantRegistry`
+  takes its dialer as an argument so the test can pass one.
+- **`internal/cook` and `packaging/test`.** Nothing is left for T2 there:
+  `maxRecipeIncludes` is tested since S4 (`cook_budget_test.go`), and the
+  packaged keyring check (L5) and `-tags no_self_update` (I5) are T1's.
+- **P8.** No module has a licence outside Apache-2.0, MIT, BSD-2-Clause,
+  BSD-3-Clause, ISC, 0BSD and MPL-2.0 (`go-licenses report`, v2.0.1, for the
+  three targets of `.github/workflows/go-licenses.yml`), so nothing is
+  flagged; the module list in `DEPENDENCIES.md` matches the report.
+
 ## T3: heartbeat presence (P12)
 
 Scope: `internal/heartbeat`, `tools/loadtest`, `uat` heartbeat checks, CI
@@ -103,19 +172,32 @@ workflow for a Valkey service container, docs.
   that wrote it. DISCONNECT deletes it only when the stored CID is its own, in
   one atomic script (compare-and-delete). CONNECT is a plain write of the new CID.
   Test the interleaving with both orders, with CONNECT processed before the old
-  DISCONNECT (the failing order today).
+  DISCONNECT (the failing order today). (Correction, T3: a client ID is unique
+  on one bus node only, so the stored ID is the node's server ID and the client
+  ID, `heartbeat.ConnID`, both in every CONNECT/DISCONNECT event. The heartbeat
+  refresh wrote `1` over the key, which would defeat the compare; it now extends
+  an existing key and keeps its owner, and writes a missing one with the
+  connection ID the sprout sends as the heartbeat body.)
 - **Valkey.** The two-key refresh script and the compare-and-delete script use
   keys that share a hash slot (the `{tenant:sprout}` tag), and a test proves it
   against a real Valkey (standalone) and a real Valkey Cluster of 3 shards, run in
   CI from service containers. Tests read the address from an environment variable;
   CI sets it; a local run without Docker is the only case a test may report "not
-  configured", and CI fails if the variable is missing.
+  configured", and CI fails if the variable is missing. (Correction, T3: the
+  compare-and-delete script names one key. The standalone address is the
+  existing `SAASAPI_TEST_VALKEY_ADDR`, the cluster's `IMAS_TEST_VALKEY_CLUSTER_ADDR`;
+  CI sets `IMAS_REQUIRE_VALKEY=1`, which makes a missing one a failure. A service
+  container takes no command, so the three nodes get cluster mode through the
+  image's `VALKEY_EXTRA_FLAGS` and a CI step joins them.)
 - **Load test.** `tools/loadtest/fixture.go` takes the sprout permissions from
   the one shared definition in `internal/` (no second copy); load-test sprouts
   send heartbeats; a test fails if the two lists differ.
 - **JWT change.** A sprout uses a JWT that a later refresh changes without a
   restart: reconnect with the new JWT at the next heartbeat. UAT.13 checks the
-  full grant (heartbeat and the other subjects), not only the heartbeat one.
+  full grant (heartbeat and the other subjects), not only the heartbeat one. (Correction,
+  T3: this needs `internal/pki`'s `SproutBus` to present the JWT through a
+  callback, and `cmd/sprout`; both changed here. UAT.13's check is
+  `cmd/sprout`'s `refreshStaleUserJWT`, now against `pki.SproutUserJWTHasFullGrant`.)
 
 ## T4: deprovision and identity (L10, L11, I7)
 

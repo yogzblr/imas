@@ -124,7 +124,7 @@ func createSproutID() string {
 
 // IsValidSproutID reports whether id is a well-formed sprout ID: see the
 // rules above. FLAG FOR SECURITY REVIEW: this is what keeps one sprout's
-// minted grants (jwtusers.go's sproutPermissions) from covering another
+// minted grants (jwtusers.go's SproutPermissions) from covering another
 // sprout's subjects.
 func IsValidSproutID(id string) bool {
 	if len(id) > maxSproutIDLen {

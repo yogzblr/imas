@@ -37,16 +37,16 @@ recorded here with their licence as the brief asked:
 
 ## Licences outside the Apache-2.0/MIT default
 
-Dependencies are Apache-2.0 or MIT by default (`CLAUDE.md`). The recorded
-exceptions in `docs/design/requirements.md` item 21 are Percona XtraDB Cluster
-(a deployed database, not a Go module) and MPL-2.0 generally: MPL code is used
-unmodified, or any change to it is shared. For MPL-2.0 modules
-`go-licenses save` copies the module's full source, not just its licence, into
-[dependencies](dependencies).
-
-**BSD-2-Clause, BSD-3-Clause, ISC and 0BSD are not yet recorded under item
-21.** They are open questions until it is amended; the modules that carry
-them are listed here so the decision can be made on the full list.
+Dependencies are Apache-2.0 or MIT by default (`CLAUDE.md`).
+`docs/design/requirements.md` item 21 also allows BSD-2-Clause, BSD-3-Clause,
+ISC and 0BSD, permissive licences with no copyleft (owner, 2026-10-17). Its
+recorded exceptions are Percona XtraDB Cluster (a deployed database, not a Go
+module) and MPL-2.0 generally: MPL code is used unmodified, or any change to
+it is shared. For MPL-2.0 modules `go-licenses save` copies the module's full
+source, not just its licence, into [dependencies](dependencies). No module in
+the build has any other licence: `go-licenses report` for the three targets
+above finds only Apache-2.0, MIT and the licences in the table below. A new
+one is flagged before it is added.
 
 Every module in the build whose licence is anything other than Apache-2.0 or
 MIT, and which of the six binaries (sprout, farmer, saasapi, farmerbus,

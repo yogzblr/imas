@@ -131,6 +131,89 @@ func stagedRecipeClockSkewFrom(v any) (time.Duration, error) {
 	return d, nil
 }
 
+// Bounds on a self_update's reads from the update repository (security
+// review 2026-10, I4); see SproutUpdateMaxIndexBytes and the settings
+// after it. The defaults are what the selfupdate ingredient uses when a
+// setting is unset or invalid.
+const (
+	DefaultSproutUpdateMaxIndexBytes   int64 = 16 << 20
+	MinSproutUpdateMaxIndexBytes       int64 = 64 << 10
+	MaxSproutUpdateMaxIndexBytes       int64 = 256 << 20
+	DefaultSproutUpdateMaxPackageBytes int64 = 512 << 20
+	MinSproutUpdateMaxPackageBytes     int64 = 1 << 20
+	// MaxSproutUpdateMaxPackageBytes is the hard ceiling: no setting
+	// lets a package or the NuGet package carrying an MSI be larger.
+	MaxSproutUpdateMaxPackageBytes    int64 = 512 << 20
+	DefaultSproutUpdateRequestTimeout       = 2 * time.Minute
+	MinSproutUpdateRequestTimeout           = 10 * time.Second
+	MaxSproutUpdateRequestTimeout           = time.Hour
+	DefaultSproutUpdateBudget               = 10 * time.Minute
+	MinSproutUpdateBudget                   = time.Minute
+	MaxSproutUpdateBudget                   = 2 * time.Hour
+)
+
+// boundedBytesFrom validates a byte-count setting: a whole number of
+// bytes from lo to hi, as a YAML integer or a string of digits. nil (unset)
+// is def; anything else is def and an error naming key.
+func boundedBytesFrom(key string, v any, def, lo, hi int64) (int64, error) {
+	var n int64
+	switch v := v.(type) {
+	case nil:
+		return def, nil
+	case int:
+		n = int64(v)
+	case int64:
+		n = v
+	case uint64:
+		if v > uint64(hi) {
+			return def, fmt.Errorf("%s %d is outside %d to %d bytes", key, v, lo, hi)
+		}
+		n = int64(v)
+	case float64:
+		if v != float64(int64(v)) {
+			return def, fmt.Errorf("%s %v is not a whole number of bytes", key, v)
+		}
+		n = int64(v)
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return def, fmt.Errorf("%s %q is not a whole number of bytes", key, v)
+		}
+		n = parsed
+	default:
+		return def, fmt.Errorf("%s %v is not a whole number of bytes", key, v)
+	}
+	if n < lo || n > hi {
+		return def, fmt.Errorf("%s %d is outside %d to %d bytes", key, n, lo, hi)
+	}
+	return n, nil
+}
+
+// boundedDurationFrom validates a duration setting: a Go duration string
+// (or a time.Duration) from lo to hi. nil (unset) is def; anything else,
+// a bare number included (it has no unit), is def and an error naming key.
+func boundedDurationFrom(key string, v any, def, lo, hi time.Duration) (time.Duration, error) {
+	var d time.Duration
+	switch v := v.(type) {
+	case nil:
+		return def, nil
+	case time.Duration:
+		d = v
+	case string:
+		parsed, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return def, fmt.Errorf("%s %q is not a duration", key, v)
+		}
+		d = parsed
+	default:
+		return def, fmt.Errorf("%s %v is not a duration (write e.g. 2m)", key, v)
+	}
+	if d < lo || d > hi {
+		return def, fmt.Errorf("%s %v is outside %v to %v", key, d, lo, hi)
+	}
+	return d, nil
+}
+
 // setSystemConfigRoot overrides the config root for testing.
 func setSystemConfigRoot(root string) {
 	systemConfigRoot = root
@@ -245,8 +328,11 @@ var (
 	// every release's checksums.txt signature against
 	// (fleetsign.LoadArmoredKeyring, signing design D9, D21): one or more
 	// ASCII-armored OpenPGP public keys, built from the repo's
-	// gpg-public-key.asc, shipped in the sprout package and replaced by
-	// every package upgrade.
+	// gpg-public-key.asc, shipped in the sprout package (mode 0600, root's)
+	// and replaced by every package upgrade. The sprout refuses a keyring
+	// that is a symlink, not its own user's, or looser than 0600 (on
+	// Windows: not owned by SYSTEM or Administrators, or writable by
+	// anyone else): fleetsign.ErrUnsafePath, refusal code unsafe_path.
 	// Default: fleet-signing-keys.asc in the config root
 	// (/etc/imas/fleet-signing-keys.asc, %ProgramData%\imas\
 	// fleet-signing-keys.asc on Windows).
@@ -289,6 +375,28 @@ var (
 	// means "imas.sprout.windows.msi", the installer package
 	// packaging/windows/winget/build-winget-nupkg.sh builds.
 	SproutUpdateRepoPackageID string
+
+	// SproutUpdateMaxIndexBytes ("sproutupdatemaxindexbytes", sprout
+	// only) caps every repository index a self_update reads (apt
+	// Packages, rpm repomd.xml and primary, the NuGet service index), as
+	// downloaded and again after decompression. Default 16 MiB; 64 KiB to
+	// 256 MiB.
+	SproutUpdateMaxIndexBytes int64
+	// SproutUpdateMaxPackageBytes ("sproutupdatemaxpackagebytes", sprout
+	// only) caps the package a self_update downloads (and the NuGet
+	// package carrying an MSI). A package is also refused above the size
+	// the repository's index declares for it. Default and ceiling 512 MiB;
+	// at least 1 MiB.
+	SproutUpdateMaxPackageBytes int64
+	// SproutUpdateRequestTimeout ("sproutupdaterequesttimeout", sprout
+	// only) bounds each request to the update repository, body included.
+	// Default 2m; 10s to 1h.
+	SproutUpdateRequestTimeout time.Duration
+	// SproutUpdateBudget ("sproutupdatebudget", sprout only) bounds a
+	// whole self_update up to the installer: the manifest, every index
+	// and the download. When it runs out the update fails and its lock
+	// is released. Default 10m; 1m to 2h.
+	SproutUpdateBudget time.Duration
 
 	// SproutUpdateRepoToken ("sproutupdaterepotoken", sprout only) is the
 	// optional read token for a private SproutUpdateRepoURL, sent as HTTP
@@ -574,8 +682,13 @@ func LoadConfig(binary string) {
 					log.Fatal(mkErr)
 				}
 				cfgFile := filepath.Join(cfgPath, "imas")
-				_, err = os.Create(cfgFile)
+				f, err := os.Create(cfgFile)
 				if err != nil {
+					log.Fatal(err)
+				}
+				// Close it: on Windows an open handle blocks the CLI's
+				// atomic rewrite (imas init renames a new file over it).
+				if err := f.Close(); err != nil {
 					log.Fatal(err)
 				}
 			case "farmer":
@@ -851,6 +964,24 @@ func LoadConfig(binary string) {
 			SproutUpdateRepoFormat = strings.TrimSpace(jety.GetString("sproutupdaterepoformat"))
 			SproutUpdateRepoDist = strings.TrimSpace(jety.GetString("sproutupdaterepodist"))
 			SproutUpdateRepoPackageID = strings.TrimSpace(jety.GetString("sproutupdaterepopackageid"))
+			// Unset by default, so a sprout keeps following the
+			// defaults above rather than a value written into its file.
+			if SproutUpdateMaxIndexBytes, err = boundedBytesFrom("sproutupdatemaxindexbytes", jety.Get("sproutupdatemaxindexbytes"),
+				DefaultSproutUpdateMaxIndexBytes, MinSproutUpdateMaxIndexBytes, MaxSproutUpdateMaxIndexBytes); err != nil {
+				log.Errorf("config: %v; using %d", err, DefaultSproutUpdateMaxIndexBytes)
+			}
+			if SproutUpdateMaxPackageBytes, err = boundedBytesFrom("sproutupdatemaxpackagebytes", jety.Get("sproutupdatemaxpackagebytes"),
+				DefaultSproutUpdateMaxPackageBytes, MinSproutUpdateMaxPackageBytes, MaxSproutUpdateMaxPackageBytes); err != nil {
+				log.Errorf("config: %v; using %d", err, DefaultSproutUpdateMaxPackageBytes)
+			}
+			if SproutUpdateRequestTimeout, err = boundedDurationFrom("sproutupdaterequesttimeout", jety.Get("sproutupdaterequesttimeout"),
+				DefaultSproutUpdateRequestTimeout, MinSproutUpdateRequestTimeout, MaxSproutUpdateRequestTimeout); err != nil {
+				log.Errorf("config: %v; using %v", err, DefaultSproutUpdateRequestTimeout)
+			}
+			if SproutUpdateBudget, err = boundedDurationFrom("sproutupdatebudget", jety.Get("sproutupdatebudget"),
+				DefaultSproutUpdateBudget, MinSproutUpdateBudget, MaxSproutUpdateBudget); err != nil {
+				log.Errorf("config: %v; using %v", err, DefaultSproutUpdateBudget)
+			}
 
 			// The sprout config file can hold the join token. os.Create
 			// (above, and in jety.WriteConfig) leaves a new file 0644

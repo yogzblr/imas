@@ -137,7 +137,7 @@ contents:
     file_info: {mode: 0644}
   - src: $work/state/fleet-signing-keys.asc
     dst: /etc/imas/fleet-signing-keys.asc
-    file_info: {mode: 0644}
+    file_info: {mode: 0600}
   - dst: /var/cache/imas/sprout
     type: dir
     file_info: {mode: 0755}

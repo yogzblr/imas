@@ -57,9 +57,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	jwt "github.com/nats-io/jwt/v2"
 	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 	"golang.org/x/net/proxy"
 
 	"github.com/yogzblr/imas/internal/config"
@@ -419,10 +422,41 @@ type SproutBus struct {
 	// Options are the TLS, auth and proxy options; Connect appends its
 	// callers'.
 	Options []nats.Option
-	// UserJWT is the NATS User JWT in Options, so callers can check its
-	// grants (e.g. SproutUserJWTGrantsLogs) against the one actually sent,
-	// not a newer one a refresh has since written to disk.
-	UserJWT string
+	// userJWT is the NATS User JWT Options present on every connect and
+	// reconnect (a nats.UserJWT callback reads it). ReloadUserJWT
+	// replaces it with the one a refresh has since written to disk.
+	userJWT atomic.Pointer[string]
+}
+
+// UserJWT is the NATS User JWT the next connect or reconnect presents,
+// so callers check its grants (e.g. SproutUserJWTGrantsLogs) against the
+// one actually sent, not a newer one a refresh has since written to disk
+// and ReloadUserJWT has not yet picked up.
+func (b *SproutBus) UserJWT() string {
+	if p := b.userJWT.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// ReloadUserJWT reads the persisted User JWT and, when it is a User JWT
+// that differs from the one in use, makes it the one every later connect
+// and reconnect presents. It reports whether it changed it; the caller
+// reconnects (nats.Conn.ForceReconnect) so the bus applies the new grant.
+// A missing or unparsable file leaves the JWT in use unchanged.
+func (b *SproutBus) ReloadUserJWT() (bool, error) {
+	tok, err := LoadSproutUserJWT()
+	if err != nil {
+		return false, err
+	}
+	if tok == b.UserJWT() {
+		return false, nil
+	}
+	if _, err := jwt.DecodeUserClaims(tok); err != nil {
+		return false, fmt.Errorf("pki: persisted NATS User JWT: %w", err)
+	}
+	b.userJWT.Store(&tok)
+	return true, nil
 }
 
 // LoadSproutBus resolves the sprout's bus addresses
@@ -462,9 +496,13 @@ func LoadSproutBus() (*SproutBus, error) {
 		RootCAs:    pool,
 		MinVersion: tls.VersionTLS12,
 	}
+	bus := &SproutBus{Servers: servers, Source: source}
+	bus.userJWT.Store(&userJWT)
 	opts := []nats.Option{
 		nats.Secure(tlsConfig),
-		nats.UserJWTAndSeed(userJWT, strings.TrimSpace(string(seed))),
+		// The JWT is read on every connect, so a reconnect after
+		// ReloadUserJWT presents the new one without a restart.
+		nats.UserJWT(func() (string, error) { return bus.UserJWT(), nil }, nkeySigner(strings.TrimSpace(string(seed)))),
 		// Presents the current gateway JWT to Envoy's jwt_authn on each
 		// websocket handshake. Only consulted for ws(s):// URLs.
 		nats.WebSocketConnectionHeadersHandler(GatewayJWTHeaders),
@@ -472,7 +510,7 @@ func LoadSproutBus() (*SproutBus, error) {
 	if source != BusURLsFromLegacy {
 		opts = append(opts, nats.IgnoreDiscoveredServers())
 	}
-	bus := &SproutBus{Servers: servers, Source: source, Options: opts, UserJWT: userJWT}
+	bus.Options = opts
 	if proxyURL != nil {
 		bus.Proxy = redactURL(proxyURL)
 		bus.Options = append(bus.Options,
@@ -485,6 +523,19 @@ func LoadSproutBus() (*SproutBus, error) {
 		)
 	}
 	return bus, nil
+}
+
+// nkeySigner signs the CONNECT nonce with the NKey seed, as
+// nats.UserJWTAndSeed does.
+func nkeySigner(seed string) nats.SignatureHandler {
+	return func(nonce []byte) ([]byte, error) {
+		kp, err := nkeys.FromSeed([]byte(seed))
+		if err != nil {
+			return nil, fmt.Errorf("pki: sprout NKey seed: %w", err)
+		}
+		defer kp.Wipe()
+		return kp.Sign(nonce)
+	}
 }
 
 // Connect dials b.Servers with b.Options followed by extra.

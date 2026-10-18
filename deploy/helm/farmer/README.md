@@ -1356,6 +1356,14 @@ writes, and enforces the enrollment-key rate limit across pods
 - **External:** `valkey.addrs`, the same key as
   `deploy/saasapi/values.rate-limit.yaml`, so that block merges as is.
 
+The heartbeat keys work on a standalone Valkey and on a Valkey Cluster:
+each script `internal/heartbeat` runs names only one sprout's keys, which
+share the hash tag `{<tenant>:<sprout>}` and so one slot. CI runs those
+scripts against a real standalone Valkey and a real 3-shard Valkey Cluster
+(`.github/workflows/ci.yml`). A sprout's presence key holds the ID of the
+bus connection that set it, and a DISCONNECT deletes it only if it is that
+connection's, so a reconnect never leaves a connected sprout offline.
+
 Valkey holds security state: the replay cache (`internal/pki/replaycache.go`,
 `sealedclaim.go`) that makes enrolment, refresh and sealed messages
 single-use, and the heartbeat keys that say which sprouts are online. So
