@@ -338,7 +338,7 @@ func TestMySQLStartPurgeOnePending(t *testing.T) {
 // finished batches older than the retention go.
 func TestMySQLPruneTerminalRowsLargeTable(t *testing.T) {
 	g1, g2 := newMySQLSaasSchema(t)
-	testPruneLargeTable(t, g1, g2)
+	testPruneLargeTable(t, g1, g2, 200, 120) // 24,480 items
 }
 
 // The same on MySQL for provisioning jobs (the tenant status subquery in

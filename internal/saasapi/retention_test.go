@@ -65,12 +65,16 @@ func fastPrune(t *testing.T, gdb *gorm.DB, rows, batches int) *int64 {
 func TestPruneTerminalRowsLargeTable(t *testing.T) {
 	gdb := newTestDB(t)
 	clearOutbox(t, gdb)
-	testPruneLargeTable(t, gdb, gdb)
+	// Smaller on sqlite, which is slow under -race; the MySQL test
+	// (sweeper_mysql_test.go) prunes the full size.
+	testPruneLargeTable(t, gdb, gdb, 40, 60)
 }
 
-// testPruneLargeTable seeds a large action table through g1 and prunes it
-// with g1 and g2 (two replicas) by turns until nothing is left to prune.
-func testPruneLargeTable(t *testing.T, g1, g2 *gorm.DB) {
+// testPruneLargeTable seeds an action table of oldBatches finished batches
+// older than the retention plus four that must stay, itemsPerBatch items
+// each, through g1, and prunes it with g1 and g2 (two replicas) by turns
+// until nothing is left to prune.
+func testPruneLargeTable(t *testing.T, g1, g2 *gorm.DB, oldBatches, itemsPerBatch int) {
 	gdb := g1
 	largest := fastPrune(t, g1, 500, 20)
 	if g2 != g1 {
@@ -86,7 +90,6 @@ func testPruneLargeTable(t *testing.T, g1, g2 *gorm.DB) {
 	young := now.Add(-89 * 24 * time.Hour)
 	lease := now.Add(time.Minute)
 
-	const itemsPerBatch = 120
 	type spec struct {
 		id, tenant string
 		created    time.Time
@@ -95,7 +98,7 @@ func testPruneLargeTable(t *testing.T, g1, g2 *gorm.DB) {
 		gone       bool
 	}
 	var specs []spec
-	for n := range 200 {
+	for n := range oldBatches {
 		specs = append(specs, spec{id: fmt.Sprintf("b_old_%03d", n), tenant: []string{"t_a", "t_b"}[n%2], created: old,
 			item: func(i int) (AssetActionItemStatus, time.Time) {
 				return []AssetActionItemStatus{ActionItemSucceeded, ActionItemFailed, ActionItemUnresolved}[i%3], old
@@ -160,7 +163,7 @@ func testPruneLargeTable(t *testing.T, g1, g2 *gorm.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Items+r.Batches == 0 || r.Items > 20*500 {
+	if r.Items+r.Batches == 0 || r.Items > 20*500 || r.Batches > 20 {
 		t.Fatalf("first run removed %+v: want some, and at most 20 DELETEs of 500 rows", r)
 	}
 	runs := 1
@@ -186,7 +189,7 @@ func testPruneLargeTable(t *testing.T, g1, g2 *gorm.DB) {
 		if s.gone && (nb != 0 || ni != 0) {
 			t.Fatalf("batch %s: %d batch rows and %d items left, want none", s.id, nb, ni)
 		}
-		if !s.gone && (nb != 1 || ni != itemsPerBatch) {
+		if !s.gone && (nb != 1 || ni != int64(itemsPerBatch)) {
 			t.Fatalf("batch %s: %d batch rows and %d items left, want it whole", s.id, nb, ni)
 		}
 	}
