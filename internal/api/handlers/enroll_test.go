@@ -363,3 +363,41 @@ func TestEnroll_OtherErrorsStay401(t *testing.T) {
 		})
 	}
 }
+
+// Security review 2026-10, I12: a body over maxEnrollRequestBytes is
+// refused with 413 and the generic failure body, before pki.Enroll runs;
+// a body just under the limit is read (and here fails as invalid JSON
+// would, with the generic 401).
+func TestEnroll_BodyLimit(t *testing.T) {
+	called := false
+	orig := pkiEnroll
+	pkiEnroll = func(context.Context, pki.EnrollRequest) (*pki.EnrollResult, error) {
+		called = true
+		return nil, pki.ErrEnrollmentFailed
+	}
+	t.Cleanup(func() { pkiEnroll = orig })
+	if maxEnrollRequestBytes != 64<<10 {
+		t.Fatalf("maxEnrollRequestBytes = %d, want 64 KiB", maxEnrollRequestBytes)
+	}
+
+	big := `{"join_token":"` + strings.Repeat("a", maxEnrollRequestBytes) + `"}`
+	w := httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", strings.NewReader(big)))
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over the limit: status %d, want 413", w.Code)
+	}
+	var resp enrollErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Error != "enrollment_failed" {
+		t.Errorf("over the limit: body %q, want the generic enrollment_failed", w.Body.String())
+	}
+	if called {
+		t.Error("pki.Enroll ran for an oversized body")
+	}
+
+	padded := `{"join_token":"` + strings.Repeat("a", maxEnrollRequestBytes-64) + `"}`
+	w = httptest.NewRecorder()
+	Enroll(w, httptest.NewRequest(http.MethodPost, "/v1/enroll", strings.NewReader(padded)))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("under the limit: status %d, want the generic 401 for a request missing fields", w.Code)
+	}
+}
