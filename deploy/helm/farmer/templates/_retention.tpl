@@ -130,7 +130,7 @@ pipeline:
       multiline.parser: cri, docker
       tag: kube.*
       read_from_head: true
-      db: /var/fluent-bit/state/tail.db
+      db: /var/fluent-bit/tail.db
       mem_buf_limit: 50MB
       skip_long_lines: on
       refresh_interval: 10

@@ -155,6 +155,12 @@ func TestLogShippingRenders(t *testing.T) {
 	if in["name"] != "tail" || in["path"] != "/var/log/containers/*_imas-core_*.log" {
 		t.Errorf("input %v: this release's namespace", in)
 	}
+	// Fluent Bit creates neither the tail database's nor the S3 buffer's
+	// parent directory: both must sit in the state volume's mount itself.
+	stateMount := get(mounts["state"], "mountPath")
+	if stateMount != "/var/fluent-bit" || in["db"] != "/var/fluent-bit/tail.db" {
+		t.Errorf("tail db %v, state mounted at %v: the db must be directly under the mount", in["db"], stateMount)
+	}
 	out := get(c, "pipeline", "outputs", 0).(map[string]any)
 	for k, want := range map[string]any{"name": "s3", "bucket": "imas-logs", "endpoint": "http://s3.imas-core.svc:9000",
 		"region": "us-east-1", "s3_key_format": "/logs/%Y/%m/%d/$TAG[4]-%H%M%S-$UUID.gz", "use_put_object": "on"} {

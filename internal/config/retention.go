@@ -81,7 +81,7 @@ func farmerRetentionFrom(getenv func(string) string, get func(string) any) (Farm
 // lo to hi.
 func retentionDuration(env, key string, getenv func(string) string, get func(string) any, def, lo, hi time.Duration) (time.Duration, error) {
 	name := key
-	var v any = get(key)
+	v := get(key)
 	if s := strings.TrimSpace(getenv(env)); s != "" {
 		name, v = env, s
 	}
@@ -122,7 +122,7 @@ func retentionDuration(env, key string, getenv func(string) string, get func(str
 // to MaxRecipeAuditRetentionDays whole days.
 func recipeAuditDays(getenv func(string) string, get func(string) any) (int, error) {
 	name := "recipeauditretentiondays"
-	var v any = get(name)
+	v := get(name)
 	if s := strings.TrimSpace(getenv(EnvRecipeAuditRetentionDays)); s != "" {
 		name, v = EnvRecipeAuditRetentionDays, s
 	}
