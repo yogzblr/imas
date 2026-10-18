@@ -68,6 +68,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -372,9 +373,9 @@ func (c *obKVClient) writeKeypair(ctx context.Context, path string, pub, priv *[
 // map). It needs update on <mount>/metadata/<path>; nothing else in the
 // metadata (max_versions and the like) changes.
 func (c *obKVClient) writeSeverFloorMeta(ctx context.Context, path string, floor int, existing map[string]string) error {
-	meta := make(map[string]string, len(existing)+1)
-	for k, v := range existing {
-		meta[k] = v
+	meta := maps.Clone(existing)
+	if meta == nil {
+		meta = map[string]string{}
 	}
 	meta[tenantBoxSeverFloorMeta] = strconv.Itoa(floor)
 	if _, err := c.ob.Post(ctx, c.mount+"/metadata/"+path, map[string]any{"custom_metadata": meta}); err != nil {
