@@ -941,11 +941,16 @@ func mintGatewayJWTFor(ctx context.Context, tenantID, sproutID, nkeyPub string) 
 }
 
 // checkTokenTenantKey checks fingerprint, a join token's tenant key
-// fingerprint, against tenantID's current box public key. A mismatch
+// fingerprint, against tenantID's current box public key, read from
+// OpenBao afresh (TenantX25519PublicKeyForJoinToken): this replica's
+// cache may predate a rotation another replica made, which would refuse
+// a token minted for the new key, and its stale-copy fallback must not
+// let a token for a rotated-out key spend a use. The fresh read also
+// refreshes the cache, so the response names the same key. A mismatch
 // means the token was minted before the tenant key was last rotated: it
 // has to be replaced with a new one.
 func checkTokenTenantKey(tenantID, fingerprint string) error {
-	pub, err := GetTenantX25519PublicKey(tenantID)
+	pub, err := TenantX25519PublicKeyForJoinToken(tenantID)
 	if err != nil {
 		return fmt.Errorf("loading tenant %s X25519 key to check the join token's fingerprint: %w", tenantID, err)
 	}

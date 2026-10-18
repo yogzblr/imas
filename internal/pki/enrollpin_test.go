@@ -267,3 +267,41 @@ func TestTenantX25519PublicKeyForJoinToken_KeepsTheCacheOnFailure(t *testing.T) 
 		t.Fatalf("after a failed token read: %s, %v; want the cached key still served", got, err)
 	}
 }
+
+// Farmer checks a token's fingerprint against the tenant key read afresh:
+// a replica whose cache predates a rotation another replica made accepts
+// the new key's token, answers with that key, and refuses the old key's
+// token without spending it.
+func TestEnroll_FingerprintCheckReadsTheKeyAfresh(t *testing.T) {
+	store, _ := setupEnrollTest(t)
+	newJWSGatewayMinter(t)
+	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
+	oldToken := pinnedToken(t, "ek_1.s")
+	e := tenantBoxEntryFor("t_1")
+	e.mu.Lock()
+	cached := e.set
+	e.mu.Unlock()
+	rot, err := RotateTenantX25519Keypair("t_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This replica still caches the set from before the rotation.
+	e.mu.Lock()
+	e.set = cached
+	e.mu.Unlock()
+
+	if _, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), oldToken, "web-01", testEnrollBoxPub(t))); !errors.Is(err, ErrEnrollmentFailed) {
+		t.Fatalf("a token for the rotated-out key = %v, want ErrEnrollmentFailed", err)
+	}
+	if store.rows["ek_1"].UsedCount != 0 {
+		t.Fatalf("used_count = %d: the refused token was spent", store.rows["ek_1"].UsedCount)
+	}
+	fp, _ := jointoken.FingerprintB64(rot.Pub)
+	res, err := Enroll(t.Context(), signedEnroll(t, testEnrollNKey(t), "ek_1.s."+fp, "web-02", testEnrollBoxPub(t)))
+	if err != nil {
+		t.Fatalf("the new key's token on a replica with a stale cache: %v", err)
+	}
+	if res.TenantX25519Pub != rot.Pub {
+		t.Errorf("the response names %s, want the key the token names", res.TenantX25519Pub)
+	}
+}
