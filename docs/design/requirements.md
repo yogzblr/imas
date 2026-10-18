@@ -39,7 +39,11 @@ Status and delivery detail live in `docs/BUILD-STATUS.md`, not here.
     An update command names a target version only; it never supplies an
     artifact URL or checksum. Repository trust (GPG / package signature)
     is the sprout's own configuration, not something the command carries.
-21. Licensing: dependencies are Apache-2.0 or MIT by default. Accepted
+21. Licensing: dependencies are Apache-2.0 or MIT by default. Also
+    allowed, as permissive licences with no copyleft (owner, 2026-10-17):
+    BSD-2-Clause, BSD-3-Clause, ISC and 0BSD, for Go modules and deployed
+    components alike (the Valkey chart and server are BSD-3-Clause); the
+    modules that carry them are listed in `DEPENDENCIES.md`. Accepted
     exceptions: Percona XtraDB Cluster (GPLv2, commercial arrangement) and
     MPL-2.0 dependencies generally, including OpenBao and its Go client
     (used unmodified, or modifications shared). UAT-only exceptions,
