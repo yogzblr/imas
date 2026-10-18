@@ -69,6 +69,9 @@ A unit may start only when every unit in "Needs" is merged to main.
 | U2 | `U-hardening.md` U2 | U1 |
 | U3 | `U-hardening.md` U3 | U1 |
 | U4 | `U-hardening.md` U4 | U2, U3 |
+| V1 | `V-leftovers.md` V1 | none |
+| V2 | `V-leftovers.md` V2 | none |
+| V3 | `V-leftovers.md` V3 | none |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -240,3 +243,6 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | U2 | P3: tenant key fingerprint in the join token (L24) | U-hardening.md | U2 |
 | U3 | P6: seal cook step events and facts | U-hardening.md | U3 |
 | U4 | Retention settings in the charts | U-hardening.md | U4 |
+| V1 | L16, I8, I9, I12, I1: Account JWT integrity, enrol limits, clock | V-leftovers.md | V1 |
+| V2 | P10: release and chart publishing leftovers | V-leftovers.md | V2 |
+| V3 | P11, P14: triage, issues, findings table | V-leftovers.md | V3 |
