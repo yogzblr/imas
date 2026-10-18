@@ -78,3 +78,30 @@ func IsStaticProp(sproutID, name string) bool {
 func ClearStaticProps() {
 	db.Where("tenant_id = ? AND static = ?", tenantID(), true).Delete(&propRow{})
 }
+
+// DropStaticProps removes the current tenant's static props whose name
+// drop matches, and returns how many it removed. Farmer calls it at start
+// with the reserved fact names, so a static prop an older farmer loaded
+// under such a name (before it filtered them) doesn't outlive the
+// upgrade: StaticPropTTL would otherwise keep it for good.
+func DropStaticProps(drop func(name string) bool) int {
+	var rows []propRow
+	if err := db.Where("tenant_id = ? AND static = ?", tenantID(), true).Find(&rows).Error; err != nil {
+		log.Errorf("props: listing static props: %v", err)
+		return 0
+	}
+	dropped := 0
+	for _, r := range rows {
+		if !drop(r.Name) {
+			continue
+		}
+		res := db.Where("tenant_id = ? AND sprout_id = ? AND name = ? AND static = ?",
+			r.TenantID, r.SproutID, r.Name, true).Delete(&propRow{})
+		if res.Error != nil {
+			log.Errorf("props: dropping static prop %q of sprout %q: %v", r.Name, r.SproutID, res.Error)
+			continue
+		}
+		dropped += int(res.RowsAffected)
+	}
+	return dropped
+}

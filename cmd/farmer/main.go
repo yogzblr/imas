@@ -221,6 +221,11 @@ func main() {
 	initGatewaySigner()
 	initValkeyClient()
 	props.LoadStaticProps(staticPropsWithoutFacts(config.StaticProps()))
+	// A reserved name an older farmer loaded from config stays until
+	// dropped: static props never expire on their own.
+	if n := props.DropStaticProps(facts.IsReservedPropName); n > 0 {
+		log.Warnf("props.static: dropped %d stored static prop(s) with a reserved fact name", n)
+	}
 	loadCohortRegistry()
 	requireConfigRoot()
 	initAuditLogger()
