@@ -18,6 +18,8 @@
 > (msitools' `wixl`) as a build hook (brief REL.1). Nothing has installed
 > that MSI on a Windows host yet.
 
+The ordered procedure for the day is [RELEASE-SOP.md](RELEASE-SOP.md).
+
 One tag releases everything: the `imas`, `imas-farmer` and `imas-sprout`
 binaries and packages, the six container images, and the Helm charts. The
 farmer and sprout ship in lockstep so a farmer release always carries the
