@@ -1,4 +1,5 @@
 change: W1: UAT acceptance cases for the S, T and U fixes in the core tier (`uat/tests/hardening_test.go`): B1 (S3 backlog cap), E1 (S6 purge by the operator route and the sweeper), D1 (U4 retention, with Fluent Bit shipping now on in the UAT core hub), U1 (U3 sealed facts and step events), N1 (T6/L12, standalone only: skips on the hosted stack) and RB1 (S4 render budget). `uat/hub/core/acceptance.sh` is their view inside the hub, tested against real MySQL, Valkey, RustFS and OpenBao containers; the core hub's values set the short settings (backlog 20, purge after 1h, 24h terminal rows, one day of recipe audit and logs), the chart defaults stay as shipped. All six pass against the fake stack; their first real run is the owner's next rig run. RB1 found a product bug (P29). `uat/lite/README.md` refreshed (status of the rc.14 rig run, `<latest rc>`, 304 checks); the kind node image pinned by digest.
+pr: 293
 ---
 item: P29
 action: add
