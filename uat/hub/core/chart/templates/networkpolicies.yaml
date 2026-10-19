@@ -14,7 +14,8 @@
 #     versity.enabled, in on the accounts store port from the DMZ's nodes
 #     only and out to Versity Gateway's S3 port.
 #   - Keycloak: in from the edge only. RustFS: in from farmer and
-#     saasapi, and from the DMZ's nodes on its hostPort, for the bus's
+#     saasapi, from the farmer chart's log shipper and log retention pods
+#     (logShipping), and from the DMZ's nodes on its hostPort, for the bus's
 #     account loader (read-only, accounts bucket only; design D22). That
 #     and farmer's API are the only DMZ-to-core paths.
 # The DMZ's private address (dmz.privateIP: its node's, or its internal load
@@ -169,6 +170,13 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.farmer.name }}
+              app.kubernetes.io/instance: {{ .Values.farmer.release }}
+        # Fluent Bit and the log retention CronJob (the farmer chart's
+        # logShipping): their own name, the same release.
+        - namespaceSelector: { matchLabels: {{ toJson $farmerNS }} }
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.farmer.logShipperName }}
               app.kubernetes.io/instance: {{ .Values.farmer.release }}
       ports:
         - { protocol: TCP, port: 9000 }

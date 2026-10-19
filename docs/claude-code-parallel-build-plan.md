@@ -2144,6 +2144,12 @@ skips, saying so, on the single-node run.
 | X3 | A sprout cannot open a connection to core | core |
 | X4 | Cross tenant access by a tenant admin token is denied everywhere | core |
 | X5 | Sealing: plaintext cmd.run and cook are refused by a sprout | core |
+| B1 | Backlog cap (S3): a tenant whose pending actions fill the cap gets 429 backlog_full with details (pending, limit, requested, available) and Retry-After 60; once they drain the same request is accepted | core |
+| E1 | Tenant purge (S6), by the operator route and by the retention sweeper: status purged, the tombstone answers, PATCH gives 409 tenant_purged, its keys, sprouts, recipes, objects, Valkey keys, bus identities and OpenBao keys are gone, another tenant is untouched | core |
+| D1 | Retention (U4) with short settings: the recipe audit sweep and the log retention CronJob delete the days past the limit and keep newer ones; finished batches, provisioning jobs and expired keys past SAASAPI_TERMINAL_ROW_RETENTION are pruned, a pending batch and a tombstone's jobs kept | core |
+| U1 | Sealed facts and step events (U3): sealed reports are stored and cooks recorded; plaintext or forged facts and plaintext step events are refused, and a plaintext one marks the sprout as needing an upgrade until its next sealed report | core |
+| N1 | PUT /pki/putnkey (T6, L12) without a proof of possession is refused and files nothing; with one it is accepted. Standalone installs only: on the hosted stack, which serves neither route, it skips saying so | core |
+| RB1 | Per-cook render budget (S4) on the real stack: a cook whose includes exceed the budget fails with the budget error and leaves the sprout unchanged; one inside it applies | core |
 | HA1 | Pod kill under load (farmer, saasapi, Envoy, each bus pod): no call fails after 3 retries, sprouts back within 30 s, no duplicate JWT or box key, a restarted bus node ready only with every account | ha |
 | HA2 | Node stop under load (a core node, then a DMZ node): served by other pods within 60 s, PXC, OpenBao and Valkey serve on two replicas, the node and its pods Ready within 10 minutes of the start, no data lost | ha |
 | HA3 | Rolling restart of farmer, saasapi and the bus by helm upgrade: sprouts stay enrolled, no call fails after 3 retries, the core check (design T4) passes after it | ha |

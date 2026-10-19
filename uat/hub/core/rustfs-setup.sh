@@ -16,6 +16,12 @@
 # <state-dir>/core/sensitive/s3/accounts-reader for uat/hub/dmz/install.sh
 # --accounts-reader-dir: it belongs in the DMZ cluster, never in core's. Neither accounts user can reach the recipe or
 # job bucket, and farmer's recipe user cannot reach the accounts bucket.
+# Also the log bucket of logShipping (U4): a writer user for Fluent Bit and
+# a user for the log retention CronJob, scoped by the chart's own policies
+# logs-writer.json and logs-retention.json (read next to
+# <saasapi-policy.json>, where install.sh extracts all three from the
+# published chart), and their Secrets (logShipping.credentialsSecret,
+# logShipping.retention.credentialsSecret).
 # FLAG FOR SECURITY REVIEW.
 #
 # <saasapi-policy.json> is files/objectstore-policies/saasapi-recipes.json
@@ -46,6 +52,11 @@ need_cmd kubectl jq
 # P21-slice2-bus-loader.md §4.1, §4.6).
 
 grep -q RECIPE_BUCKET "$saasapi_policy_src" || die "$saasapi_policy_src has no RECIPE_BUCKET placeholder"
+policy_dir=$(dirname "$saasapi_policy_src")
+for f in logs-writer.json logs-retention.json; do
+	grep -q LOG_BUCKET "$policy_dir/$f" 2>/dev/null ||
+		die "$policy_dir/$f (the chart's files/objectstore-policies/$f) is missing or has no LOG_BUCKET placeholder"
+done
 
 # rustfs_sh <script>: runs <script> in the RustFS pod with the helper
 # `rf METHOD PATH [BODYFILE]` defined. rf signs with the root credential
@@ -80,7 +91,8 @@ bucket "$RECIPE_BUCKET"
 bucket "$JOB_BUCKET"
 bucket "$SPROUT_JWT_BUCKET"
 bucket "$ACCOUNTS_BUCKET"
-log "buckets $RECIPE_BUCKET, $JOB_BUCKET, $SPROUT_JWT_BUCKET and $ACCOUNTS_BUCKET exist"
+bucket "$LOG_BUCKET"
+log "buckets $RECIPE_BUCKET, $JOB_BUCKET, $SPROUT_JWT_BUCKET, $ACCOUNTS_BUCKET and $LOG_BUCKET exist"
 
 # policy <name> <json on stdin>
 policy() {
@@ -110,6 +122,11 @@ accounts_policy() {
 # deleted (a deprovision is a newer lock-out JWT), so no s3:DeleteObject.
 accounts_policy '["s3:GetObject", "s3:PutObject"]' | policy imas-uat-accounts-writer
 accounts_policy '["s3:GetObject"]' | policy imas-uat-accounts-reader
+# The chart's log policies: the writer may only put under the prefix, the
+# retention user only list the bucket and delete under the prefix.
+for p in logs-writer logs-retention; do
+	sed -e "s/LOG_BUCKET/$LOG_BUCKET/g" -e "s|LOG_PREFIX|$LOG_PREFIX|g" "$policy_dir/$p.json" | policy "imas-uat-$p"
+done
 
 # user <name> <policy> <secret file>: creates or updates the user and
 # attaches exactly that policy.
@@ -137,11 +154,17 @@ reader_dir="$s3dir/accounts-reader"
 (umask 077 && mkdir -p "$reader_dir")
 printf '%s' "$S3_ACCOUNTS_READER_USER" >"$reader_dir/access-key-id"
 gen_secret_file "$reader_dir/secret-access-key" 24
+printf '%s' "$S3_LOGS_WRITER_USER" >"$s3dir/logs-writer-access-key-id"
+gen_secret_file "$s3dir/logs-writer-secret-access-key" 24
+printf '%s' "$S3_LOGS_RETENTION_USER" >"$s3dir/logs-retention-access-key-id"
+gen_secret_file "$s3dir/logs-retention-secret-access-key" 24
 
 user "$S3_FARMER_USER" imas-uat-farmer "$s3dir/farmer-secret-access-key"
 user "$S3_SAASAPI_USER" imas-uat-saasapi-recipes "$s3dir/saasapi-secret-access-key"
 user "$S3_ACCOUNTS_WRITER_USER" imas-uat-accounts-writer "$s3dir/accounts-writer-secret-access-key"
 user "$S3_ACCOUNTS_READER_USER" imas-uat-accounts-reader "$reader_dir/secret-access-key"
+user "$S3_LOGS_WRITER_USER" imas-uat-logs-writer "$s3dir/logs-writer-secret-access-key"
+user "$S3_LOGS_RETENTION_USER" imas-uat-logs-retention "$s3dir/logs-retention-secret-access-key"
 
 apply_secret "$CORE_NS" "$S3_FARMER_SECRET" \
 	"access-key-id=$s3dir/farmer-access-key-id" "secret-access-key=$s3dir/farmer-secret-access-key"
@@ -149,4 +172,8 @@ apply_secret "$CORE_NS" "$S3_SAASAPI_SECRET" \
 	"access-key-id=$s3dir/saasapi-access-key-id" "secret-access-key=$s3dir/saasapi-secret-access-key"
 apply_secret "$CORE_NS" "$S3_ACCOUNTS_WRITER_SECRET" \
 	"access-key-id=$s3dir/accounts-writer-access-key-id" "secret-access-key=$s3dir/accounts-writer-secret-access-key"
+apply_secret "$CORE_NS" "$S3_LOGS_WRITER_SECRET" \
+	"access-key-id=$s3dir/logs-writer-access-key-id" "secret-access-key=$s3dir/logs-writer-secret-access-key"
+apply_secret "$CORE_NS" "$S3_LOGS_RETENTION_SECRET" \
+	"access-key-id=$s3dir/logs-retention-access-key-id" "secret-access-key=$s3dir/logs-retention-secret-access-key"
 log "accounts reader credential for the DMZ bus: $reader_dir (uat/hub/dmz/install.sh --accounts-reader-dir)"

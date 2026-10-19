@@ -235,8 +235,8 @@ func TestSelectErrors(t *testing.T) {
 		t.Error("Expected for one id")
 	}
 	core, _ := cat.Select("core", nil)
-	if n := len(cat.Expected(core)); n != 35 {
-		t.Errorf("tier core expects %d scenarios, want 35", n)
+	if n := len(cat.Expected(core)); n != 41 {
+		t.Errorf("tier core expects %d scenarios, want 41", n)
 	}
 	ing, _ := cat.Select("ingredients", nil)
 	if !cat.ExpectsIngredients(ing) || len(cat.Expected(ing)) != 0 {
@@ -246,7 +246,7 @@ func TestSelectErrors(t *testing.T) {
 	if ha, _ := cat.Select("ha", nil); len(cat.Expected(ha)) != 6 || cat.ExpectsIngredients(ha) {
 		t.Errorf("tier ha expects %d scenarios, want 6", len(cat.Expected(ha)))
 	}
-	if !cat.ExpectsIngredients(every) || len(cat.Expected(every)) != 46 {
+	if !cat.ExpectsIngredients(every) || len(cat.Expected(every)) != 52 {
 		t.Errorf("tier all expects %d", len(cat.Expected(every)))
 	}
 }

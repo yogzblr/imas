@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for test/acceptance_test.sh only: saasapi's operator
+# plane answering POST /v1/operator/tenants/<id>/purge with
+# $ACC_PURGE_STATUS and $ACC_PURGE_BODY. Its arguments go to
+# $ACC_STATE/curl.log, and the header file's content to
+# $ACC_STATE/curl-headers.log.
+set -euo pipefail
+: "${ACC_STATE:?}"
+printf 'curl %s\n' "$*" >>"$ACC_STATE/curl.log"
+out=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	-o) out=$2; shift 2 ;;
+	-H)
+		[[ "$2" == @* ]] && cat "${2#@}" >>"$ACC_STATE/curl-headers.log"
+		shift 2
+		;;
+	*) shift ;;
+	esac
+done
+printf '%s' "${ACC_PURGE_BODY:-}" >"$out"
+printf '%s' "${ACC_PURGE_STATUS:-202}"

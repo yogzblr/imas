@@ -7,6 +7,9 @@ farmer:
   namespace: imas-core
   # app.kubernetes.io/name of farmer's and saasapi's pods (the chart name).
   name: farmer
+  # app.kubernetes.io/name of the farmer chart's Fluent Bit and log
+  # retention pods (logShipping).
+  logShipperName: imas-log-shipper
   # <release>-farmer and <release>-farmer-saasapi, the chart's Services.
   serviceName: imas-core-farmer
   apiPort: 5405

@@ -37,6 +37,9 @@ type Fleet struct {
 	// OperatorExec, when set, replaces running operator-release.sh the
 	// same way (operator.go). For tests.
 	OperatorExec func(ctx context.Context, args []string) (stdout, stderr []byte, err error)
+	// AcceptanceExec, when set, replaces running acceptance.sh: it gets
+	// the script's arguments and its stdin (acceptance.go). For tests.
+	AcceptanceExec func(ctx context.Context, args []string, stdin []byte) (stdout, stderr []byte, err error)
 
 	prepareOnce sync.Once
 	prepareErr  error

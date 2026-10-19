@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl, for test/acceptance_test.sh only. `exec` into
+# the PXC, Valkey, RustFS and OpenBao pods runs the same command in a
+# local container (ACC_MYSQL, ACC_VALKEY, ACC_RUSTFS, ACC_OPENBAO, the
+# docker container names); everything else answers from files in
+# $ACC_STATE. Every call is appended to $ACC_STATE/calls.log.
+set -euo pipefail
+: "${ACC_STATE:?}"
+printf 'kubectl %s\n' "$*" >>"$ACC_STATE/calls.log"
+args=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--kubeconfig | -n) shift 2 ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+set -- "${args[@]}"
+
+# container <target>: the local container standing in for a pod.
+container() {
+	case "$1" in
+	imas-core-pxc-pxc-0) printf '%s' "${ACC_MYSQL:?no MySQL container}" ;;
+	deploy/imas-core-valkey | imas-core-valkey-0) printf '%s' "${ACC_VALKEY:?no Valkey container}" ;;
+	deploy/imas-uat-rustfs) printf '%s' "${ACC_RUSTFS:?no RustFS container}" ;;
+	imas-core-openbao-0) printf '%s' "${ACC_OPENBAO:?no OpenBao container}" ;;
+	*) echo "acceptance stub kubectl: no container for $1" >&2; exit 2 ;;
+	esac
+}
+
+case "$1" in
+exec)
+	shift
+	[[ "$1" == -i ]] && shift
+	target=$1
+	shift
+	[[ "$1" == -c ]] && shift 2
+	[[ "$1" == -- ]] && shift
+	exec docker exec -i "$(container "$target")" "$@"
+	;;
+get)
+	case "$2 $3" in
+	"secret imas-core-pxc-secrets") printf '%s' "${ACC_MYSQL_PW:-pw}" | base64 -w0 ;;
+	"secret imas-valkey-auth") jq -cn --arg p "${ACC_VALKEY_PW:-vpw}" '{data: {password: ($p | @base64)}}' ;;
+	"secret imas-saasapi-operator-tls")
+		printf -- '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n' | base64 -w0 ;;
+	*)
+		f="$ACC_STATE/get-$2-$3.json"
+		[[ -f "$f" ]] || { echo "Error from server (NotFound): $2 \"$3\" not found" >&2; exit 1; }
+		cat "$f"
+		;;
+	esac
+	;;
+rollout)
+	case "$2" in
+	restart) exit 0 ;;
+	status) exit "${ACC_ROLLOUT_RC:-0}" ;;
+	*) echo "stub: rollout $2" >&2; exit 2 ;;
+	esac
+	;;
+create)
+	[[ "$2" == job ]] || exit 2
+	;;
+wait) exit "${ACC_JOB_RC:-0}" ;;
+delete) exit 0 ;;
+logs)
+	[[ -f "$ACC_STATE/logs.txt" ]] && cat "$ACC_STATE/logs.txt"
+	;;
+port-forward)
+	echo "Forwarding from 127.0.0.1:40125 -> 8443"
+	exec sleep 60
+	;;
+*) echo "acceptance stub kubectl: $* unsupported" >&2; exit 2 ;;
+esac

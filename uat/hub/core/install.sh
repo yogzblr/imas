@@ -15,7 +15,8 @@
 #       realm, the edge proxy, certificates (farmer's, the edge's and
 #       saasapi's operator listener's), policies
 #    5. RustFS buckets, users and policies (rustfs-setup.sh): recipes, jobs,
-#       sprout JWTs and the accounts bucket with its writer and reader, then
+#       sprout JWTs, the accounts bucket with its writer and reader, and the
+#       log bucket with its writer and retention users (logShipping), then
 #       validate-object-store.sh proves each scoped credential's reach. On an
 #       HA core hub, Versity Gateway's Secrets instead (below)
 #    6. the farmer chart, with OpenBao initialised and unsealed while the
@@ -36,7 +37,7 @@
 # and step 5 Versity Gateway's Secrets instead of provisioning RustFS: the
 # Azure Blob account's name and key (from <state>/core/sensitive/
 # azure-blob/, which the workflow writes from uat/tofu's object_store
-# outputs), the gateway's root credential and the four users' pairs (the
+# outputs), the gateway's root credential and the six users' pairs (the
 # accounts reader's for the DMZ too, at sensitive/s3/accounts-reader as
 # before). After the chart (its createBuckets Job has made the buckets and
 # their policies), validate-object-store.sh proves each credential through
@@ -142,8 +143,12 @@ fi
 chart_meta=$(tar -xzf "$chart_tgz" -O farmer/Chart.yaml)
 grep -qx "version: $version" <<<"$chart_meta" || die "$chart_tgz is not chart version $version"
 grep -Eqx "appVersion: \"?$version\"?" <<<"$chart_meta" || die "$chart_tgz appVersion is not $version"
-tar -xzf "$chart_tgz" -O farmer/files/objectstore-policies/saasapi-recipes.json >"$chart_dir/saasapi-recipes.json" ||
-	die "$chart_tgz has no files/objectstore-policies/saasapi-recipes.json"
+# The release's own object store policies: saasapi's recipe user, and the
+# log shipper's two users (rustfs-setup.sh reads them side by side).
+for p in saasapi-recipes logs-writer logs-retention; do
+	tar -xzf "$chart_tgz" -O "farmer/files/objectstore-policies/$p.json" >"$chart_dir/$p.json" ||
+		die "$chart_tgz has no files/objectstore-policies/$p.json"
+done
 # The published chart carries the sprout release finish.sh registers
 # (files/sprout-release.json, stamped at release time with the GPG-signed
 # checksums.txt and its signature); a chart without it would register
@@ -175,7 +180,7 @@ if [[ "$S3_MODE" == rustfs ]]; then
 	"$here/rustfs-setup.sh" "${common[@]}" "$chart_dir/saasapi-recipes.json"
 	"$here/validate-object-store.sh" "${common[@]}"
 elif [[ "$S3_MODE" == versity ]]; then
-	# Versity Gateway (HA run): the four users' credentials, generated once
+	# Versity Gateway (HA run): the six users' credentials, generated once
 	# and kept, in the same files rustfs-setup.sh writes (the accounts
 	# reader's at accounts-reader/, for uat/hub/dmz/install.sh
 	# --accounts-reader-dir), as the Secrets the farmer chart names. The
@@ -188,7 +193,10 @@ elif [[ "$S3_MODE" == versity ]]; then
 	printf '%s' "$S3_SAASAPI_USER" >"$s3dir/saasapi-access-key-id"
 	printf '%s' "$S3_ACCOUNTS_WRITER_USER" >"$s3dir/accounts-writer-access-key-id"
 	printf '%s' "$S3_ACCOUNTS_READER_USER" >"$s3dir/accounts-reader/access-key-id"
-	for f in farmer-secret-access-key saasapi-secret-access-key accounts-writer-secret-access-key accounts-reader/secret-access-key; do
+	printf '%s' "$S3_LOGS_WRITER_USER" >"$s3dir/logs-writer-access-key-id"
+	printf '%s' "$S3_LOGS_RETENTION_USER" >"$s3dir/logs-retention-access-key-id"
+	for f in farmer-secret-access-key saasapi-secret-access-key accounts-writer-secret-access-key accounts-reader/secret-access-key \
+		logs-writer-secret-access-key logs-retention-secret-access-key; do
 		gen_secret_file "$s3dir/$f" 24
 	done
 	apply_secret "$CORE_NS" "$S3_FARMER_SECRET" \
@@ -199,6 +207,10 @@ elif [[ "$S3_MODE" == versity ]]; then
 		"access-key-id=$s3dir/accounts-writer-access-key-id" "secret-access-key=$s3dir/accounts-writer-secret-access-key"
 	apply_secret "$CORE_NS" "$S3_ACCOUNTS_READER_SECRET" \
 		"access-key-id=$s3dir/accounts-reader/access-key-id" "secret-access-key=$s3dir/accounts-reader/secret-access-key"
+	apply_secret "$CORE_NS" "$S3_LOGS_WRITER_SECRET" \
+		"access-key-id=$s3dir/logs-writer-access-key-id" "secret-access-key=$s3dir/logs-writer-secret-access-key"
+	apply_secret "$CORE_NS" "$S3_LOGS_RETENTION_SECRET" \
+		"access-key-id=$s3dir/logs-retention-access-key-id" "secret-access-key=$s3dir/logs-retention-secret-access-key"
 	log "Versity Gateway users' Secrets applied; accounts reader credential for the DMZ bus: $s3dir/accounts-reader"
 else
 	# External S3 (object_store.mode external): buckets, users and policies
@@ -207,7 +219,7 @@ else
 	# pair (accounts-reader/) is for the DMZ (uat/hub/dmz/install.sh
 	# --accounts-reader-dir) and is only checked here.
 	s3dir="$SENSITIVE_DIR/s3"
-	for f in farmer- saasapi- accounts-writer- accounts-reader/; do
+	for f in farmer- saasapi- accounts-writer- accounts-reader/ logs-writer- logs-retention-; do
 		for k in access-key-id secret-access-key; do
 			[[ -s "$s3dir/$f$k" ]] || die "object_store.mode is external: $s3dir/$f$k is missing (README.md, \"External S3\")"
 		done
@@ -218,7 +230,11 @@ else
 		"access-key-id=$s3dir/saasapi-access-key-id" "secret-access-key=$s3dir/saasapi-secret-access-key"
 	apply_secret "$CORE_NS" "$S3_ACCOUNTS_WRITER_SECRET" \
 		"access-key-id=$s3dir/accounts-writer-access-key-id" "secret-access-key=$s3dir/accounts-writer-secret-access-key"
-	log "external S3 at $S3_ENDPOINT: Secrets $S3_FARMER_SECRET, $S3_SAASAPI_SECRET and $S3_ACCOUNTS_WRITER_SECRET applied from $s3dir"
+	apply_secret "$CORE_NS" "$S3_LOGS_WRITER_SECRET" \
+		"access-key-id=$s3dir/logs-writer-access-key-id" "secret-access-key=$s3dir/logs-writer-secret-access-key"
+	apply_secret "$CORE_NS" "$S3_LOGS_RETENTION_SECRET" \
+		"access-key-id=$s3dir/logs-retention-access-key-id" "secret-access-key=$s3dir/logs-retention-secret-access-key"
+	log "external S3 at $S3_ENDPOINT: Secrets $S3_FARMER_SECRET, $S3_SAASAPI_SECRET, $S3_ACCOUNTS_WRITER_SECRET, $S3_LOGS_WRITER_SECRET and $S3_LOGS_RETENTION_SECRET applied from $s3dir"
 fi
 
 # --- 6. the farmer chart, with OpenBao bootstrapped alongside ----------------

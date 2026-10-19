@@ -25,7 +25,9 @@
 #      curl (test/finish_test.sh): a failed registration Job fails it, and
 #      the operator API's answer decides; validate-object-store.sh against a
 #      curl that answers with the UAT policies, for RustFS and for Versity
-#      Gateway (test/object_store_test.sh)
+#      Gateway (test/object_store_test.sh); acceptance.sh against stub
+#      kubectl and curl and, with Docker, real MySQL, Valkey, RustFS and
+#      OpenBao containers (test/acceptance_test.sh)
 #   9. go test ./uat/hub/core/ (helm template and lint of the farmer chart
 #      with values/farmer-uat.yaml, and of chart/)
 # A tool that isn't installed is reported as SKIPPED, never as passed.
@@ -85,7 +87,7 @@ ep2="$core/testdata/endpoints-overrides.json"
 
 # --- 1. shellcheck --------------------------------------------------------------
 if command -v shellcheck >/dev/null; then
-	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/* test/object-store-stubs/*' _ "$core"
+	expect "shellcheck" bash -c 'cd "$1" && shellcheck -x ./*.sh lib/common.sh test/*.sh test/stubs/* test/finish-stubs/* test/object-store-stubs/* test/acceptance-stubs/*' _ "$core"
 else
 	skip "shellcheck (not installed)"
 fi
@@ -760,6 +762,13 @@ fi
 # --- 8b. finish.sh ------------------------------------------------------------------
 expect "finish.sh and operator-release.sh (test/finish_test.sh)" bash "$here/finish_test.sh"
 expect "validate-object-store.sh (test/object_store_test.sh)" bash "$here/object_store_test.sh"
+if bash "$here/acceptance_test.sh" >"$tmp/acc.out" 2>&1; then
+	ok "acceptance.sh (test/acceptance_test.sh)"
+	while IFS= read -r s; do skip "$s"; done < <(sed -n 's/^skipped (not passed): //p' "$tmp/acc.out")
+else
+	bad "acceptance.sh (test/acceptance_test.sh)"
+	sed 's/^/      /' "$tmp/acc.out" | tail -n 20
+fi
 
 # --- 9. go test ---------------------------------------------------------------------
 if command -v go >/dev/null; then

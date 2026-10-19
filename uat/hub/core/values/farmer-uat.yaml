@@ -170,6 +170,14 @@ farmer:
   # off anywhere else until the security review.
   selfUpdate:
     enabled: false
+  # Short retention so W1's acceptance case D1 (uat/tests) sees the recipe
+  # audit sweep act within a run: records of a day more than one day back
+  # go at farmer's next sweep (IMAS_RECIPE_AUDIT_RETENTION_DAYS; the chart
+  # default is 365). jobLogTTL and boxKeyGrace stay the chart defaults.
+  retention:
+    jobLogTTL: "720h"
+    recipeAuditDays: 1
+    boxKeyGrace: "24h"
 
 saasapi:
   enabled: true
@@ -183,6 +191,27 @@ saasapi:
   # farmer.selfUpdate.enabled (above), from dispatch_flags.
   fleetUpdateDispatch:
     enabled: false
+  # A small action backlog cap (SAASAPI_ACTION_MAX_PENDING_PER_TENANT; the
+  # chart default is 2000), so W1's B1 can fill a tenant's backlog with
+  # its sprouts' waiting commands and see 429 backlog_full. Above what
+  # any other core scenario keeps pending at once (a batch over a tenant's
+  # three sprouts at most). The HA overlay restores the default for the ha
+  # tier's traffic loops.
+  actionDispatch:
+    maxPendingPerTenant: 20
+  # Erasure after offboarding (S6) at the shortest delay saasapi accepts
+  # (SAASAPI_TENANT_PURGE_AFTER, 1h; the chart default is saasapi's 720h):
+  # W1's E1 reads purge_after an hour out, then moves the tenant's
+  # offboarded_at back past it so the sweeper purges it within the run.
+  tenantPurge:
+    enabled: true
+    after: "1h"
+  # The shortest terminal row retention saasapi accepts
+  # (SAASAPI_TERMINAL_ROW_RETENTION, 24h; the chart default is 2160h): W1's
+  # D1 moves its own rows' times back past it and restarts saasapi, whose
+  # prune runs at start.
+  retention:
+    terminalRows: "24h"
   # The operator plane (P20 option C): the listener the sprout release hook
   # Job registers the release on, so finish.sh's
   # `helm upgrade --set sproutRelease.register=true` really registers it.
@@ -226,6 +255,21 @@ saasapi:
     - name: uat-ca
       mountPath: /etc/imas-uat-ca
       readOnly: true
+
+# Log shipping (U4): Fluent Bit writes the namespace's container logs to
+# the log bucket, and the log retention CronJob deletes the days older than
+# retention.days. Both credentials are made per run like the others
+# (rustfs-setup.sh; install.sh on Versity Gateway; the operator's files on
+# external S3), with the chart's own policies
+# (files/objectstore-policies/logs-*.json). One day, the shortest the chart
+# accepts (default 30), so W1's D1 sees a day-old object go when it runs
+# the CronJob.
+logShipping:
+  enabled: true
+  credentialsSecret: imas-uat-s3-logs-writer
+  retention:
+    days: 1
+    credentialsSecret: imas-uat-s3-logs-retention
 
 networkPolicy:
   enabled: true
