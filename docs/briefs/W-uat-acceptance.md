@@ -23,6 +23,15 @@ Owner decisions (2026-10-19, final):
   kept behind `t.Skip("known bug: <issue>")` only if the owner agrees, and
   otherwise leaves the case failing with the reason in the PR.
 
+Found by the first rig run (rc.14, 2026-10-19; core 58 pass, 0 fail, 3
+skip): scenario S6's clean re-enrolment after a purge is skipped because
+saasapi has no route to delete or revoke a sprout. That is a product gap, not
+a test gap. **Open owner decision:** add `DELETE /v1/tenants/{tenant_id}/sprouts/{sprout_id}`
+(write role, rate limited, revokes the sprout's NKey and removes its row)
+before W1, or accept the skip. Until decided, W1 does not add the route; E1
+covers erasure through the tenant purge, which removes the tenant's sprouts
+with it, and the S6 skip stays.
+
 ## W1: acceptance cases and the lite README
 
 Scope: `uat/tests/*_test.go`, `uat/tests/catalogue.tsv`,
