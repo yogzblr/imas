@@ -1389,7 +1389,8 @@ components:
                   alone means it can't continue. `dispatch_outcome_unknown`
                   may have run; `dispatch_not_delivered`,
                   `expired_not_sent`, `tenant_not_active`, `job_refused`
-                  (farmer couldn't render or stage the cook's recipe) and
+                  (farmer couldn't read, render or stage the cook's
+                  recipe) and
                   `sprout_reenroll_required` (the sprout has no
                   payload-encryption key on record; re-enroll it) never ran.
                   See "Item error codes" in docs/api/saasapi.md.

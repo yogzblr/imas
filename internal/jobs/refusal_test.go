@@ -14,6 +14,8 @@ import (
 
 var errTestRefusal = errors.New("cook exceeded its render budget")
 
+// A refused job's row: refused, with no steps and no dispatch time, since
+// nothing of it was sent.
 func TestRecordJobRefusal(t *testing.T) {
 	gdb := newIndexTestDB(t)
 	const tenant, sprout, jid = "t_a", "web-01", "refused-job"

@@ -1155,6 +1155,8 @@ func SetDispatchRefusalRecorder(fn DispatchRefusalRecorder) {
 	dispatchRefusalRecorder = fn
 }
 
+// recordDispatchRefusal calls the installed DispatchRefusalRecorder, if
+// any, for job jid refused with err.
 func recordDispatchRefusal(tenantID, sproutID, jid string, err error) {
 	dispatchRefusalRecorderMu.RLock()
 	fn := dispatchRefusalRecorder

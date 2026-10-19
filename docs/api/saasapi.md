@@ -340,7 +340,7 @@ Every failed item carries one of these codes, with a fixed message:
 | `sprout_reenroll_required` | no | the sprout has no payload-encryption key on record, so farmer refused to send it anything (nothing is sent in plaintext); re-enroll the sprout. Not retried |
 | `command_failed` | yes | a `cmd.run` exited non-zero (`exit_code`) |
 | `job_failed`, `job_expired` | yes / maybe | a cook or update job failed, or started too late to be recorded |
-| `job_refused` | no | farmer refused a cook before sending the sprout anything: its recipe could not be rendered (a missing include, the per-cook render budget, an invalid template) or staged. A new POST is refused the same way until the recipe is fixed |
+| `job_refused` | no | farmer refused a cook before sending the sprout anything: its recipe could not be read, resolved or rendered (a missing include, the per-cook render budget, an invalid template), or could not be staged. A new POST is refused the same way until the recipe, or farmer's recipe store, is fixed; a store error that has passed lets it through |
 | `dispatch_outcome_unknown` | maybe | sent, but no usable reply: it timed out, its pod died waiting, or the answer wasn't farmer's sealed reply to that request |
 | `dispatch_not_delivered` | no | still queued after `SAASAPI_OUTBOX_MAX_ATTEMPTS` dispatches, no farmer listening |
 | `expired_not_sent` | no | not sent within `SAASAPI_OUTBOX_ACTION_MAX_AGE` of the POST |
