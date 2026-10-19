@@ -57,10 +57,10 @@ func TestFarmerJobStatusColumnContract(t *testing.T) {
 		t.Fatalf("job_status primary key = %v, want [tenant_id sprout_id jid] (the lookup key)", pk)
 	}
 	if farmerJobSucceeded != jobs.JobIndexStatusSucceeded || farmerJobFailed != jobs.JobIndexStatusFailed ||
-		farmerJobExpired != jobs.JobIndexStatusExpired {
-		t.Fatalf("status strings drifted: saasapi %q/%q/%q, jobs %q/%q/%q",
-			farmerJobSucceeded, farmerJobFailed, farmerJobExpired,
-			jobs.JobIndexStatusSucceeded, jobs.JobIndexStatusFailed, jobs.JobIndexStatusExpired)
+		farmerJobExpired != jobs.JobIndexStatusExpired || farmerJobRefused != jobs.JobIndexStatusRefused {
+		t.Fatalf("status strings drifted: saasapi %q/%q/%q/%q, jobs %q/%q/%q/%q",
+			farmerJobSucceeded, farmerJobFailed, farmerJobExpired, farmerJobRefused,
+			jobs.JobIndexStatusSucceeded, jobs.JobIndexStatusFailed, jobs.JobIndexStatusExpired, jobs.JobIndexStatusRefused)
 	}
 }
 
@@ -71,6 +71,7 @@ func TestFarmerJobStatusReader(t *testing.T) {
 	mustInsertFarmerJobStatus(t, gdb, "t_a", "web-03", "j3", jobs.JobIndexStatusRunning)
 	mustInsertFarmerJobStatus(t, gdb, "t_a", "web-04", "j4", jobs.JobIndexStatusPending)
 	mustInsertFarmerJobStatus(t, gdb, "t_a", "web-08", "j8", jobs.JobIndexStatusExpired)
+	mustInsertFarmerJobStatus(t, gdb, "t_a", "web-09", "j9", jobs.JobIndexStatusRefused)
 	// Same sprout_id and jid, other tenant.
 	mustInsertFarmerJobStatus(t, gdb, "t_b", "web-05", "j5", jobs.JobIndexStatusSucceeded)
 	// Matching jid, different sprout: not the requested job.
@@ -79,6 +80,7 @@ func TestFarmerJobStatusReader(t *testing.T) {
 	refs := []JobRef{
 		{"web-01", "j1"}, {"web-02", "j2"}, {"web-03", "j3"}, {"web-04", "j4"},
 		{"web-05", "j5"}, {"web-06", "j6"}, {"web-07", "missing"}, {"web-08", "j8"},
+		{"web-09", "j9"},
 	}
 	got, err := farmerJobStatusReader{}.JobOutcomes(t.Context(), "t_a", refs)
 	if err != nil {
@@ -90,6 +92,7 @@ func TestFarmerJobStatusReader(t *testing.T) {
 		{"web-03", "j3"}: JobOutcomeRunning,
 		{"web-04", "j4"}: JobOutcomeRunning,
 		{"web-08", "j8"}: JobOutcomeExpired,
+		{"web-09", "j9"}: JobOutcomeRefused,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("JobOutcomes = %v, want %v", got, want)

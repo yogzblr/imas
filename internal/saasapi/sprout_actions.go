@@ -115,6 +115,12 @@ const (
 	// dispatched (farmer's IMAS_JOB_RECONCILE_WINDOW), so its result was
 	// not recorded. It may still have run.
 	errCodeJobExpired = "job_expired"
+	// errCodeJobRefused: farmer refused the cook before any copy of it
+	// could reach the sprout (its recipe didn't resolve: a missing
+	// include, the per-cook render budget; or it couldn't be staged), so
+	// it never ran. Sending it again is refused the same way until the
+	// recipe or the store is fixed.
+	errCodeJobRefused = "job_refused"
 	// errCodeDispatchOutcomeUnknown: the request reached farmer (or may
 	// have), but no usable reply came back — it timed out, or the reply
 	// was unreadable. The action may or may not have run.
@@ -160,6 +166,7 @@ var actionErrorMessages = map[string]string{
 	errCodeCommandFailed:          "the command exited with a non-zero status",
 	errCodeJobFailed:              "the job finished unsuccessfully",
 	errCodeJobExpired:             "the sprout started the job too long after it was sent, so its result was not recorded; it may still have run",
+	errCodeJobRefused:             "farmer refused the job before sending it to the sprout (for example, its recipe could not be rendered), so it did not run",
 	errCodeDispatchOutcomeUnknown: "no reply was received for the action; it may or may not have run",
 	errCodeNotDelivered:           "the action could not be delivered after repeated attempts, so it was not run",
 	errCodeTenantNotActive:        "the tenant was no longer active when the action was due to be sent, so it was not sent",
@@ -1050,6 +1057,9 @@ const (
 	// JobOutcomeExpired: farmer stopped tracking the job because it
 	// started too long after dispatch. Terminal, and not a success.
 	JobOutcomeExpired JobOutcome = "expired"
+	// JobOutcomeRefused: farmer refused the job before any copy of it
+	// could reach the sprout. Terminal; it never ran.
+	JobOutcomeRefused JobOutcome = "refused"
 )
 
 // JobStatusReader is the local, no-NATS read §1.5 polls running items
@@ -1116,6 +1126,8 @@ func refreshItems(ctx context.Context, d *gorm.DB, reader JobStatusReader, tenan
 			update = failedUpdate(errCodeJobFailed)
 		case JobOutcomeExpired:
 			update = failedUpdate(errCodeJobExpired)
+		case JobOutcomeRefused:
+			update = failedUpdate(errCodeJobRefused)
 		default:
 			continue
 		}

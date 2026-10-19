@@ -27,6 +27,9 @@ const (
 	// reconcile window allows, so farmer recorded none of its steps. It
 	// may or may not have run; farmer won't record anything more for it.
 	farmerJobExpired = "expired"
+	// farmerJobRefused: farmer refused the cook before any copy of it
+	// could reach the sprout (P29), so it never ran and never will.
+	farmerJobRefused = "refused"
 )
 
 // farmerJobStatusReader implements JobStatusReader over farmer.job_status.
@@ -91,6 +94,8 @@ func (farmerJobStatusReader) JobOutcomes(ctx context.Context, tenantID string, j
 			outcome = JobOutcomeFailed
 		case farmerJobExpired:
 			outcome = JobOutcomeExpired
+		case farmerJobRefused:
+			outcome = JobOutcomeRefused
 		}
 		out[JobRef{SproutID: r.SproutID, JID: r.JID}] = outcome
 	}

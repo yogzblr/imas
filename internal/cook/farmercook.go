@@ -1032,10 +1032,31 @@ func SendCookEvent(tenantID, sproutID string, recipeID RecipeName, JID string, t
 // SendCookEventContext is SendCookEvent with a caller-supplied context,
 // which bounds the recipe reads from object storage that prepare the
 // dispatch.
+//
+// A cook refused before any copy of it can reach the sprout is recorded
+// as refused (DispatchRefusalRecorder) under its JID, so whoever follows
+// the job sees it end: its recipe didn't resolve (a missing include, the
+// render budget, an invalid template), its target step didn't prune, its
+// staging failed, or the stage guard refused it and its staged copy was
+// removed. A failure after the recipe is staged is not a refusal: the
+// staged copy stays (stage.go), so the sprout can still pull and cook it
+// (stagedsync.go), and the job is recorded as dispatched (DispatchRecorder)
+// as before.
 func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipeID RecipeName, JID string, test bool, opts ...CookOption) error {
+	refused, err := sendCook(ctx, tenantID, sproutID, recipeID, JID, test, opts...)
+	if refused {
+		recordDispatchRefusal(tenantID, sproutID, JID, err)
+	}
+	return err
+}
+
+// sendCook is SendCookEventContext's dispatch. refused reports that err
+// came before any copy of the job could reach the sprout: nothing of
+// this JID is staged or was pushed.
+func sendCook(ctx context.Context, tenantID, sproutID string, recipeID RecipeName, JID string, test bool, opts ...CookOption) (refused bool, err error) {
 	validSteps, err := resolveRecipeSteps(ctx, tenantID, sproutID, recipeID)
 	if err != nil {
-		return err
+		return true, err
 	}
 	var co cookOptions
 	for _, opt := range opts {
@@ -1046,7 +1067,7 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 	if co.targetStep != "" {
 		pruned, pruneErr := PruneToTarget(validSteps, co.targetStep)
 		if pruneErr != nil {
-			return pruneErr
+			return true, pruneErr
 		}
 		validSteps = pruned
 	}
@@ -1058,19 +1079,22 @@ func SendCookEventContext(ctx context.Context, tenantID, sproutID string, recipe
 		DispatchedAt: time.Now().UTC(),
 	}
 	// Stage before the push so the pull-readable copy (see stage.go) is
-	// never older than what the sprout was just sent.
+	// never older than what the sprout was just sent. A failed stage
+	// leaves no copy of this job: it failed to seal or to write it, and a
+	// failed write removed whatever was there.
 	if err := stageRecipe(ctx, tenantID, sproutID, env); err != nil {
-		return err
+		return true, err
 	}
 	if co.stageGuard != nil {
 		if guardErr := co.stageGuard(); guardErr != nil {
 			if err := UnstageRecipe(ctx, tenantID, sproutID); err != nil {
-				return errors.Join(guardErr, fmt.Errorf("cook: removing staged recipe for %s/%s: %w", tenantID, sproutID, err))
+				// This job's copy may still be readable: not a refusal.
+				return false, errors.Join(guardErr, fmt.Errorf("cook: removing staged recipe for %s/%s: %w", tenantID, sproutID, err))
 			}
-			return guardErr
+			return true, guardErr
 		}
 	}
-	return sendEnvelope(tenantID, sproutID, env)
+	return false, sendEnvelope(tenantID, sproutID, env)
 }
 
 // SendStepsEvent sends steps to sproutID as one cook job under JID, the
@@ -1107,6 +1131,36 @@ func recordDispatch(tenantID, sproutID string, env RecipeEnvelope) {
 	dispatchRecorderMu.RUnlock()
 	if fn != nil {
 		fn(tenantID, sproutID, env)
+	}
+}
+
+// DispatchRefusalRecorder records a cook farmer refused before any copy
+// of it could reach tenantID's sproutID: job jid, refused with err (see
+// SendCookEventContext). internal/jobs installs one
+// (SetDispatchRefusalRecorder) to end the job in its job-status index, so
+// the SaaS API, which only learns a cook's JID and then follows it there,
+// sees it fail rather than run for ever.
+type DispatchRefusalRecorder func(tenantID, sproutID, jid string, err error)
+
+var (
+	dispatchRefusalRecorderMu sync.RWMutex
+	dispatchRefusalRecorder   DispatchRefusalRecorder
+)
+
+// SetDispatchRefusalRecorder installs fn as the DispatchRefusalRecorder
+// every refused cook calls; nil removes it.
+func SetDispatchRefusalRecorder(fn DispatchRefusalRecorder) {
+	dispatchRefusalRecorderMu.Lock()
+	defer dispatchRefusalRecorderMu.Unlock()
+	dispatchRefusalRecorder = fn
+}
+
+func recordDispatchRefusal(tenantID, sproutID, jid string, err error) {
+	dispatchRefusalRecorderMu.RLock()
+	fn := dispatchRefusalRecorder
+	dispatchRefusalRecorderMu.RUnlock()
+	if fn != nil {
+		fn(tenantID, sproutID, jid, err)
 	}
 }
 

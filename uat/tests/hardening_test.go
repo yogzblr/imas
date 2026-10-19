@@ -795,8 +795,8 @@ func TestCoreN1_PutNKeyProof(t *testing.T) {
 // 100000 range iterations; 10000 per render). A recipe including seven
 // recipes of 9000 iterations each passes every per-render limit and the
 // upload checks, but its cook (126000) runs out of budget: farmer logs the
-// budget error, sends the sprout nothing, and the item must fail. One
-// including two of them (36000) applies.
+// budget error, sends the sprout nothing, and the item fails with
+// job_refused (P29). One including two of them (36000) applies.
 func TestCoreRB1_CookRenderBudget(t *testing.T) {
 	sc := harness.Begin(t, "RB1")
 	needCore(sc)
@@ -850,15 +850,10 @@ steps:
 		if fi.Exists {
 			sc.Errorf("the cook over the budget changed the sprout: %s exists", sp.TempPath(overFile))
 		}
-		sc.Step("the over-budget cook's item")
+		sc.Step("the over-budget cook's item: failed, job_refused")
 		b, err := f.API.WaitBatch(ctx, tok, f.TenantID(1), id, harness.DefaultCookTimeout)
-		if err != nil {
-			sc.Errorf("the batch of a cook refused for its render budget never finished (%v): the item stays running, "+
-				"since farmer only logs a cook that fails before it reaches the sprout (internal/natsapi cook.go) and "+
-				"no job_status row is ever written for saasapi to read", err)
-		} else if it, _ := b.For(sp); it.Status != harness.ItemFailed {
-			sc.Errorf("the cook over the budget ended %s, want failed", it)
-		}
+		sc.NoErr(err, "the batch of a cook refused for its render budget (P29: farmer records the refusal in farmer.job_status)")
+		sc.ExpectItem(b, sp, harness.ItemFailed, "job_refused")
 
 		sc.Step("cook %s (two includes: inside the budget)", in)
 		b, err = f.Cook(ctx, 1, []harness.Sprout{sp}, in, false)

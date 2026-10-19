@@ -90,6 +90,11 @@ var saasFS embed.FS
 //
 // farmer 00007 (U1) leaves the farmer floor at 2: it only adds a table
 // (pki_cli_admin_keys) that an older farmer never reads or writes.
+//
+// farmer 00008 (P29) leaves it at 2 as well: it only adds a defaulted
+// column (job_status.dispatch_refused), which an older farmer never names
+// in its inserts and never reads; it recomputes a row's status only on an
+// event of that job, which a refused job never gets.
 const (
 	farmerCompatibleFrom = 2
 	saasCompatibleFrom   = 1

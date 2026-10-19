@@ -220,9 +220,11 @@ func rangeIterations(src string) int {
 // cook renders a tenant's recipe and the recipes it includes for a host,
 // under farmer's per-cook budget (each recipe rendered twice: finding the
 // includes, then building the steps; S4), and applies their file.content
-// steps. A cook over its budget is refused before anything reaches the
-// sprout, and farmer logs why. s.mu is held. It returns an item error
-// code, or "".
+// steps. A cook whose recipes don't resolve (one missing, a render or
+// YAML error) or that is over its budget is refused before anything
+// reaches the sprout, as farmer refuses it: job_refused (P29), and for the
+// budget farmer logs why. s.mu is held. It returns an item error code, or
+// "".
 func (s *Stack) cook(tid, name string, h *Host, test bool) string {
 	goos := "linux"
 	if h.OS == "windows" {
@@ -243,23 +245,23 @@ func (s *Stack) cook(tid, name string, h *Host, test bool) string {
 		seen[n] = true
 		rc, ok := s.recipeStore[tid+"/"+n]
 		if !ok {
-			return "job_failed"
+			return "job_refused"
 		}
 		cost += 2 * rangeIterations(rc.content)
 		out, err := render(rc.content, map[string]string{"os": goos, "hostname": h.VM}, h.SproutID)
 		if err != nil {
-			return "job_failed"
+			return "job_refused"
 		}
 		var d doc
 		if yaml.Unmarshal([]byte(out), &d) != nil {
-			return "job_failed"
+			return "job_refused"
 		}
 		docs = append(docs, d)
 		queue = append(queue, d.Include...)
 	}
 	if cost > s.CookMaxRangeIterations {
 		s.logf("farmer", "error cooking recipe for %s: cook exceeded its render budget: total range iterations over %d", h.SproutID, s.CookMaxRangeIterations)
-		return "job_failed"
+		return "job_refused"
 	}
 	for _, d := range docs {
 		s.applySteps(d.Steps, h, test)

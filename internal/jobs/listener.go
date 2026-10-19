@@ -88,6 +88,22 @@ func RegisterNatsConn(tenantID string, conn *nats.Conn) {
 	// ties it to the same per-tenant setup; it is the same function for
 	// every tenant, so installing it once per connection is harmless.
 	cook.SetDispatchRecorder(recordJobCreation)
+	cook.SetDispatchRefusalRecorder(recordJobRefusal)
+}
+
+// recordJobRefusal ends job jid in the job-status index for tenantID as
+// refused: farmer refused the cook before any copy of it could reach
+// sproutID (cook.SendCookEventContext), so no event of it will ever
+// arrive, and without this the SaaS API would follow it as running for
+// ever. It is the cook.DispatchRefusalRecorder RegisterNatsConn installs.
+// Only the index records it: the job never reached the sprout, so it has
+// no job log in the object store, as before.
+func recordJobRefusal(tenantID, sprout, jid string, err error) {
+	if jid == "" {
+		return
+	}
+	log.Warnf("job %s for sprout %s (tenant %s) refused before dispatch: %v", jid, sprout, tenantID, err)
+	indexJobEvent(tenantID, sprout, jid, jobEvent{refused: true})
 }
 
 // recordJobCreation records a new job, dispatched to tenantID's sproutID,

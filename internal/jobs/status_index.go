@@ -28,6 +28,8 @@ package jobs
 //   - each step's completion increments steps_reported, and sets
 //     step_failed if the step failed
 //   - "completed-<jid>" sets finished; "timeout-<jid>" sets timed_out
+//   - farmer refusing the cook before any copy of it could reach the
+//     sprout (cook.DispatchRefusalRecorder) sets dispatch_refused
 //
 // Then status is recomputed from the row as it stands (refreshJobStatus,
 // jobStatusExpr). A job is terminal only once it's finished AND every step
@@ -72,6 +74,10 @@ const (
 	// reconcile window allows (config.JobReconcileWindow), so none of its
 	// events were recorded. Terminal. See reconcile.go.
 	JobIndexStatusExpired = "expired"
+	// JobIndexStatusRefused: farmer refused the cook before any copy of
+	// it could reach the sprout (cook.SendCookEventContext), so it never
+	// ran and never will. Terminal. See recordJobRefusal.
+	JobIndexStatusRefused = "refused"
 )
 
 // Column sizes. tenant_id and sprout_id match internal/pki's pki_nkeys;
@@ -104,6 +110,9 @@ type jobStatusRow struct {
 	// DispatchedAt), from its creation event. Nil for jobs created before
 	// it was recorded. shouldReconcile dates a job's start by it.
 	DispatchedAt *time.Time `gorm:"column:dispatched_at"`
+	// DispatchRefused is set when farmer refused the cook before any copy
+	// of it could reach the sprout (recordJobRefusal). Never cleared.
+	DispatchRefused bool `gorm:"column:dispatch_refused;not null;default:false"`
 }
 
 func (jobStatusRow) TableName() string { return "job_status" }
@@ -125,6 +134,7 @@ func SetDB(d *gorm.DB) { db = d }
 // reads only columns, so it gives the same answer whichever order the
 // events were applied in.
 const jobStatusExpr = `CASE
+	WHEN dispatch_refused THEN '` + JobIndexStatusRefused + `'
 	WHEN expired THEN '` + JobIndexStatusExpired + `'
 	WHEN timed_out THEN '` + JobIndexStatusFailed + `'
 	WHEN finished AND steps_total IS NOT NULL AND steps_reported >= steps_total THEN
@@ -143,6 +153,7 @@ type jobEvent struct {
 	finished     bool
 	timedOut     bool
 	expired      bool // markJobExpired only
+	refused      bool // recordJobRefusal only
 }
 
 // classifyJobEvent maps a imas.cook.<sprout>.<jid> event to its index
@@ -237,18 +248,19 @@ func isWriteConflict(err error) bool {
 func upsertJobEvent(ctx context.Context, d *gorm.DB, tenantID, sproutID, jid string, ev jobEvent) error {
 	now := time.Now().UTC()
 	row := jobStatusRow{
-		TenantID:     tenantID,
-		SproutID:     sproutID,
-		JID:          jid,
-		Status:       JobIndexStatusPending,
-		StepsTotal:   ev.stepsTotal,
-		DispatchedAt: ev.dispatchedAt,
-		StepFailed:   ev.stepFailed,
-		Started:      ev.started,
-		Finished:     ev.finished,
-		TimedOut:     ev.timedOut,
-		Expired:      ev.expired,
-		UpdatedAt:    now,
+		TenantID:        tenantID,
+		SproutID:        sproutID,
+		JID:             jid,
+		Status:          JobIndexStatusPending,
+		StepsTotal:      ev.stepsTotal,
+		DispatchedAt:    ev.dispatchedAt,
+		StepFailed:      ev.stepFailed,
+		Started:         ev.started,
+		Finished:        ev.finished,
+		TimedOut:        ev.timedOut,
+		Expired:         ev.expired,
+		UpdatedAt:       now,
+		DispatchRefused: ev.refused,
 	}
 	updates := map[string]any{"updated_at": now}
 	if ev.stepsTotal != nil {
@@ -261,7 +273,7 @@ func upsertJobEvent(ctx context.Context, d *gorm.DB, tenantID, sproutID, jid str
 		row.StepsReported = 1
 		updates["steps_reported"] = gorm.Expr("steps_reported + 1")
 	}
-	for col, set := range map[string]bool{"step_failed": ev.stepFailed, "started": ev.started, "finished": ev.finished, "timed_out": ev.timedOut, "expired": ev.expired} {
+	for col, set := range map[string]bool{"step_failed": ev.stepFailed, "started": ev.started, "finished": ev.finished, "timed_out": ev.timedOut, "expired": ev.expired, "dispatch_refused": ev.refused} {
 		if set {
 			updates[col] = true
 		}
