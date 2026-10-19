@@ -39,8 +39,8 @@ exec)
 	;;
 get)
 	case "$2 $3" in
-	"secret imas-core-pxc-secrets") printf '%s' "${ACC_MYSQL_PW:-pw}" | base64 -w0 ;;
-	"secret imas-valkey-auth") jq -cn --arg p "${ACC_VALKEY_PW:-vpw}" '{data: {password: ($p | @base64)}}' ;;
+	"secret imas-core-pxc-secrets") printf '%s' "${ACC_MYSQL_PW:?}" | base64 -w0 ;;
+	"secret imas-valkey-auth") jq -cn --arg p "${ACC_VALKEY_PW:?}" '{data: {password: ($p | @base64)}}' ;;
 	"secret imas-saasapi-operator-tls")
 		printf -- '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n' | base64 -w0 ;;
 	*)

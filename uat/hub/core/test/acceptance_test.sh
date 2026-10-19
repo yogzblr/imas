@@ -47,8 +47,13 @@ state="$tmp/state"
 mkdir -p "$state/core/sensitive"
 chmod 700 "$state/core/sensitive"
 ACC_OPERATOR_TOKEN=$(openssl rand -hex 32)
+# Per-run credentials for the containers below (none is a fixture value).
+bao_token=$(openssl rand -hex 16)
+ACC_MYSQL_PW=$(openssl rand -hex 16) ACC_VALKEY_PW=$(openssl rand -hex 16)
+export ACC_MYSQL_PW ACC_VALKEY_PW
+rustfs_key=$(openssl rand -hex 8) rustfs_secret=$(openssl rand -hex 16)
 printf '%s\n' "$ACC_OPERATOR_TOKEN" >"$state/core/sensitive/saasapi-operator-token"
-printf 'roottoken' >"$state/core/sensitive/openbao-root-token"
+printf '%s' "$bao_token" >"$state/core/sensitive/openbao-root-token"
 acc() { "$core/acceptance.sh" "$kubeconfig" "$ep" "$state" "$@"; }
 
 ta=t_aaaaaaaaaaaaaaaa
@@ -149,11 +154,11 @@ else
 	run=imas-acc-$$
 	export ACC_MYSQL=$run-mysql ACC_VALKEY=$run-valkey ACC_RUSTFS=$run-rustfs ACC_OPENBAO=$run-openbao
 	containers=("$ACC_MYSQL" "$ACC_VALKEY" "$ACC_RUSTFS" "$ACC_OPENBAO")
-	docker run -d --name "$ACC_MYSQL" -e MYSQL_ROOT_PASSWORD=pw -e CLUSTER_NAME=acc percona/percona-xtradb-cluster:8.4.8-8.1 >/dev/null
-	docker run -d --name "$ACC_VALKEY" valkey/valkey:9.1.2 valkey-server --requirepass vpw >/dev/null
-	docker run -d --name "$ACC_RUSTFS" -e RUSTFS_ACCESS_KEY=uatroot -e RUSTFS_SECRET_KEY=uatrootsecret1234 \
+	docker run -d --name "$ACC_MYSQL" -e MYSQL_ROOT_PASSWORD="$ACC_MYSQL_PW" -e CLUSTER_NAME=acc percona/percona-xtradb-cluster:8.4.8-8.1 >/dev/null
+	docker run -d --name "$ACC_VALKEY" valkey/valkey:9.1.2 valkey-server --requirepass "$ACC_VALKEY_PW" >/dev/null
+	docker run -d --name "$ACC_RUSTFS" -e RUSTFS_ACCESS_KEY="$rustfs_key" -e RUSTFS_SECRET_KEY="$rustfs_secret" \
 		-e RUSTFS_VOLUMES=/data -e RUSTFS_ADDRESS=:9000 -e RUSTFS_CONSOLE_ENABLE=false "$rustfs_image" >/dev/null
-	docker run -d --name "$ACC_OPENBAO" openbao/openbao:2.6.3 server -dev -dev-root-token-id=roottoken \
+	docker run -d --name "$ACC_OPENBAO" openbao/openbao:2.6.3 server -dev -dev-root-token-id="$bao_token" \
 		-dev-listen-address=0.0.0.0:8200 >/dev/null
 	wait_for() {
 		local i
@@ -163,10 +168,10 @@ else
 		done
 		return 1
 	}
-	wait_for docker exec "$ACC_MYSQL" mysql -uroot -ppw -e 'SELECT 1' || bad "PXC did not start"
+	wait_for docker exec "$ACC_MYSQL" mysql -uroot "-p$ACC_MYSQL_PW" -e 'SELECT 1' || bad "PXC did not start"
 	wait_for docker exec "$ACC_RUSTFS" curl -sf http://127.0.0.1:9000/health/ready || bad "RustFS did not start"
 	wait_for docker exec -e BAO_ADDR=http://127.0.0.1:8200 "$ACC_OPENBAO" bao status || bad "OpenBao did not start"
-	mysql_root() { docker exec -i "$ACC_MYSQL" mysql -uroot -ppw "$@" 2>/dev/null; }
+	mysql_root() { docker exec -i "$ACC_MYSQL" mysql -uroot "-p$ACC_MYSQL_PW" "$@" 2>/dev/null; }
 
 	# The two schemas from the repository's migrations (goose Up sections).
 	for schema in farmer saas; do
@@ -239,7 +244,7 @@ SQL
 
 	# RustFS: buckets as rustfs-setup.sh makes them, then objects.
 	for b in imas-recipes imas-logs; do
-		docker exec "$ACC_RUSTFS" curl -sS -o /dev/null -w '%{http_code}' -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" --user uatroot:uatrootsecret1234 \
+		docker exec "$ACC_RUSTFS" curl -sS -o /dev/null -w '%{http_code}' -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" --user "$rustfs_key:$rustfs_secret" \
 			-H "x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" "http://127.0.0.1:9000/$b" >/dev/null
 	done
 	put() { printf '%s' "$3" | acc put-object "$1" "$2"; }
@@ -255,15 +260,15 @@ SQL
 		jq -e '.keys == []' <<<"$out" >/dev/null && ok "delete-object: the object is gone" || bad "delete-object: $out"
 
 	# Valkey with its password.
-	docker exec "$ACC_VALKEY" valkey-cli -a vpw --no-auth-warning set "imas:upgrade:{$tb:web-01}" facts >/dev/null
-	docker exec "$ACC_VALKEY" valkey-cli -a vpw --no-auth-warning set "imas:heartbeat:{$tb:web-01}" 1 >/dev/null
-	docker exec "$ACC_VALKEY" valkey-cli -a vpw --no-auth-warning set "imas:heartbeat:{$ta:web-01}" 1 >/dev/null
+	docker exec "$ACC_VALKEY" valkey-cli -a "$ACC_VALKEY_PW" --no-auth-warning set "imas:upgrade:{$tb:web-01}" facts >/dev/null
+	docker exec "$ACC_VALKEY" valkey-cli -a "$ACC_VALKEY_PW" --no-auth-warning set "imas:heartbeat:{$tb:web-01}" 1 >/dev/null
+	docker exec "$ACC_VALKEY" valkey-cli -a "$ACC_VALKEY_PW" --no-auth-warning set "imas:heartbeat:{$ta:web-01}" 1 >/dev/null
 	out=$(acc valkey-get "imas:upgrade:{$tb:web-01}" 2>"$tmp/err") && jq -e '. == {exists: true, value: "facts"}' <<<"$out" >/dev/null &&
 		out=$(acc valkey-get "imas:upgrade:{$tb:web-02}" 2>/dev/null) && jq -e '. == {exists: false, value: ""}' <<<"$out" >/dev/null &&
 		ok "valkey-get: a marker and its value, and a missing one" || bad "valkey-get: $out $(cat "$tmp/err")"
 
 	# OpenBao (dev server: KV v2 at secret/), and the full inventory.
-	bao() { docker exec -e BAO_TOKEN=roottoken -e BAO_ADDR=http://127.0.0.1:8200 "$ACC_OPENBAO" bao "$@" >/dev/null; }
+	bao() { docker exec -e BAO_TOKEN="$bao_token" -e BAO_ADDR=http://127.0.0.1:8200 "$ACC_OPENBAO" bao "$@" >/dev/null; }
 	bao secrets enable transit
 	bao kv put "secret/imas/tenant-x25519/tenants/$tb" pub=x
 	bao write -f "transit/keys/nats-tsign-$tb"
@@ -279,8 +284,8 @@ SQL
 	spec=$(jq -cn --arg t "$tb" --arg o "$ta" '{tenant_id: $t, valkey: [{category: "valkey.heartbeat", pattern: "imas:heartbeat:{\($o):*"}]}')
 	refused "inventory refuses another tenant's Valkey pattern" "is not the tenant's" bash -c 'acc() { "$1" "$2" "$3" "$4" inventory; }; acc "$@" <<<"$5"' _ \
 		"$core/acceptance.sh" "$kubeconfig" "$ep" "$state" "$spec"
-	grep -q roottoken "$ACC_STATE/calls.log" && bad "the OpenBao token reached a command line" || ok "the OpenBao token never on a command line"
-	grep -Eq "vpw|[^a-z]pw[^a-z]" "$ACC_STATE/calls.log" && bad "a database or Valkey password reached a command line" ||
+	grep -qF "$bao_token" "$ACC_STATE/calls.log" && bad "the OpenBao token reached a command line" || ok "the OpenBao token never on a command line"
+	grep -qF -e "$ACC_MYSQL_PW" -e "$ACC_VALKEY_PW" "$ACC_STATE/calls.log" && bad "a database or Valkey password reached a command line" ||
 		ok "the PXC and Valkey passwords never on a command line"
 fi
 
