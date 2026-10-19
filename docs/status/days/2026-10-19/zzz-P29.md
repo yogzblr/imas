@@ -1,3 +1,4 @@
 change: P29 fixed: a cook farmer refuses before any copy of it can reach the sprout (its recipe doesn't resolve: a missing include, the per-cook render budget, an invalid template; its staging fails; the stage guard refuses it) is recorded in `farmer.job_status` as `refused` (new column `dispatch_refused`, farmer migration 00008, expand only), and saasapi fails its item with the new code `job_refused` ("never ran"), so the batch completes instead of the item staying `running` for ever. A failure after the recipe is staged is not a refusal (the sprout can still pull the staged copy), so it is recorded as before. UAT case RB1 now expects `job_refused`.
+pr: 294
 item: P29
 action: close
