@@ -43,7 +43,7 @@ func (e *Enrolment) ConnectThroughEnvoy(ctx context.Context, envoyURL string, po
 	}
 	u, err := url.Parse(envoyURL)
 	if err != nil || u.Host == "" {
-		return nil, fmt.Errorf("Envoy URL %q: %v", envoyURL, err)
+		return nil, fmt.Errorf("the Envoy URL %q: %v", envoyURL, err)
 	}
 	seed, err := e.Seed()
 	if err != nil {

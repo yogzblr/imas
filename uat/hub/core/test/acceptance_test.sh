@@ -168,7 +168,9 @@ else
 		done
 		return 1
 	}
-	wait_for docker exec "$ACC_MYSQL" mysql -uroot "-p$ACC_MYSQL_PW" -e 'SELECT 1' || bad "PXC did not start"
+	# Over TCP: the image's entrypoint first runs a socket-only server to
+	# initialise, then restarts; only the final server answers on 3306.
+	wait_for docker exec "$ACC_MYSQL" mysql -h127.0.0.1 -uroot "-p$ACC_MYSQL_PW" -e 'SELECT 1' || bad "PXC did not start"
 	wait_for docker exec "$ACC_RUSTFS" curl -sf http://127.0.0.1:9000/health/ready || bad "RustFS did not start"
 	wait_for docker exec -e BAO_ADDR=http://127.0.0.1:8200 "$ACC_OPENBAO" bao status || bad "OpenBao did not start"
 	mysql_root() { docker exec -i "$ACC_MYSQL" mysql -uroot "-p$ACC_MYSQL_PW" "$@" 2>/dev/null; }
@@ -238,9 +240,9 @@ SQL
 		[[ "$(mysql_root -N -e "SELECT expiry FROM saas.enrollment_keys WHERE key_id = 'ek_aaaaaaaaaaaaaaa3'")" == "2026-10-30 00:00:00.000" ]] &&
 		[[ "$(mysql_root -N -e "SELECT expiry FROM saas.enrollment_keys WHERE key_id = 'ek_bbbbbbbbbbbbbbb3'")" == "2026-11-01 00:00:00.000" ]] &&
 		ok "backdate: the named rows of the tenant move back, another tenant's never" || bad "backdate: $out $(cat "$tmp/err")"
-	out=$(acc sweep recipe-audit 2>/dev/null) && jq -e '.sweep == "recipe-audit" and .restarted == "imas-core-farmer"' <<<"$out" >/dev/null &&
+	out=$(acc sweep recipe-audit 2>"$tmp/err") && jq -e '.sweep == "recipe-audit" and .restarted == "imas-core-farmer"' <<<"$out" >/dev/null &&
 		[[ "$(mysql_root -N -e "SELECT COALESCE(last_run_at, 'none') FROM farmer.job_leases WHERE name = 'recipe_audit_expiry'")" == none ]] &&
-		ok "sweep recipe-audit: the sweep's last run cleared, farmer restarted" || bad "sweep recipe-audit: $out"
+		ok "sweep recipe-audit: the sweep's last run cleared, farmer restarted" || bad "sweep recipe-audit: $out $(cat "$tmp/err")"
 
 	# RustFS: buckets as rustfs-setup.sh makes them, then objects.
 	for b in imas-recipes imas-logs; do
