@@ -50,4 +50,13 @@ regexes = [
   # tokens with (U2, sealedfarmer_test.go): a SHA-256-shaped placeholder
   # standing in for farmer's answer, a hash of no key, not a credential.
   '''testTenantKeyFingerprint\s*=\s*"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"''',
+  # W1: the name of the UAT core hub's log retention Kubernetes Secret
+  # (uat/hub/core lib/common.sh, values/farmer-uat.yaml): an object's
+  # name, not its contents.
+  '''(S3_LOGS_RETENTION_SECRET=|credentialsSecret:\s*)imas-uat-s3-logs-retention''',
+  # The dummy RustFS root credential of uat/hub/core/test/acceptance_test.sh
+  # (W1) as first committed (ae4f19d); generated per run since, but that
+  # commit stays in history. A throwaway container's, never a credential
+  # anywhere.
+  '''--user uatroot:uatrootsecret1234''',
 ]

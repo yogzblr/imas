@@ -41,6 +41,11 @@ type Enrolment struct {
 	kp      nkeys.KeyPair
 	boxPriv *[32]byte
 	userJWT string
+	// gatewayJWT and tenantPub are what a sprout keeps from its
+	// enrolment to reach the bus through Envoy and seal to farmer
+	// (sproutbus.go).
+	gatewayJWT string
+	tenantPub  string
 }
 
 // UserJWT is the sprout's NATS User JWT (a credential: never print it).
@@ -145,6 +150,7 @@ func (fe *FullEnroller) Enrol(ctx context.Context, e *Enrolment) error {
 	}
 	e.SproutID, e.TenantID = resp.SproutID, resp.TenantID
 	e.userJWT = resp.JWT
+	e.gatewayJWT, e.tenantPub = resp.GatewayJWT, resp.TenantX25519Pub
 	e.JWTDigest = digest(resp.JWT)
 	e.GatewayDigest = digest(resp.GatewayJWT)
 	return nil

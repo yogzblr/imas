@@ -96,6 +96,12 @@ func (s *Stack) WriteCoreMaterial(dir, vmctl string) error {
 	if err := os.WriteFile(bind, []byte(script), 0o700); err != nil {
 		return err
 	}
+	// acceptance.sh next to it, as uat/hub/core's sits next to its
+	// bind-tenant.sh: the W1 cases' view inside the hub (acceptance.go).
+	acc := fmt.Sprintf(fakeAcceptance, filepath.Join(out, "uat-ca.crt"), s.Server.URL)
+	if err := os.WriteFile(filepath.Join(dir, "acceptance.sh"), []byte(acc), 0o700); err != nil {
+		return err
+	}
 	for _, f := range []string{"core.kubeconfig", "endpoints.json"} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("{}\n"), 0o600); err != nil {
 			return err
@@ -201,4 +207,25 @@ printf '{"username":"%%s","enabled":true,"attributes":{"organization_id":["%%s"]
 		--data-binary @- "%s/admin/realms/%s/users" >/dev/null
 echo "bound $user to $tenant" >&2
 printf '{"username":"%%s","tenant_id":"%%s","role":"%%s","password_file":"%%s"}\n' "$user" "$tenant" "$role" "$pwf"
+`
+
+// fakeAcceptance is uat/hub/core/acceptance.sh for the fake stack: the
+// same arguments, the verb's stdin forwarded to the fake's /_acceptance,
+// its one JSON line printed and its exit code returned (it needs curl and
+// jq).
+const fakeAcceptance = `#!/usr/bin/env bash
+# acceptance.sh for the fake stack: forwards to its /_acceptance endpoint.
+set -euo pipefail
+[ $# -ge 4 ] || { echo "fake acceptance.sh: <kubeconfig> <endpoints> <state> <verb> [args...]" >&2; exit 2; }
+shift 3
+verb=$1
+shift
+q="verb=$(jq -rn --arg v "$verb" '$v|@uri')"
+for a in "$@"; do q="$q&arg=$(jq -rn --arg v "$a" '$v|@uri')"; done
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+code=$(curl -sS --cacert %q -o "$out" -D - --data-binary @- "%s/_acceptance?$q" |
+	tr -d '\r' | sed -n 's/^[Xx]-[Ee]xit-[Cc]ode: //p')
+if [ "${code:-1}" = 0 ]; then cat "$out"; else cat "$out" >&2; fi
+exit "${code:-1}"
 `

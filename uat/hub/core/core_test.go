@@ -88,7 +88,7 @@ func libConstants(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)=([A-Za-z0-9._-]+)\s*(#.*)?$`)
+	re := regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)=([A-Za-z0-9._/-]+)\s*(#.*)?$`)
 	out := map[string]string{}
 	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
 		out[m[1]] = m[2]
@@ -200,21 +200,23 @@ func TestValuesMatchLib(t *testing.T) {
 	lib := libConstants(t)
 	v := readYAML(t, "values/farmer-uat.yaml")
 	for path, name := range map[string]string{
-		"objectStore.bucket":                    "RECIPE_BUCKET",
-		"objectStore.jobBucket":                 "JOB_BUCKET",
-		"objectStore.sproutJWTBucket":           "SPROUT_JWT_BUCKET",
-		"objectStore.credentialsSecret":         "S3_FARMER_SECRET",
-		"saasapi.recipes.credentialsSecret":     "S3_SAASAPI_SECRET",
-		"saasapi.recipes.readRole":              "READ_ROLE",
-		"saasapi.recipes.writeRole":             "WRITE_ROLE",
-		"saasapi.internalAuthSecret.secretName": "INTERNAL_AUTH_SECRET",
-		"natsSeeds.secretName":                  "SEEDS_SECRET",
-		"natsTrust.configMapName":               "NATS_TRUST_CONFIGMAP",
-		"tls.secretName":                        "FARMER_TLS_SECRET",
-		"openbaoBootstrap.tokenSecretName":      "OPENBAO_ROOT_SECRET",
-		"farmer.bootstrapAdmin.username":        "BOOTSTRAP_ADMIN_NAME",
-		"saasapi.operator.tls.secretName":       "OPERATOR_TLS_SECRET",
-		"saasapi.operator.token.secretName":     "OPERATOR_TOKEN_SECRET",
+		"objectStore.bucket":                      "RECIPE_BUCKET",
+		"objectStore.jobBucket":                   "JOB_BUCKET",
+		"objectStore.sproutJWTBucket":             "SPROUT_JWT_BUCKET",
+		"objectStore.credentialsSecret":           "S3_FARMER_SECRET",
+		"saasapi.recipes.credentialsSecret":       "S3_SAASAPI_SECRET",
+		"saasapi.recipes.readRole":                "READ_ROLE",
+		"saasapi.recipes.writeRole":               "WRITE_ROLE",
+		"saasapi.internalAuthSecret.secretName":   "INTERNAL_AUTH_SECRET",
+		"natsSeeds.secretName":                    "SEEDS_SECRET",
+		"natsTrust.configMapName":                 "NATS_TRUST_CONFIGMAP",
+		"tls.secretName":                          "FARMER_TLS_SECRET",
+		"openbaoBootstrap.tokenSecretName":        "OPENBAO_ROOT_SECRET",
+		"farmer.bootstrapAdmin.username":          "BOOTSTRAP_ADMIN_NAME",
+		"saasapi.operator.tls.secretName":         "OPERATOR_TLS_SECRET",
+		"saasapi.operator.token.secretName":       "OPERATOR_TOKEN_SECRET",
+		"logShipping.credentialsSecret":           "S3_LOGS_WRITER_SECRET",
+		"logShipping.retention.credentialsSecret": "S3_LOGS_RETENTION_SECRET",
 	} {
 		if got := str(v, strings.Split(path, ".")...); got == "" || got != lib[name] {
 			t.Errorf("%s = %q, lib/common.sh %s = %q", path, got, name, lib[name])
@@ -230,6 +232,8 @@ func TestValuesMatchLib(t *testing.T) {
 		"accountStore.credentialsSecret": "S3_ACCOUNTS_WRITER_SECRET",
 		"valkey.auth.secretName":         "VALKEY_AUTH_SECRET",
 		"valkey.auth.key":                "VALKEY_AUTH_KEY",
+		"logShipping.bucket":             "LOG_BUCKET",
+		"logShipping.prefix":             "LOG_PREFIX",
 	} {
 		if got := str(v, strings.Split(path, ".")...); got != "" {
 			t.Errorf("values/farmer-uat.yaml sets %s = %q: the UAT uses the chart default", path, got)
@@ -239,9 +243,9 @@ func TestValuesMatchLib(t *testing.T) {
 		}
 	}
 	buckets := map[string]bool{}
-	for _, b := range []string{lib["RECIPE_BUCKET"], lib["JOB_BUCKET"], lib["SPROUT_JWT_BUCKET"], lib["ACCOUNTS_BUCKET"]} {
+	for _, b := range []string{lib["RECIPE_BUCKET"], lib["JOB_BUCKET"], lib["SPROUT_JWT_BUCKET"], lib["ACCOUNTS_BUCKET"], lib["LOG_BUCKET"]} {
 		if buckets[b] {
-			t.Errorf("bucket %q is used twice: recipes, jobs, sprout JWTs and accounts must all differ", b)
+			t.Errorf("bucket %q is used twice: recipes, jobs, sprout JWTs, accounts and logs must all differ", b)
 		}
 		buckets[b] = true
 	}
@@ -274,6 +278,41 @@ func TestValuesMatchLib(t *testing.T) {
 	if dig(v, "valkey", "auth", "enabled") != true || dig(v, "valkey", "auth", "allowInsecure") != nil {
 		t.Error("values/farmer-uat.yaml must keep valkey.auth.enabled true (and not set allowInsecure): the UAT follows the production path")
 	}
+	// W1 (uat/tests B1, E1, D1): the short settings the acceptance cases
+	// rely on. The chart defaults stay as shipped.
+	for path, want := range map[string]any{
+		"saasapi.actionDispatch.maxPendingPerTenant": 20,
+		"saasapi.tenantPurge.enabled":                true,
+		"saasapi.tenantPurge.after":                  "1h",
+		"saasapi.retention.terminalRows":             "24h",
+		"farmer.retention.recipeAuditDays":           1,
+		"logShipping.enabled":                        true,
+		"logShipping.retention.days":                 1,
+	} {
+		if got := dig(v, strings.Split(path, ".")...); got != want {
+			t.Errorf("values/farmer-uat.yaml %s = %v, want %v (W1's acceptance cases)", path, got, want)
+		}
+	}
+	for path, want := range map[string]any{
+		"saasapi.actionDispatch.maxPendingPerTenant": 2000,
+		"saasapi.tenantPurge.after":                  nil,
+		"saasapi.retention.terminalRows":             "2160h",
+		"farmer.retention.recipeAuditDays":           365,
+		"logShipping.enabled":                        false,
+		"logShipping.retention.days":                 30,
+	} {
+		if got := dig(chartDefaults, strings.Split(path, ".")...); got != want {
+			t.Errorf("the farmer chart's default %s = %v, want %v: the UAT sets its short value in values/farmer-uat.yaml, not in the chart", path, got, want)
+		}
+	}
+	// The ha tier's traffic loops need the shipped backlog cap back.
+	if got := dig(readYAML(t, "values/values-ha.yaml"), "saasapi", "actionDispatch", "maxPendingPerTenant"); got != 2000 {
+		t.Errorf("values/values-ha.yaml saasapi.actionDispatch.maxPendingPerTenant = %v, want 2000 (the chart default)", got)
+	}
+	if lib["LOG_SHIPPER_DS"] != lib["FARMER_FULLNAME"]+"-log-shipper" || lib["LOG_RETENTION_CRONJOB"] != lib["FARMER_FULLNAME"]+"-log-retention" {
+		t.Errorf("LOG_SHIPPER_DS %q, LOG_RETENTION_CRONJOB %q: want %s-log-shipper and %s-log-retention (_retention.tpl)",
+			lib["LOG_SHIPPER_DS"], lib["LOG_RETENTION_CRONJOB"], lib["FARMER_FULLNAME"], lib["FARMER_FULLNAME"])
+	}
 	if dig(v, "openbao", "server", "dev", "enabled") != false {
 		t.Error("openbao.server.dev.enabled must be false: the UAT OpenBao is initialised and unsealed for real")
 	}
@@ -305,6 +344,7 @@ func TestValuesMatchLib(t *testing.T) {
 		"keycloak.realm":                    lib["REALM"],
 		"keycloak.adminSecret":              lib["KEYCLOAK_ADMIN_SECRET"],
 		"keycloak.realmEnvSecret":           lib["KEYCLOAK_REALM_SECRET"],
+		"farmer.logShipperName":             "imas-log-shipper",
 	} {
 		if got := str(extras, strings.Split(path, ".")...); got != want {
 			t.Errorf("chart/values.yaml %s = %q, want %q", path, got, want)
@@ -320,6 +360,28 @@ func TestValuesMatchLib(t *testing.T) {
 			t.Errorf("image %q is not pinned to a tag and its sha256 digest (P13)", img)
 		}
 	}
+}
+
+// TestAcceptanceScript runs test/acceptance_test.sh: acceptance.sh (the
+// in-cluster reads and changes of uat/tests' W1 cases) against a stub
+// kubectl and curl, and, where Docker can pull them, against real PXC
+// (with the repository's migrations), Valkey, RustFS and OpenBao
+// containers. A part that couldn't run is printed as skipped, never as
+// passed.
+func TestAcceptanceScript(t *testing.T) {
+	for _, tool := range []string{"bash", "jq", "base64", "openssl"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	if testing.Short() {
+		t.Skip("-short: the script may start containers")
+	}
+	out, err := exec.Command("bash", "test/acceptance_test.sh").CombinedOutput()
+	if err != nil {
+		t.Fatalf("test/acceptance_test.sh: %v\n%s", err, out)
+	}
+	t.Logf("%s", out)
 }
 
 // TestFinishScript runs test/finish_test.sh: finish.sh against stub
@@ -604,6 +666,17 @@ func TestFarmerChartRender(t *testing.T) {
 			t.Errorf("saasapi %s = %q, want %q", k, se[k], want)
 		}
 	}
+	// W1's short settings reach the containers (values/farmer-uat.yaml).
+	for k, want := range map[string]string{
+		"SAASAPI_ACTION_MAX_PENDING_PER_TENANT": "20",
+		"SAASAPI_TENANT_PURGE_ENABLED":          "true",
+		"SAASAPI_TENANT_PURGE_AFTER":            "1h",
+		"SAASAPI_TERMINAL_ROW_RETENTION":        "24h",
+	} {
+		if se[k] != want {
+			t.Errorf("saasapi %s = %q, want %q", k, se[k], want)
+		}
+	}
 	if !strings.Contains(mustJSON(t, saasapi), `"name":"imas-uat-ca"`) {
 		t.Error("saasapi doesn't mount the imas-uat-ca ConfigMap")
 	}
@@ -612,15 +685,16 @@ func TestFarmerChartRender(t *testing.T) {
 	farmer := get(t, objs, "Deployment/imas-core-farmer")
 	fe := envOf(container(t, farmer, "farmer"))
 	for k, want := range map[string]string{
-		"IMAS_S3_ENDPOINT":               "imas-uat-rustfs.imas-uat.svc.cluster.local:9000",
-		"IMAS_S3_BUCKET":                 "imas-recipes",
-		"IMAS_S3_JOB_BUCKET":             "imas-jobs",
-		"IMAS_S3_SPROUT_JWT_BUCKET":      "imas-sprout-jwts",
-		"IMAS_S3_ACCESS_KEY_ID":          "secret:imas-uat-s3-farmer/access-key-id",
-		"IMAS_ACCOUNTS_S3_BUCKET":        "imas-accounts",
-		"IMAS_ACCOUNTS_S3_ACCESS_KEY_ID": "secret:imas-farmer-accounts-writer/access-key-id",
-		"IMAS_FARMER_NKEY_SEED_FILE":     "/var/run/secrets/imas/farmer-nkey/farmer.nk",
-		"IMAS_VALKEY_PASSWORD_FILE":      "/var/run/secrets/imas/valkey/password",
+		"IMAS_S3_ENDPOINT":                 "imas-uat-rustfs.imas-uat.svc.cluster.local:9000",
+		"IMAS_S3_BUCKET":                   "imas-recipes",
+		"IMAS_S3_JOB_BUCKET":               "imas-jobs",
+		"IMAS_S3_SPROUT_JWT_BUCKET":        "imas-sprout-jwts",
+		"IMAS_S3_ACCESS_KEY_ID":            "secret:imas-uat-s3-farmer/access-key-id",
+		"IMAS_ACCOUNTS_S3_BUCKET":          "imas-accounts",
+		"IMAS_ACCOUNTS_S3_ACCESS_KEY_ID":   "secret:imas-farmer-accounts-writer/access-key-id",
+		"IMAS_FARMER_NKEY_SEED_FILE":       "/var/run/secrets/imas/farmer-nkey/farmer.nk",
+		"IMAS_VALKEY_PASSWORD_FILE":        "/var/run/secrets/imas/valkey/password",
+		"IMAS_RECIPE_AUDIT_RETENTION_DAYS": "1",
 	} {
 		if fe[k] != want {
 			t.Errorf("farmer %s = %q, want %q", k, fe[k], want)
@@ -662,6 +736,21 @@ func TestFarmerChartRender(t *testing.T) {
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("farmer config lacks %q", want)
+		}
+	}
+
+	// Log shipping (U4, W1's D1): Fluent Bit with the writer's Secret, and
+	// the retention CronJob keeping one day with the retention Secret.
+	lib := libConstants(t)
+	ds := mustJSON(t, get(t, objs, "DaemonSet/"+lib["LOG_SHIPPER_DS"]))
+	if !strings.Contains(ds, `"name":"`+lib["S3_LOGS_WRITER_SECRET"]+`"`) {
+		t.Errorf("the log shipper doesn't take Secret %s", lib["S3_LOGS_WRITER_SECRET"])
+	}
+	get(t, objs, "ConfigMap/"+lib["LOG_SHIPPER_DS"])
+	cj := mustJSON(t, get(t, objs, "CronJob/"+lib["LOG_RETENTION_CRONJOB"]))
+	for _, want := range []string{`"-days=1"`, `"secretName":"` + lib["S3_LOGS_RETENTION_SECRET"] + `"`} {
+		if !strings.Contains(cj, want) {
+			t.Errorf("CronJob %s lacks %s", lib["LOG_RETENTION_CRONJOB"], want)
 		}
 	}
 

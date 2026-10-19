@@ -27,6 +27,7 @@ import (
 
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
+	"golang.org/x/crypto/curve25519"
 
 	"github.com/yogzblr/imas/internal/jointoken"
 	"github.com/yogzblr/imas/internal/pki"
@@ -87,6 +88,19 @@ type item struct {
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Message  string `json:"message,omitempty"`
+	// until is when a command still running on its sprout finishes: the
+	// item is dispatching until then (Status is what it ends as); updated
+	// is its last change, for the terminal-row prune.
+	until   time.Time
+	updated time.Time
+}
+
+// view is the item as a GET shows it at now.
+func (it item) view(now time.Time) item {
+	if now.Before(it.until) {
+		it.Status, it.ExitCode, it.Error, it.Message = "dispatching", nil, "", ""
+	}
+	return it
 }
 
 type batch struct {
@@ -112,9 +126,33 @@ type Stack struct {
 	limiter     map[string]*bucket
 	tokenTTL    time.Duration
 	accounts    map[string]nkeys.KeyPair // tenantID -> the tenant's Account key
-	tenantBox   map[string]string        // tenantID -> its X25519 public key
+	tenantBox   map[string]*[32]byte     // tenantID -> its X25519 private key
 	outageUntil time.Time
 	cutUntil    time.Time
+
+	// What acceptance.go (the W1 cases' view inside the hub) reads and
+	// changes, and the bus behind the fake Envoy (bus.go).
+	jobs      map[string][]*provJob          // tenantID -> provisioning jobs
+	objects   map[string]map[string][]byte   // bucket -> key -> body
+	props     map[string]map[string]fakeProp // tenantID/sproutID -> name -> prop
+	markers   map[string]string              // tenantID/sproutID -> "needs upgrade" kind
+	jobStatus map[string]string              // tenantID/sproutID/jid -> status
+	logs      []logLine
+	bus       *fakeBus
+
+	// MaxPendingPerTenant is SAASAPI_ACTION_MAX_PENDING_PER_TENANT as the
+	// UAT core hub sets it (values/farmer-uat.yaml): 20.
+	MaxPendingPerTenant int
+	// PurgeAfter, TerminalRowRetention, RecipeAuditDays and
+	// LogRetentionDays are the UAT hub's short retention settings.
+	PurgeAfter           time.Duration
+	TerminalRowRetention time.Duration
+	RecipeAuditDays      int
+	LogRetentionDays     int
+	// CookMaxRangeIterations and MaxRangeIterations are farmer's
+	// per-cook and per-render iteration limits (the chart defaults).
+	CookMaxRangeIterations int
+	MaxRangeIterations     int
 
 	// ActionBurst is the per-tenant batch bucket's size (refilled 1 per
 	// second; default 5, saasapi's). The ha tier's own tests raise it
@@ -158,6 +196,7 @@ func (s *Stack) cut() bool { return time.Now().Before(s.cutUntil) }
 type tenantRec struct {
 	name, status string
 	polls        int
+	offboarded   time.Time
 }
 
 // New starts a stack on a TLS httptest server. Tenants 1 and 2 exist and
@@ -169,7 +208,11 @@ func New() *Stack {
 		keys: map[string]*key{}, sprouts: map[string]*sprout{}, links: map[string]string{},
 		batches: map[string]*batch{}, hosts: map[string]*Host{}, recipeStore: map[string]recipe{},
 		limiter: map[string]*bucket{}, tokenTTL: 90 * time.Second,
-		accounts: map[string]nkeys.KeyPair{}, tenantBox: map[string]string{}, ActionBurst: 5,
+		accounts: map[string]nkeys.KeyPair{}, tenantBox: map[string]*[32]byte{}, ActionBurst: 5,
+		jobs: map[string][]*provJob{}, objects: map[string]map[string][]byte{}, props: map[string]map[string]fakeProp{},
+		markers: map[string]string{}, jobStatus: map[string]string{},
+		MaxPendingPerTenant: 20, PurgeAfter: time.Hour, TerminalRowRetention: 24 * time.Hour,
+		RecipeAuditDays: 1, LogRetentionDays: 1, CookMaxRangeIterations: 100000, MaxRangeIterations: 10000,
 	}
 	for n := 1; n <= 2; n++ {
 		id := TenantID(n)
@@ -177,12 +220,23 @@ func New() *Stack {
 		s.users[fmt.Sprintf("t%d-admin", n)] = &user{id: newID("u"), password: "pw", tenantID: id, roles: []string{ReadRole, WriteRole}}
 		s.users[fmt.Sprintf("t%d-reader", n)] = &user{id: newID("u"), password: "pw", tenantID: id, roles: []string{ReadRole}}
 	}
+	for n := 1; n <= 2; n++ {
+		s.addJob(TenantID(n), "provision", "succeeded", "")
+	}
+	bus, err := startBus(s)
+	if err != nil {
+		panic(fmt.Sprintf("fakestack: starting the fake bus: %v", err))
+	}
+	s.bus = bus
 	s.Server = httptest.NewTLSServer(http.HandlerFunc(s.serve))
 	return s
 }
 
-// Close stops the server.
-func (s *Stack) Close() { s.Server.Close() }
+// Close stops the server and the bus.
+func (s *Stack) Close() {
+	s.Server.Close()
+	s.bus.close()
+}
 
 // TenantID is the fixed saasapi ID of tenant 1 or 2.
 func TenantID(n int) string { return "t_" + strings.Repeat(string(rune('a'+n-1)), 16) }
@@ -258,6 +312,12 @@ func (s *Stack) serve(w http.ResponseWriter, r *http.Request) {
 		s.enroll(w, r)
 	case p == "/_vmctl":
 		s.vmctl(w, r)
+	case p == "/_acceptance":
+		s.acceptance(w, r)
+	case p == "/pki/nkeynonce" || p == "/pki/putnkey":
+		s.legacyNKey(w, r)
+	case p == "/" && strings.EqualFold(r.Header.Get("Upgrade"), "websocket") && s.gatewayOK(r):
+		s.bus.proxy.ServeHTTP(w, r)
 	case p == "/v1/refresh":
 		writeJSON(w, 401, map[string]string{"error": "enrollment_failed"})
 	case strings.HasPrefix(p, "/v1/") && !strings.HasPrefix(p, "/v1/sprout/"):
@@ -371,7 +431,9 @@ func (s *Stack) kcAdmin(w http.ResponseWriter, r *http.Request) {
 				tid = v[0]
 			}
 		}
-		u := &user{id: newID("u"), password: body.Credentials[0].Value, tenantID: tid}
+		// A scratch user is its tenant's admin: bind-tenant.sh's scratch
+		// mode, and the harness's admin API path, grant both recipe roles.
+		u := &user{id: newID("u"), password: body.Credentials[0].Value, tenantID: tid, roles: []string{ReadRole, WriteRole}}
 		s.users[body.Username] = u
 		w.Header().Set("Location", s.Server.URL+"/admin/realms/"+Realm+"/users/"+u.id)
 		w.WriteHeader(201)
@@ -508,14 +570,20 @@ func (s *Stack) userJWT(tenantID, nkey, sproutID string) string {
 	return tok
 }
 
-// tenantBoxPub is the tenant's X25519 public key, made once; s.mu is held.
+// tenantBoxPub is the tenant's X25519 public key, of a keypair made once
+// (the fake bus opens sealed facts with its private half); s.mu is held.
 func (s *Stack) tenantBoxPub(tenantID string) string {
-	if p, ok := s.tenantBox[tenantID]; ok {
-		return p
+	priv, ok := s.tenantBox[tenantID]
+	if !ok {
+		priv = new([32]byte)
+		copy(priv[:], random(32))
+		s.tenantBox[tenantID] = priv
 	}
-	p := base64.StdEncoding.EncodeToString(random(32))
-	s.tenantBox[tenantID] = p
-	return p
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		panic(err)
+	}
+	return base64.StdEncoding.EncodeToString(pub)
 }
 
 // mintGateway is a gateway JWT naming the sprout's NKey; s.mu is held.
@@ -568,12 +636,39 @@ func (s *Stack) saas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := parts[3:]
+	s.sweep(tid, t)
+	if t.status == "purged" && len(rest) > 0 && (rest[0] == "enrollment-keys" || rest[0] == "recipes" ||
+		rest[0] == "update-policy" || (rest[0] == "sprouts" && len(rest) == 3 && rest[2] == "asset-link")) {
+		// A tombstone stores nothing again (docs/api/saasapi.md, Tenants).
+		writeErr(w, 404, "tenant_not_found", "no such tenant")
+		return
+	}
 	switch {
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		writeJSON(w, 200, map[string]string{"tenant_id": tid, "name": t.name, "status": t.status})
+	case len(rest) == 0 && r.Method == http.MethodPatch:
+		if t.status == "purged" {
+			writeErr(w, 409, "tenant_purged", "the tenant's data was erased; it can't be changed")
+			return
+		}
+		var body struct {
+			Name string `json:"name"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			writeErr(w, 400, "invalid_request", "bad JSON")
+			return
+		}
+		if body.Name != "" {
+			t.name = body.Name
+		}
+		writeJSON(w, 200, map[string]string{"tenant_id": tid, "name": t.name, "status": t.status})
+	case len(rest) == 1 && rest[0] == "update-policy" && r.Method == http.MethodGet:
+		writeJSON(w, 200, map[string]any{"tenant_id": tid, "approved_version": nil, "auto_update": false})
 	case len(rest) == 0 && r.Method == http.MethodDelete:
 		switch t.status {
 		case "pending":
 			writeErr(w, 409, "provisioning_in_progress", "provisioning")
-		case "offboarding", "offboarded":
+		case "offboarding", "offboarded", "purged":
 			writeErr(w, 409, "offboarding_in_progress", "offboarding")
 		default:
 			t.status, t.polls = "offboarding", 0
@@ -587,9 +682,15 @@ func (s *Stack) saas(w http.ResponseWriter, r *http.Request) {
 			t.status = "active"
 		}
 		if t.polls >= 2 && t.status == "offboarding" {
-			t.status = "offboarded"
+			t.status, t.offboarded = "offboarded", time.Now().UTC()
+			s.addJob(tid, "deprovision", "succeeded", "")
 		}
-		writeJSON(w, 200, map[string]string{"tenant_id": tid, "status": t.status})
+		s.sweep(tid, t)
+		st := map[string]string{"tenant_id": tid, "status": t.status}
+		if t.status == "offboarded" {
+			st["purge_after"] = t.offboarded.Add(s.PurgeAfter).Format(time.RFC3339)
+		}
+		writeJSON(w, 200, st)
 	case len(rest) == 1 && rest[0] == "enrollment-keys" && r.Method == http.MethodPost:
 		s.createKey(w, r, tid)
 	case len(rest) == 1 && rest[0] == "enrollment-keys" && r.Method == http.MethodGet:
@@ -614,7 +715,15 @@ func (s *Stack) saas(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 404, "batch_not_found", "no such action batch")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"batch_id": rest[2], "status": "completed", "action_type": b.actionType, "created_at": b.created, "items": b.items})
+		now, status := time.Now(), "completed"
+		items := make([]item, len(b.items))
+		for i, it := range b.items {
+			items[i] = it.view(now)
+			if items[i].Status == "dispatching" {
+				status = "in_progress"
+			}
+		}
+		writeJSON(w, 200, map[string]any{"batch_id": rest[2], "status": status, "action_type": b.actionType, "created_at": b.created, "items": items})
 	default:
 		writeErr(w, 404, "not_found", "the fake stack doesn't serve this route")
 	}
@@ -632,6 +741,7 @@ func (s *Stack) createTenant(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	id := "t_" + strings.ToLower(base32ish(16))
 	s.tenants[id] = &tenantRec{name: body.Name, status: "pending"}
+	s.addJob(id, "provision", "succeeded", "")
 	writeJSON(w, 202, map[string]string{"tenant_id": id, "status": "pending"})
 }
 
@@ -859,13 +969,27 @@ func (s *Stack) postBatch(w http.ResponseWriter, r *http.Request, tid string, t 
 		writeErr(w, 429, "rate_limited", "rate limited")
 		return
 	}
-	b := &batch{tenantID: tid, actionType: body.Action.Type, created: time.Now()}
 	seen := map[string]bool{}
+	var assets []string
 	for _, a := range body.AssetIDs {
-		if seen[a] {
-			continue
+		if !seen[a] {
+			seen[a] = true
+			assets = append(assets, a)
 		}
-		seen[a] = true
+	}
+	// The backlog cap (S3): the tenant's items still waiting plus this
+	// request's, refused whole when over the limit.
+	if pending := s.pendingItems(tid); pending+len(assets) > s.MaxPendingPerTenant {
+		w.Header().Set("Retry-After", "60")
+		writeJSON(w, 429, map[string]any{"error": "backlog_full",
+			"message": "this tenant has too many actions waiting to be sent; wait for some to finish and send again",
+			"details": map[string]int{"pending": pending, "limit": s.MaxPendingPerTenant, "requested": len(assets),
+				"available": max(s.MaxPendingPerTenant-pending, 0)}})
+		return
+	}
+	now := time.Now()
+	b := &batch{tenantID: tid, actionType: body.Action.Type, created: now}
+	for _, a := range assets {
 		id, sp, ok := s.resolve(tid, a)
 		it := item{AssetID: a, SproutID: id}
 		switch {
@@ -881,13 +1005,17 @@ func (s *Stack) postBatch(w http.ResponseWriter, r *http.Request, tid string, t 
 			if errCode != "" {
 				it.Message = "the command failed"
 			}
+			it.until = now.Add(sleepFor(cmd.Cmd, cmd.Args, cmd.Timeout))
 		default:
+			jid := newUUID()
 			if code := s.cook(tid, cookP.Recipe, s.hosts[sp.vm], cookP.Test); code != "" {
 				it.Status, it.Error, it.Message = "failed", code, "the job failed"
 			} else {
-				it.Status, it.JID = "succeeded", newID("j")
+				it.Status, it.JID = "succeeded", jid
+				s.recordJob(tid, id, jid)
 			}
 		}
+		it.updated = now
 		b.items = append(b.items, it)
 	}
 	id := "b_" + strings.ToLower(base32ish(16))

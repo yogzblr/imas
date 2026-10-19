@@ -12,10 +12,18 @@ the Bastion tunnels give the gate: two clusters, four sprout machines, the
 UAT CA, name resolution, a `vmctl.sh`, and the files in the Shared contract's
 shapes.
 
-**Status: the rig has never been run.** The agent that wrote it had no
-access to a Docker registry, so no image was pulled or built, no cluster was
-created and nothing was installed. What was checked is listed under
-[Tests](#tests). Expect fix rounds on the first real run.
+**Status (2026-10-19): the rig has run once, on the owner's WSL2 with Docker
+Desktop, on `v0.1.0-rc.14`** from the published charts and deb/rpm packages:
+smoke 10 passed; core 58 passed, 0 failed, 3 skipped (T3, S6's clean
+re-enrolment after a purge, X5), nothing missing, `RESULT: PASS`. So the
+systemd sprout containers on Docker Desktop's WSL2 backend, the published
+ports (host access `published`), the hub installs and enrolment have worked
+there. Not run yet: the resilience, lifecycle and ingredients tiers, and the
+W1 cases (B1, E1, D1, U1, N1, RB1, [below](#what-the-rig-proves-and-what-it-cannot)),
+which the owner's next rig run is the first to run. Every script is also
+checked without Docker by `tests/test_lite.sh` (304 checks, [Tests](#tests)),
+and the W1 cases run green against the in-memory fake stack
+(`uat/tests/README.md`).
 
 ## What the rig proves, and what it cannot
 
@@ -26,7 +34,8 @@ created and nothing was installed. What was checked is listed under
 | The Keycloak issuer, saasapi's JWKS URL and the token `iss` as one string on the core FQDN, resolved from the host, from pods in both clusters and from the sprouts | **One machine**: no real latency or separate kernels; a reboot is a container restart (systemd stops and starts, the kernel does not) |
 | The real `imas-sprout` deb and rpm installed by `ansible/site.yml` over SSH, enrolment through Envoy, the same sproutid in both tenants (S2) | **Azure Bastion**, `uat/access/tunnels.sh` and the Azure `vmctl.sh`, the Private DNS zone, public IPs and FQDNs, a LoadBalancer |
 | The smoke and core scenarios on Ubuntu 24.04 and AlmaLinux 9 in two tenants; the harness, `uatreport`, the no silent green rule, the `vmctl.sh` interface | **k0s** itself: kind is not k0s (kindnet, not kube-router; kubeadm, not k0s's CoreDNS patch) |
-| The charts' NetworkPolicies in each cluster (kind v0.24 and later enforce them), with cross-cluster traffic arriving from the other node's address, as on Azure | RHEL (AlmaLinux stands in, as on Azure), sizing, load, HA |
+| The charts' NetworkPolicies in each cluster (kind v0.24 and later enforce them), with cross-cluster traffic arriving from the other node's address, as on Azure | RHEL (AlmaLinux stands in, as on Azure), sizing, load, **HA** (one node per hub: the `ha` tier skips) |
+| The S, T and U fixes on the deployed stack (brief W1, tier core): B1 (the action backlog cap, S3), E1 (tenant erasure by the operator route and the retention sweeper, S6), D1 (retention of recipe audit days, log days with Fluent Bit shipping, and terminal rows, U4), U1 (sealed facts and step events and the "needs upgrade" mark, U3), RB1 (the per-cook render budget, S4). They use the core hub's short settings (`uat/hub/core/values/farmer-uat.yaml`) and look inside it with `uat/hub/core/acceptance.sh`, which `run.sh` reaches through the core kubeconfig it already passes | **N1** (the proof of possession on `PUT /pki/putnkey`, T6 and L12): standalone installs only. The rig is a hosted stack, which serves neither route, so N1 checks the route is refused and skips, saying so. **A kernel reboot**: L1's reboot is a container restart |
 
 ## Files
 
@@ -61,6 +70,16 @@ through the `KIND_EXPERIMENTAL_DOCKER_NETWORK` environment variable, which
 kind documents as experimental (k3d has a `--network` flag).
 
 ## Prerequisites
+
+**A release the rig can install** (owner steps, `docs/RELEASE-SOP.md`):
+the tag is a published, signed release (`checksums.txt` with
+`checksums.txt.sig`; the core install refuses a chart without the stamped
+sprout release for the tag), **Publish packages** has run for it (the deb
+and rpm the sprouts install from Buildkite, the farmer and nats charts on
+GHCR), and the GHCR packages `charts/farmer`, `charts/nats` and the five
+`imas-*` images are **public** and linked to `yogzblr/imas` (SOP step 0 and
+step 8: the rig pulls them anonymously). A release cut before the fixes the
+W1 cases test can't pass them: `v0.1.0-rc.14` and later carry them.
 
 | Tool | Why | Notes |
 |---|---|---|
@@ -97,16 +116,22 @@ One rig per machine: the network, the cluster names, the host ports 443 and
 
 ## Running it on Linux
 
+Use the latest release candidate, `<latest rc>`: `git tag --list
+'v0.1.0-rc.*' --sort=-v:refname | head -1`, published as the next section
+says. On 2026-10-19 that is `v0.1.0-rc.14`:
+
 ```sh
-uat/lite/up.sh --release-tag v0.1.0-rc.4        # a guess: 20 to 40 minutes the first time
+uat/lite/up.sh --release-tag <latest rc>         # e.g. v0.1.0-rc.14; 20 to 40 minutes the first time
 uat/lite/run.sh smoke
 uat/lite/run.sh core
 uat/lite/run.sh core C2 X4                       # some scenarios
+uat/lite/run.sh core B1 E1 D1 U1 N1             # the W1 cases
+uat/lite/run.sh core RB1                         # fails until P29 is fixed: its item stays running
 uat/lite/down.sh
 ```
 
 `run.sh` brings the rig up itself when it is not up for the release:
-`uat/lite/run.sh --release-tag v0.1.0-rc.4 smoke` on a clean machine does
+`uat/lite/run.sh --release-tag v0.1.0-rc.14 smoke` on a clean machine does
 everything. The state (kubeconfigs, keys, the hub scripts' outputs, reports)
 goes to `~/.local/state/imas-uat-lite/<run_id>/` (`--state` to change it),
 outside the repository because it holds secrets. Reports are under
@@ -159,7 +184,7 @@ distribution with systemd can stand in for one sprout:
 
    ```sh
    export LITE_SPROUTS=t1-ubuntu LITE_HOST_SPROUT=t1-ubuntu LITE_HOST_SPROUT_PORT=2222
-   uat/lite/up.sh --release-tag v0.1.0-rc.4
+   uat/lite/up.sh --release-tag <latest rc>
    uat/lite/run.sh smoke
    ```
 
@@ -352,7 +377,7 @@ No Go dependency is added (`lite_test.go` uses the standard library and
 ## Tests
 
 ```sh
-bash uat/lite/tests/test_lite.sh     # 293 checks, stubbed docker/kind/kubectl/helm
+bash uat/lite/tests/test_lite.sh     # 304 checks, stubbed docker/kind/kubectl/helm
 go test ./uat/lite/                  # the same, plus shellcheck, yamllint, harness parsing
 ```
 
@@ -378,11 +403,14 @@ ports, root login, Envoy's private name). `lite_test.go` also parses
 `uat.json` with `harness.ParseUAT` and decodes `harness.json` strictly into
 `harness.Settings`, as the harness does.
 
-**Not run:** Docker, kind, a cluster, an image build (no registry access;
-hadolint was not available either), the hub installs, enrolment, the test
-suite against the rig. The kubeadm patch shape, kind's node image tag (the
-digest is for the owner to add), the systemd containers on Docker Desktop
-and on WSL2, and the published-port path are all unverified.
+These tests run no Docker, kind or cluster. The real path is the owner's
+rig run (Status, above): on WSL2 with Docker Desktop it built the sprout
+images, created both clusters with the kubeadm patch, booted the systemd
+containers, installed `v0.1.0-rc.14` through the published ports and passed
+smoke and core. Docker Engine on a Linux host (host access `direct`) and
+the WSL2 fallback with the distribution as a sprout have not been run. The
+kind node image is pinned to the digest kind v0.30.0 lists for
+`v1.34.0` (`versions.env`).
 
 ## Findings for the other briefs (nothing outside uat/lite was changed)
 
@@ -421,8 +449,8 @@ and on WSL2, and the published-port path are all unverified.
    model separation with a second Docker network for the sprouts and the
    DMZ node only (Docker isolates bridge networks from each other), at the
    cost of the DMZ node having two addresses. Worth it?
-2. **The kind node image digest** in `versions.env`: for the owner to pin on
-   the first run.
+2. **The kind node image digest** in `versions.env`: pinned (2026-10-19,
+   W1) to the digest kind v0.30.0 lists for `v1.34.0`.
 3. **Privileged sprout containers.** systemd in Docker needs them here (as
    Molecule's containers in `ansible/molecule`). The sprouts then run as
    root with the host's devices; run the rig only on a machine a test job

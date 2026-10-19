@@ -129,6 +129,18 @@ earlier green run, 38107290465, was before both):
   Windows Server 2022 in two tenants: tenants, keys, enrolment through
   Envoy, commands, recipes, ingredients, resilience, auth and isolation,
   with `check.sh`'s refusals asserting saasapi's error code (P13).
+- The S, T and U fixes on the deployed stack (brief W1, tier core, with the
+  core hub's short settings of `uat/hub/core/values/farmer-uat.yaml` and log
+  shipping on): the action backlog cap (B1), tenant erasure by the operator
+  route and by the retention sweeper (E1), retention of recipe audit days,
+  log days and terminal rows (D1), sealed facts and step events and the
+  "needs upgrade" mark (U1), the per-cook render budget (RB1). N1 skips,
+  saying so: the hosted stack serves no `PUT /pki/putnkey`. **RB1 fails
+  until a product bug is fixed:** a cook farmer refuses for its render
+  budget is only logged, so its batch item stays `running` and the batch
+  never completes (`uat/tests/README.md`, "The W1 cases"); expect that one
+  failure, with the budget error and the untouched sprout asserted before
+  it.
 
 It does **not** prove high availability (one node per hub, one pod of each
 stateful service): that is Run 3. The `ha` scenarios HA1 to HA6 are in tier

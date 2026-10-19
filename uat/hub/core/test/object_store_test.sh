@@ -4,7 +4,7 @@
 # Versity Gateway) and a curl that answers with the UAT policies
 # (test/object-store-stubs/curl). No cluster, no RustFS, no gateway. Run by
 # test/run.sh and by core_test.go's TestValidateObjectStore. (The RustFS
-# probes also passed 32 of 32 against a real RustFS 1.0.1 container
+# probes also passed 42 of 42 against a real RustFS 1.0.1 container
 # provisioned by rustfs-setup.sh.)
 # The checks use `test && ok || bad` on purpose: ok and bad always return 0.
 # shellcheck disable=SC2015
@@ -40,7 +40,10 @@ setup() {
 	printf imas-saasapi >"$s3/saasapi-access-key-id"
 	printf imas-farmer-accounts >"$s3/accounts-writer-access-key-id"
 	printf imas-bus-accounts-reader >"$s3/accounts-reader/access-key-id"
-	for f in farmer-secret-access-key saasapi-secret-access-key accounts-writer-secret-access-key accounts-reader/secret-access-key; do
+	printf imas-logs-writer >"$s3/logs-writer-access-key-id"
+	printf imas-logs-retention >"$s3/logs-retention-access-key-id"
+	for f in farmer-secret-access-key saasapi-secret-access-key accounts-writer-secret-access-key accounts-reader/secret-access-key \
+		logs-writer-secret-access-key logs-retention-secret-access-key; do
 		printf 'secret-%s-never-printed' "${f%%/*}" >"$s3/$f"
 	done
 	(umask 077 && mkdir -p "$s3/versity-root")
@@ -51,32 +54,37 @@ vr() { "$core/validate-object-store.sh" "$kubeconfig" "$1" "$state" >"$state/out
 
 setup good
 if vr "$ep"; then
-	grep -q 'validate-object-store (rustfs): 32 of 32 checks passed' "$state/out" && ok "the UAT policies pass all 32 checks" ||
+	grep -q 'validate-object-store (rustfs): 42 of 42 checks passed' "$state/out" && ok "the UAT policies pass all 42 checks" ||
 		{ bad "the pass count"; tail -n 3 "$state/out"; }
 else
 	bad "the UAT policies fail validate-object-store.sh"
 	grep FAIL "$state/out" | head -n 5
 fi
-[[ "$(grep -Ec '^(imas-farmer|imas-saasapi|imas-farmer-accounts|imas-bus-accounts-reader) ' "$STUB_STATE/s3-curl.log")" -eq 32 ]] &&
+[[ "$(grep -Ec '^(imas-farmer|imas-saasapi|imas-farmer-accounts|imas-bus-accounts-reader|imas-logs-writer|imas-logs-retention) ' "$STUB_STATE/s3-curl.log")" -eq 42 ]] &&
 	ok "each call is signed with its user's own access key" || bad "calls per user ($(wc -l <"$STUB_STATE/s3-curl.log"))"
 grep -Eq '^imas-saasapi PUT http://127.0.0.1:9000/imas-recipes/tenants/uat-validate-[0-9a-f]{8}/recipes/recipe$' "$STUB_STATE/s3-curl.log" &&
 	ok "saasapi's probes are under tenants/<prefix>/recipes/" || bad "saasapi's probe path"
-[[ "$(grep -c '^imas-uat-root DELETE ' "$STUB_STATE/s3-curl.log")" -eq 11 ]] &&
+[[ "$(grep -c '^imas-uat-root DELETE ' "$STUB_STATE/s3-curl.log")" -eq 15 ]] &&
 	ok "every probe object is deleted with the root credential" || bad "cleanup deletes"
 ! grep -rq 'never-printed' "$STUB_STATE/calls.log" "$state/out" && ok "no secret key in kubectl's argv or the output" || bad "a secret key leaked"
 
 setup reader-put
 FAKE_S3_BREAK=reader-put vr "$ep" && bad "a reader that can write passes" ||
-	{ grep -qF 'FAIL  accounts reader: put on imas-accounts: http 200, want deny' "$state/out" && grep -q '1 of 32 checks failed' "$state/out" &&
+	{ grep -qF 'FAIL  accounts reader: put on imas-accounts: http 200, want deny' "$state/out" && grep -q '1 of 42 checks failed' "$state/out" &&
 		ok "an accounts reader that can write fails, named" || { bad "reader-put: wrong output"; tail -n 3 "$state/out"; }; }
 setup farmer-accounts
 FAKE_S3_BREAK=farmer-accounts vr "$ep" && bad "farmer reading the accounts bucket passes" ||
 	{ grep -qF 'FAIL  farmer: list on imas-accounts: http 200, want deny' "$state/out" &&
 		ok "farmer listing the accounts bucket fails, named" || { bad "farmer-accounts: wrong output"; tail -n 3 "$state/out"; }; }
 
+setup retention-get
+FAKE_S3_BREAK=retention-get vr "$ep" && bad "a log retention user that can read logs passes" ||
+	{ grep -qF 'FAIL  logs retention: get on imas-logs: http 200, want deny' "$state/out" &&
+		ok "a log retention user that can read logs fails, named" || { bad "retention-get: wrong output"; tail -n 3 "$state/out"; }; }
+
 setup root-delete
 FAKE_S3_BREAK=root-delete vr "$ep" && bad "probe objects left behind pass" ||
-	{ grep -qF 'FAIL  root cleanup: delete imas-recipes/' "$state/out" && grep -q '11 of 43 checks failed' "$state/out" &&
+	{ grep -qF 'FAIL  root cleanup: delete imas-recipes/' "$state/out" && grep -q '15 of 57 checks failed' "$state/out" &&
 		ok "a cleanup DELETE that fails is reported and fails the script" || { bad "root-delete: wrong output"; tail -n 3 "$state/out"; }; }
 
 setup nocreds
@@ -94,7 +102,7 @@ ep_ha="$core/../../k0s/testdata/expected/endpoints-ha.json"
 setup versity
 export STUB_PF_PORT=17071
 if vr "$ep_ha"; then
-	grep -q 'validate-object-store (versity): 32 of 32 checks passed' "$state/out" && ok "Versity Gateway: the UAT policies pass all 32 checks" ||
+	grep -q 'validate-object-store (versity): 42 of 42 checks passed' "$state/out" && ok "Versity Gateway: the UAT policies pass all 42 checks" ||
 		{ bad "Versity Gateway: the pass count"; tail -n 3 "$state/out"; }
 else
 	bad "Versity Gateway: the UAT policies fail validate-object-store.sh"
@@ -103,7 +111,7 @@ fi
 grep -q 'port-forward svc/imas-core-farmer-versity :7070' "$STUB_STATE/calls.log" &&
 	ok "Versity Gateway: reached through kubectl port-forward to its Service" || bad "Versity Gateway: no port-forward"
 ! grep -q ' exec ' "$STUB_STATE/calls.log" && ok "Versity Gateway: nothing runs in a pod" || bad "Versity Gateway: a probe ran in a pod"
-[[ "$(grep -Ec '^imas-uat-root DELETE http://127.0.0.1:17071/' "$STUB_STATE/s3-curl.log")" -eq 11 ]] &&
+[[ "$(grep -Ec '^imas-uat-root DELETE http://127.0.0.1:17071/' "$STUB_STATE/s3-curl.log")" -eq 15 ]] &&
 	ok "Versity Gateway: every probe object is deleted with the gateway's root credential" || bad "Versity Gateway: cleanup deletes"
 ! grep -rq 'never-printed' "$STUB_STATE/calls.log" "$state/out" && ok "Versity Gateway: no secret key in argv or the output" || bad "Versity Gateway: a secret key leaked"
 setup versity-reader-put

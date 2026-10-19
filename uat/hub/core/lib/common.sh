@@ -75,6 +75,16 @@ S3_SAASAPI_USER=imas-saasapi
 S3_ACCOUNTS_WRITER_USER=imas-farmer-accounts  # the accounts bucket's writer (farmer's accountStore)
 S3_ACCOUNTS_READER_USER=imas-bus-accounts-reader # ... and its reader (the DMZ bus's loader)
 VERSITY_ROOT_USER=imas-uat-versity-root       # Versity Gateway's root access key ID (HA run)
+# Log shipping (logShipping, U4; W1's D1 checks it): the log bucket, its
+# writer (Fluent Bit) and its retention CronJob's users and Secrets.
+LOG_BUCKET=imas-logs                          # logShipping.bucket (the chart default)
+LOG_PREFIX=logs/                              # logShipping.prefix (the chart default)
+S3_LOGS_WRITER_USER=imas-logs-writer          # PutObject under LOG_PREFIX only
+S3_LOGS_RETENTION_USER=imas-logs-retention    # ListBucket, DeleteObject under LOG_PREFIX only
+S3_LOGS_WRITER_SECRET=imas-uat-s3-logs-writer # logShipping.credentialsSecret
+S3_LOGS_RETENTION_SECRET=imas-uat-s3-logs-retention # logShipping.retention.credentialsSecret
+LOG_SHIPPER_DS=imas-core-farmer-log-shipper   # the chart's Fluent Bit DaemonSet (and its ConfigMap)
+LOG_RETENTION_CRONJOB=imas-core-farmer-log-retention # the chart's log retention CronJob
 REALM=imas-uat
 SAASAPI_AUDIENCE=imas-saasapi                 # saasapi.jwt.audience
 TESTS_CLIENT=imas-uat-tests

@@ -5,8 +5,9 @@
 # policies (rustfs-setup.sh, or the farmer chart's createBuckets plan) give,
 # by access key, method and path, whatever the host and port. The root
 # credential is $STUB_S3_ROOT_KEY's. FAKE_S3_BREAK names one deliberate fault: reader-put lets the accounts reader write,
-# farmer-accounts lets farmer list the accounts bucket, root-delete makes the
-# root credential's cleanup DELETEs fail (500).
+# farmer-accounts lets farmer list the accounts bucket, retention-get lets
+# the log retention user read logs, root-delete makes the root credential's
+# cleanup DELETEs fail (500).
 set -euo pipefail
 m=GET user="" url=""
 while [[ $# -gt 0 ]]; do
@@ -41,6 +42,12 @@ imas-farmer-accounts) [[ "$bucket" == imas-accounts ]] && allow=yes ;;
 imas-bus-accounts-reader)
 	[[ "$bucket" == imas-accounts && "$m" == GET ]] && allow=yes
 	[[ "${FAKE_S3_BREAK:-}" != reader-put || "$bucket" != imas-accounts ]] || allow=yes
+	;;
+imas-logs-writer) [[ "$m" == PUT && "$p" == imas-logs/logs/* ]] && allow=yes ;;
+imas-logs-retention)
+	[[ "$m" == GET && "$p" == "imas-logs?list-type="* ]] && allow=yes
+	[[ "$m" == DELETE && "$p" == imas-logs/logs/* ]] && allow=yes
+	[[ "${FAKE_S3_BREAK:-}" != retention-get || "$bucket" != imas-logs || "$m" != GET ]] || allow=yes
 	;;
 esac
 if [[ "$allow" == yes ]]; then

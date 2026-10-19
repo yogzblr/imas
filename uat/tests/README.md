@@ -7,18 +7,21 @@ endpoints (saasapi, Keycloak, Envoy) and, for anything outside the platform,
 through `uat/access/vmctl.sh`. It never calls Azure itself.
 
 **Status: it has run once on Azure** (UAT run 38107290465, 2026-10-11, the
-single-node run, before the stateless build). The `ha` tier and L5 with the
-dispatch flags have not run on a real deployment yet: Run 3 and Run 2 of
-`uat/RUNBOOK.md` are their first runs. It builds and vets with the `uat` tag,
-its helpers have unit tests against fake servers, and the whole catalogue
-runs green against the in-memory fake in `harness/fakestack`, which proves
-the plumbing and nothing about the product.
+single-node run, before the stateless build), and its core tier on the local
+rig (`uat/lite`, rc.14, 2026-10-19: 58 passed, 0 failed, 3 skipped). The `ha`
+tier and L5 with the dispatch flags have not run on a real deployment yet:
+Run 3 and Run 2 of `uat/RUNBOOK.md` are their first runs; the W1 cases (B1,
+E1, D1, U1, N1, RB1, [below](#the-w1-cases-b1-e1-d1-u1-n1-rb1)) first run on
+the owner's next rig run. It builds and vets with the `uat` tag, its helpers
+have unit tests against fake servers, and the whole catalogue runs green
+against the in-memory fake in `harness/fakestack`, which proves the plumbing
+and nothing about the product.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `*_test.go` (build tag `uat`) | the scenarios T1 to T6, K1 to K4, S1 to S6, C1 to C8, R1 to R6, X1 to X5 (tier core, the smoke ones named `TestSmoke`), L1 to L3 (tier resilience) and HA1 to HA6 (tier ha, `ha_test.go`) |
+| `*_test.go` (build tag `uat`) | the scenarios T1 to T6, K1 to K4, S1 to S6, C1 to C8, R1 to R6, X1 to X5 (tier core, the smoke ones named `TestSmoke`), B1, E1, D1, U1, N1 and RB1 (tier core, `hardening_test.go`, brief W1), L1 to L3 (tier resilience) and HA1 to HA6 (tier ha, `ha_test.go`) |
 | `harness/` | the reusable helpers (no build tag; unit tested in `go test ./...`); the package comment is the interface |
 | `harness/fakestack/`, `fakestack/` | an in-memory fake of the stack and a command that serves it with a material directory and a `vmctl.sh` |
 | `uatreport/` | turns a tier and ids into a `-run` pattern, and test2json events into the summary, JUnit and the exit status |
@@ -264,6 +267,10 @@ Each is a written skip, listed in every report, or a comment in the test:
   jid and error code only); asserted by effect on the host instead.
 - **X5**: a plaintext `cmd.run` or `cook` can only reach a sprout over the
   bus with farmer's credential.
+- **N1**: the hosted stack (enrolment on) serves neither `GET /pki/nkeynonce`
+  nor `PUT /pki/putnkey`, and its Envoy routes no `/pki/` path; N1 checks the
+  unproven `PUT` is refused, then skips with that reason. Its proof checks
+  run against a standalone farmer (and the fake, which serves both routes).
 
 K2, K3, S5 and T5 use synthetic sprouts: made-up NKey and box keys that do
 step 1 of `POST /v1/enroll` through Envoy and never step 2, so they are
@@ -272,6 +279,41 @@ owner recorded: no saasapi route to delete or revoke a sprout); a run's
 tenants are thrown away with the run.
 Tests leave small marker files under `/var/tmp` and `C:\Windows\Temp`
 (`imas-uat-*`) and scratch tenants that T1, T4 and T5 offboard.
+
+## The W1 cases (B1, E1, D1, U1, N1, RB1)
+
+Brief `docs/briefs/W-uat-acceptance.md`: the S, T and U fixes on a deployed
+stack, tier core, in `hardening_test.go`. They run on the rig and on Azure
+unchanged. Besides saasapi, Keycloak, Envoy and `vmctl.sh` they look inside
+the core hub through `uat/hub/core/acceptance.sh` (`Fleet.CoreProbe`,
+`harness/acceptance.go`), which `kubectl exec`s into PXC, Valkey, RustFS and
+OpenBao and port-forwards to saasapi's operator plane. It needs what
+`bind-tenant.sh` needs (`$IMAS_UAT_CORE_KUBECONFIG`, `$IMAS_UAT_ENDPOINTS`,
+the state directory; the workflow and the rig pass them); without them those
+cases skip, saying so. E1 and D1 also make scratch users, like T1. They
+rely on the core hub's short settings in `uat/hub/core/values/farmer-uat.yaml`
+(the chart's defaults stay as shipped): a backlog cap of 20, a purge one hour
+after offboarding, one day of recipe audit and log retention, and 24 hours
+for terminal rows. Where a limit is hours or days, the case moves its own
+rows' or objects' dates back past it (`acceptance.sh backdate`, planted
+objects) instead of waiting.
+
+| Id | What it does |
+|---|---|
+| B1 | Keeps tenant 1's sprouts busy (a 40 s `cmd.run` each, pending until they answer), then posts 100 unknown asset IDs: `429 backlog_full`, `Retry-After: 60`, `details` with `pending` (at least the busy items), `limit`, `requested` and `available` = `limit - pending`. Posts the smallest request that doesn't fit (also refused), waits for the sleeps, and the same request is accepted. |
+| E1 | Two scratch tenants with data in every store (a key, a sprout enrolled through Envoy, an asset link, a recipe, a batch). Offboards each (`purge_after` an hour out), purges one through `POST /v1/operator/tenants/{tenant_id}/purge` (202, then 409 `purge_in_progress`) and the other through the sweeper (its `offboarded_at` moved two hours back). Each ends `purged`: `GET` answers with no name, `PATCH` is 409 `tenant_purged`, `DELETE` 409 `offboarding_in_progress`, the keys, recipes, update policy and asset link routes 404 `tenant_not_found`; every table, object prefix and Valkey prefix of `internal/tenantpurge`'s inventory counts 0, and the KV keypair and both Transit keys are gone, while the tombstone's rows stay and a purge job succeeded. Tenant 2 is untouched. |
+| D1 | Checks the workloads run with the values file's settings and the log shipper and retention CronJob are there. Plants recipe audit records and log objects two days past the limit and on its edge, runs farmer's sweep and the CronJob: the old ones go, the edge and today's stay. Moves a finished batch, a batch with a pending item, an expired key and two scratch tenants' finished provisioning jobs back past `SAASAPI_TERMINAL_ROW_RETENTION` and restarts saasapi (its prune runs at start): the finished batch, the key and the live tenant's jobs go, the pending batch and the offboarded tenant's jobs (its tombstone's record) stay. |
+| U1 | Every sprout's facts are fresh in `farmer.props` and none is marked as needing an upgrade; a cook on each of tenant 1's sprouts is recorded in `farmer.job_status` and the job bucket. A sprout the case enrols, connected to the bus through Envoy, sends a sealed facts report (stored), a plaintext one (refused, marked `facts`), a sealed one (stored, mark cleared), one sealed under another key (refused), a plaintext step event (refused, marked `cook step`, no job recorded) and a sealed report again (mark cleared). |
+| N1 | Standalone only (above): no signature, a nonce farmer never issued, a spent nonce, and another sprout's public NKey signed by the attacker are 403; a proper proof is 200. |
+| RB1 | Uploads seven recipes of 9000 range iterations each and two recipes including seven or two of them. The cook of seven (126000 iterations over two renders each) runs out of farmer's per-cook budget (100000): farmer logs the budget error for the sprout and the sprout's file isn't written, and its item must fail. The cook of two (36000) applies. **On a real stack RB1 fails today, on a product bug:** a cook farmer refuses before it reaches the sprout (here, for its render budget) is only logged (`internal/natsapi/cook.go` dispatches it in the background after answering `dispatched` with a jid), so no `farmer.job_status` row is ever written and saasapi keeps the item `running` for ever; the batch never completes. The budget error and the untouched sprout are asserted before that. |
+
+The fake (`harness/fakestack`) has what these need: the backlog cap, a
+pending `cmd.run` while its sleep lasts, the purge and the tombstone, the
+sweeper and the prune, an in-process NATS server behind its Envoy for the
+sprout's bus connection, sealed facts opened with the tenant's key, the
+standalone NKey routes with farmer's own proof checks, and the per-cook
+budget; its `acceptance.sh` (written next to its `bind-tenant.sh`) answers
+from its memory. It proves the plumbing, never the product.
 
 ## The ha tier (HA1 to HA6)
 

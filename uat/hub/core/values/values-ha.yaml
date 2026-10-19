@@ -54,6 +54,12 @@ saasapi:
   pdb:
     enabled: true
     maxUnavailable: 1
+  # The shipped backlog cap (2000), not farmer-uat.yaml's 20: the ha tier's
+  # cmd.run loop posts a batch per tenant every 5 s, and while a pod or node
+  # is down its items may wait, so 20 would refuse them (429 backlog_full)
+  # and fail the windows. The ha run doesn't run W1's B1.
+  actionDispatch:
+    maxPendingPerTenant: 2000
 
 # OpenBao: three raft nodes (the subchart's HA mode with integrated storage)
 # instead of the single standalone node. Pod N is node imas-core-openbao-N

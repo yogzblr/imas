@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -120,7 +121,7 @@ func TestSummarizeLines(t *testing.T) {
 func TestNoSilentGreen(t *testing.T) {
 	t.Run("nothing ran", func(t *testing.T) {
 		r := summarize(t, "core", nil, ev(pkg, "output - uat: IMAS_UAT_DIR is not set", "fail -"))
-		if !r.Failed() || !r.NoTests || len(r.Missing) != 35 || len(r.PackageErrors) != 1 || !strings.Contains(r.PackageErrors[0], "IMAS_UAT_DIR") {
+		if !r.Failed() || !r.NoTests || len(r.Missing) != 41 || len(r.PackageErrors) != 1 || !strings.Contains(r.PackageErrors[0], "IMAS_UAT_DIR") {
 			t.Errorf("%+v", r)
 		}
 	})
@@ -404,5 +405,18 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   K1") ||
 		!strings.Contains(out, "PASS   T1") || strings.Contains(out, "SKIP   T1") {
 		t.Errorf("smoke against the fake in the core layout: exit %d\n%s", code, out)
+	}
+	// W1's cases, which also look inside the hub through the fake
+	// acceptance.sh next to the fake bind-tenant.sh: every one runs and
+	// passes, none skips.
+	w1 := []string{"B1", "E1", "D1", "U1", "N1", "RB1"}
+	code, out = runSh(core, append([]string{"core"}, w1...)...)
+	if code != 0 || !strings.Contains(out, "RESULT: PASS") {
+		t.Errorf("W1's cases against the fake in the core layout: exit %d\n%s", code, out)
+	}
+	for _, id := range w1 {
+		if !regexp.MustCompile(`(?m)^PASS   `+id+` `).MatchString(out) || regexp.MustCompile(`(?m)^(SKIP|FAIL)   `+id+` `).MatchString(out) {
+			t.Errorf("%s didn't pass against the fake:\n%s", id, out)
+		}
 	}
 }

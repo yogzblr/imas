@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -105,6 +106,7 @@ func (s *Stack) recipesRoute(w http.ResponseWriter, r *http.Request, claims map[
 			return
 		}
 		delete(s.recipeStore, key)
+		s.audit(tid, name)
 		w.WriteHeader(204)
 	case http.MethodPut:
 		if s.limited("recipes/"+tid, 10) {
@@ -138,8 +140,14 @@ func (s *Stack) recipesRoute(w http.ResponseWriter, r *http.Request, claims map[
 			writeErr(w, 422, code, msg)
 			return
 		}
+		if rangeIterations(string(body)) > s.MaxRangeIterations {
+			writeJSON(w, 422, map[string]any{"error": "recipe_template_limit", "message": "a render limit was reached",
+				"details": map[string]string{"limit": "range_iterations"}})
+			return
+		}
 		rc := recipe{content: string(body), sha: shaOf(string(body)), updated: time.Now().UTC()}
 		s.recipeStore[key] = rc
+		s.audit(tid, name)
 		w.Header().Set("ETag", `"`+rc.sha+`"`)
 		status := 201
 		if exists {
@@ -182,6 +190,7 @@ func render(src string, props map[string]string, sproutID string) (string, error
 		"hostname": func() string { return props["hostname"] },
 		"sproutID": func() string { return sproutID },
 		"upper":    strings.ToUpper,
+		"split":    func(s, sep string) []string { return strings.Split(s, sep) },
 	}).Parse(src)
 	if err != nil {
 		return "", err
@@ -193,28 +202,74 @@ func render(src string, props map[string]string, sproutID string) (string, error
 	return b.String(), nil
 }
 
-// cook renders a tenant's recipe for a host and applies its file.content
-// steps. s.mu is held. It returns an item error code, or "".
-func (s *Stack) cook(tid, name string, h *Host, test bool) string {
-	rc, ok := s.recipeStore[tid+"/"+name]
-	if !ok {
-		return "job_failed"
+// iterRe is the only range a fake recipe counts: over split (printf
+// "%0Nd" 0) "", N iterations (the W1 case RB1's, as in internal/cook's
+// budget tests).
+var iterRe = regexp.MustCompile(`range split \(printf "%0(\d+)d" 0\) ""`)
+
+// rangeIterations is one render's range iterations.
+func rangeIterations(src string) int {
+	n := 0
+	for _, m := range iterRe.FindAllStringSubmatch(src, -1) {
+		v, _ := strconv.Atoi(m[1])
+		n += v
 	}
+	return n
+}
+
+// cook renders a tenant's recipe and the recipes it includes for a host,
+// under farmer's per-cook budget (each recipe rendered twice: finding the
+// includes, then building the steps; S4), and applies their file.content
+// steps. A cook over its budget is refused before anything reaches the
+// sprout, and farmer logs why. s.mu is held. It returns an item error
+// code, or "".
+func (s *Stack) cook(tid, name string, h *Host, test bool) string {
 	goos := "linux"
 	if h.OS == "windows" {
 		goos = "windows"
 	}
-	out, err := render(rc.content, map[string]string{"os": goos, "hostname": h.VM}, h.SproutID)
-	if err != nil {
+	type doc struct {
+		Include []string                               `yaml:"include"`
+		Steps   map[string]map[string][]map[string]any `yaml:"steps"`
+	}
+	var docs []doc
+	cost, queue, seen := 0, []string{name}, map[string]bool{}
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		rc, ok := s.recipeStore[tid+"/"+n]
+		if !ok {
+			return "job_failed"
+		}
+		cost += 2 * rangeIterations(rc.content)
+		out, err := render(rc.content, map[string]string{"os": goos, "hostname": h.VM}, h.SproutID)
+		if err != nil {
+			return "job_failed"
+		}
+		var d doc
+		if yaml.Unmarshal([]byte(out), &d) != nil {
+			return "job_failed"
+		}
+		docs = append(docs, d)
+		queue = append(queue, d.Include...)
+	}
+	if cost > s.CookMaxRangeIterations {
+		s.logf("farmer", "error cooking recipe for %s: cook exceeded its render budget: total range iterations over %d", h.SproutID, s.CookMaxRangeIterations)
 		return "job_failed"
 	}
-	var doc struct {
-		Steps map[string]map[string][]map[string]any `yaml:"steps"`
+	for _, d := range docs {
+		s.applySteps(d.Steps, h, test)
 	}
-	if yaml.Unmarshal([]byte(out), &doc) != nil {
-		return "job_failed"
-	}
-	for _, step := range doc.Steps {
+	return ""
+}
+
+// applySteps applies file.content steps to a host; s.mu is held.
+func (s *Stack) applySteps(steps map[string]map[string][]map[string]any, h *Host, test bool) {
+	for _, step := range steps {
 		for method, params := range step {
 			if method != "file.content" {
 				continue
@@ -238,7 +293,6 @@ func (s *Stack) cook(tid, name string, h *Host, test bool) string {
 			h.MTimes[name] = time.Now().Unix()
 		}
 	}
-	return ""
 }
 
 // --- cmd.run --------------------------------------------------------------------
@@ -273,7 +327,9 @@ func (s *Stack) runCmd(h *Host, cmd, cwd, runAs string, args []string, timeout i
 	switch {
 	case exe == "/bin/true" && win:
 		return "failed", -1, "command_failed"
-	case (exe == "sleep" || strings.Contains(full, "Start-Sleep")) && timeout > 0:
+	case (exe == "sleep" || strings.Contains(full, "Start-Sleep")) && sleepFor(cmd, args, timeout) == 0:
+		// Killed at its timeout (default 60 s): a sleep that finishes
+		// inside it keeps its item dispatching until then (sleepFor).
 		return "failed", -1, "command_failed"
 	case exe == "touch" && !win && len(args) == 1:
 		p := join(cwd, args[0])

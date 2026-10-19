@@ -134,7 +134,7 @@ t_up_direct() {
 	check "core keeps the default range" grep -q 'service-node-port-range: "30000-32767"' "$S/kind/core.yaml"
 	check "distinct pod subnets" bash -c "grep -q 'podSubnet: \"10.244.0.0/16\"' '$S/kind/dmz.yaml' && grep -q 'podSubnet: \"10.245.0.0/16\"' '$S/kind/core.yaml'"
 	check "no published ports in direct mode" bash -c "! grep -q extraPortMappings '$S/kind/dmz.yaml' '$S/kind/core.yaml'"
-	check "kind node image pinned" grep -q 'image: docker.io/kindest/node:v' "$S/kind/dmz.yaml"
+	check "kind node image pinned" grep -Eq 'image: docker.io/kindest/node:v[0-9.]+@sha256:[0-9a-f]{64}$' "$S/kind/dmz.yaml"
 	check "kubeconfig mode 600" test "$(stat -c %a "$S/kube/dmz.kubeconfig")" = 600
 	check "state mode 700" test "$(stat -c %a "$S")" = 700
 	for hub in core dmz; do

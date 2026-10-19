@@ -185,6 +185,9 @@ type TenantStatus struct {
 	Status    string `json:"status"`
 	LastError string `json:"last_error,omitempty"`
 	Warning   string `json:"warning,omitempty"`
+	// PurgeAfter is when an offboarded tenant is purged automatically
+	// (RFC 3339; S6, SAASAPI_TENANT_PURGE_AFTER after offboarding).
+	PurgeAfter string `json:"purge_after,omitempty"`
 }
 
 // Tenant statuses.
@@ -194,6 +197,9 @@ const (
 	TenantFailed      = "failed"
 	TenantOffboarding = "offboarding"
 	TenantOffboarded  = "offboarded"
+	// TenantPurged is the tombstone of an offboarded tenant whose data was
+	// erased (S6).
+	TenantPurged = "purged"
 )
 
 // CreateTenant posts {"name": name}.
@@ -493,6 +499,26 @@ func (c *Client) StartBatch(ctx context.Context, token, tenantID string, assetID
 		return r, err
 	}, http.StatusAccepted)
 	return id, err
+}
+
+// PostBatchPastRateLimit posts a batch, waiting out 429 rate_limited for
+// up to 2 minutes, and returns the first other answer, whatever it is (a
+// 429 backlog_full among them).
+func (c *Client) PostBatchPastRateLimit(ctx context.Context, token, tenantID string, assetIDs []string, act Action) (string, *Response, error) {
+	deadline := time.Now().Add(2 * time.Minute)
+	wait := time.Second
+	for {
+		id, r, err := c.PostBatch(ctx, token, tenantID, assetIDs, act)
+		if err != nil || !r.Is(http.StatusTooManyRequests, "rate_limited") || time.Now().Add(wait).After(deadline) {
+			return id, r, err
+		}
+		if err := sleep(ctx, wait); err != nil {
+			return "", r, err
+		}
+		if wait < 8*time.Second {
+			wait *= 2
+		}
+	}
 }
 
 // GetBatch calls GET .../sprouts/actions/<batch_id>.
