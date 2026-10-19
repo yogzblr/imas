@@ -159,7 +159,7 @@ jobs:
           curl -fsSL --retry 3 -o "$tarball" \
             "https://github.com/openbao/openbao/releases/download/v${OPENBAO_VERSION}/${tarball}"
           echo "${OPENBAO_SHA256}  ${tarball}" | sha256sum --check --strict
-          mkdir -p bin bao-tls
+          mkdir -p bin bao-tls bao-home bao-tls-home
           tar -xzf "$tarball" -C bin bao
           # The bao CLI on PATH too: the farmer chart's
           # TestOpenBaoValkeyPassword runs the bootstrap Job's script with it.
@@ -168,27 +168,42 @@ jobs:
           sdb_token="$(openssl rand -hex 24)"
           echo "::add-mask::$token"
           echo "::add-mask::$sdb_token"
-          nohup bin/bao server -dev -dev-root-token-id="$token" \
+          # Each dev server writes its root token to $HOME/.vault-token
+          # through the same $HOME/.vault-token.tmp, so two started together
+          # under one HOME can race on the rename and one exits ("rename
+          # .../.vault-token.tmp ...: no such file or directory"). A HOME
+          # each; the tests take the tokens from the env set below. Ports:
+          # a dev server also listens for its cluster on its port + 1, so
+          # the TLS server's 8210 stays clear of 8200's cluster port, 8201.
+          HOME="$RUNNER_TEMP/bao-home" nohup bin/bao server -dev -dev-root-token-id="$token" \
             -dev-listen-address=127.0.0.1:8200 > bao.log 2>&1 &
-          nohup bin/bao server -dev -dev-tls -dev-root-token-id="$sdb_token" \
+          HOME="$RUNNER_TEMP/bao-tls-home" nohup bin/bao server -dev -dev-tls -dev-root-token-id="$sdb_token" \
             -dev-tls-cert-dir="$RUNNER_TEMP/bao-tls" \
-            -dev-listen-address=127.0.0.1:8201 > bao-tls.log 2>&1 &
+            -dev-listen-address=127.0.0.1:8210 > bao-tls.log 2>&1 &
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null &&
               [ -f bao-tls/vault-ca.pem ] &&
-              curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8201/v1/sys/health > /dev/null; then
+              curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8210/v1/sys/health > /dev/null; then
               break
             fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null
-          curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8201/v1/sys/health > /dev/null
+          if ! curl -fsS http://127.0.0.1:8200/v1/sys/health > /dev/null ||
+            ! curl -fsS --cacert bao-tls/vault-ca.pem https://127.0.0.1:8210/v1/sys/health > /dev/null; then
+            # The servers' logs, without the dev root token and unseal key.
+            for f in bao.log bao-tls.log; do
+              echo "::group::$f"
+              grep -v -e 'Root Token' -e 'Unseal Key' "$f" || true
+              echo "::endgroup::"
+            done
+            exit 1
+          fi
           {
             echo "IMAS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
             echo "IMAS_TEST_OPENBAO_TOKEN=$token"
             echo "IMAS_CERTS_TEST_OPENBAO_ADDR=http://127.0.0.1:8200"
             echo "IMAS_CERTS_TEST_OPENBAO_TOKEN=$token"
-            echo "IMAS_TEST_SDB_OPENBAO_ADDR=https://127.0.0.1:8201"
+            echo "IMAS_TEST_SDB_OPENBAO_ADDR=https://127.0.0.1:8210"
             echo "IMAS_TEST_SDB_OPENBAO_TOKEN=$sdb_token"
             echo "IMAS_TEST_SDB_OPENBAO_CACERT=$RUNNER_TEMP/bao-tls/vault-ca.pem"
           } >> "$GITHUB_ENV"
