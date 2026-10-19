@@ -229,6 +229,8 @@ func TestRefreshUpdateItems_FreshnessBoundaries(t *testing.T) {
 		{"g-old-version", oldSproutVersion, dispatched.Add(20 * time.Second), "", fresh, run, ""},
 		{"g-stale", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeSucceeded, fresh, run, ""},
 		{"g-stale-expired", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeExpired, fresh, fail, errCodeJobExpired},
+		// A refused job (P29) never ran: as terminal as a failed one.
+		{"g-stale-refused", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeRefused, fresh, fail, errCodeJobRefused},
 		// On the target at planning: its job's success, while its report
 		// still names the target, is the proof; the report alone isn't.
 		{"g-already", "v2.4.1", dispatched.Add(-time.Hour), JobOutcomeSucceeded, atTarget, ok, ""},

@@ -1151,7 +1151,8 @@ func reportFresh(written, dispatched, now time.Time) bool {
 // does). It returns the update to record, or nil to leave it running:
 //
 //  1. the sprout reports target in a fresh row (reportFresh): succeeded;
-//  2. the job failed or expired: failed, job_failed or job_expired;
+//  2. the job failed, expired or was refused: failed, job_failed,
+//     job_expired or job_refused;
 //  3. the sprout reports target in a row dated more than rolloutClockSkew
 //     ahead of now: failed, facts_clock_skew;
 //  4. p.jobSuffices (the sprout was on the target at planning), the job
@@ -1170,6 +1171,8 @@ func judgeUpdateItem(f TimedSproutFacts, target string, p updateProof, haveProof
 		return failedUpdate(errCodeJobFailed)
 	case job == JobOutcomeExpired:
 		return failedUpdate(errCodeJobExpired)
+	case job == JobOutcomeRefused:
+		return failedUpdate(errCodeJobRefused)
 	case reportsTarget && f.Written.Version.After(now.Add(rolloutClockSkew)):
 		return failedUpdate(errCodeFactsClockSkew)
 	case reportsTarget && haveProof && p.jobSuffices && job == JobOutcomeSucceeded:

@@ -105,7 +105,8 @@ func (d *fakeDriver) Cook(_ context.Context, sp harness.Sprout, recipe string, t
 	defer d.mu.Unlock()
 	content, ok := d.recipes[fmt.Sprintf("%d/%s", sp.Tenant, recipe)]
 	if !ok {
-		return harness.Item{AssetID: sp.AssetID, Status: harness.ItemFailed, Error: "job_failed"}, nil
+		// Farmer refuses a cook whose recipe isn't there (P29).
+		return harness.Item{AssetID: sp.AssetID, Status: harness.ItemFailed, Error: "job_refused"}, nil
 	}
 	steps, err := RecipeSteps(content)
 	if err != nil {

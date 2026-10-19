@@ -151,7 +151,8 @@ built that way:
   keeps the item `running` for ever. RB1 asserts the budget error (farmer's
   log) and the untouched sprout, then fails on the item, with that reason.
   Recorded as P29 (status fragment `zz-W1.md`); product code is not changed
-  here.
+  here. P29 has since been fixed (status fragment `zzz-P29.md`): the item
+  fails with `job_refused`, and RB1 asserts that.
 - **The lite README.** The rig had already run once (the owner, WSL2 and
   Docker Desktop, `v0.1.0-rc.14`, `docs/status/days/2026-10-19/rig-rc14.md`),
   so its status says that rather than "the first real run is the owner's":

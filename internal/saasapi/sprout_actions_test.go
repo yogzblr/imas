@@ -512,6 +512,46 @@ func TestSproutActionBatch_CookRunningThenRefreshedFromJobs(t *testing.T) {
 	}
 }
 
+// P29: a cook farmer refused before sending the sprout anything (its
+// recipe over the per-cook render budget, say) is answered dispatched
+// with a jid like any cook, and farmer then records the job as refused in
+// farmer.job_status. The item fails with job_refused, its own message,
+// and the batch completes, rather than the item staying running.
+func TestSproutActionBatch_RefusedCookFails(t *testing.T) {
+	gdb := newTestDBWithFarmer(t)
+	ns := startTestBus(t)
+	connectSaaSBus(t, ns)
+
+	tid := mustCreateActiveTenant(t, gdb)
+	mustInsertFarmerSprout(t, gdb, tid, "web-01", "accepted")
+	mustLinkAsset(t, tid, "web-01", "c1")
+	const jid = "33333333-3333-3333-3333-333333333333"
+	startFakeFarmer(t, ns, func(req controlplane.SproutActionRequest) any {
+		return controlplane.SproutActionReply{TenantID: req.TenantID, SproutID: req.SproutID,
+			Status: controlplane.StatusDispatched, JID: jid}
+	})
+
+	code, resp := postActions(t, tid, map[string]any{
+		"asset_ids": []string{"c1"},
+		"action":    map[string]any{"type": "cook", "params": map[string]any{"recipe": "too.big"}},
+	})
+	if code != 202 {
+		t.Fatalf("POST: %d %v", code, resp)
+	}
+	batchID := resp["batch_id"].(string)
+	actionDispatches.Wait()
+
+	mustInsertFarmerJobStatus(t, gdb, tid, "web-01", jid, "refused")
+	_, got := getBatch(t, tid, batchID)
+	it := itemsByAsset(got)["c1"]
+	if got.Status != actionBatchCompleted || it.Status != ActionItemFailed || it.Error != errCodeJobRefused || it.JID != jid {
+		t.Fatalf("after farmer refused the job: %+v", got)
+	}
+	if it.Message != actionErrorMessage(errCodeJobRefused) || it.Message == actionErrorMessage(string(controlplane.ErrorInternal)) {
+		t.Errorf("message %q, want job_refused's own", it.Message)
+	}
+}
+
 // Replies that can't be trusted, and requests nobody answers, never land
 // as a success — and never as re-sendable if farmer may have acted.
 func TestSproutActionBatch_UntrustworthyOrMissingReplies(t *testing.T) {
