@@ -125,7 +125,8 @@ uat/lite/up.sh --release-tag <latest rc>         # e.g. v0.1.0-rc.14; 20 to 40 m
 uat/lite/run.sh smoke
 uat/lite/run.sh core
 uat/lite/run.sh core C2 X4                       # some scenarios
-uat/lite/run.sh core B1 E1 D1 U1 N1 RB1          # the W1 cases
+uat/lite/run.sh core B1 E1 D1 U1 N1             # the W1 cases
+uat/lite/run.sh core RB1                         # fails until P29 is fixed: its item stays running
 uat/lite/down.sh
 ```
 

@@ -42,8 +42,11 @@ func (e *Enrolment) ConnectThroughEnvoy(ctx context.Context, envoyURL string, po
 		return nil, errors.New("the sprout has no User JWT or gateway JWT: enrol it in full first")
 	}
 	u, err := url.Parse(envoyURL)
-	if err != nil || u.Host == "" {
-		return nil, fmt.Errorf("the Envoy URL %q: %v", envoyURL, err)
+	if err != nil {
+		return nil, fmt.Errorf("parsing the Envoy URL %q: %w", envoyURL, err)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("the Envoy URL %q has no host", envoyURL)
 	}
 	seed, err := e.Seed()
 	if err != nil {
