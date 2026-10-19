@@ -1,0 +1,13 @@
+change: P3 human security review recorded: Yogesh Gundurao (owner), 2026-10-19, sections 3.1 to 3.7 and the fix units S1 to S6, T1 to T6, U1 to U4, V1 to V3; no fix owed; main d4ad9754.
+item: P3
+action: update
+rag: Green
+next-append: **Recorded 2026-10-19:** reviewer Yogesh Gundurao; commit reviewed main d4ad9754; scope: sections 3.1 to 3.7 of docs/security-review-pack.md, the fix units S1 to S6, T1 to T6, U1 to U4 and V1 to V3, and PR #171 and PR #176 (enrol binding release). Accepted: 3.1; 3.2 items 1, 2, 3, 5, 6 (item 4 by docs/OPENBAO-RUNBOOK.md); 3.3 items 2 to 5 (items 1 and 6 fixed by S1 and S2); 3.4 items 1 to 4 and 5 (6 fixed by S4, backlog by S3); 3.5 (item 4 as is; Valkey by S5); 3.6 (erasure by S6); 3.7; the points each of T3, T5, T6, U1, U2, U3 and U4 added to the scope; docs/security-findings-status.md (no finding open). Fixes owed: none. Decisions reversed: none. Residuals accepted: L4 rollback to an older signed release; no goreleaser/publish environment split; farmer can sign Account JWTs for any tenant while it holds a token; farmer's Transit policy can soft-delete (and, for S6, destroy) any key on its mount; accounts-bucket rollback by a writer (turn on bucket versioning); staged-recipe replay within 1h by a compromised DMZ; "no responders" re-run up to SAASAPI_OUTBOX_MAX_ATTEMPTS; same-second Account JWT iat tie; deadlock retry not applied to rotation, replace and delete (fail closed); Valkey async failover can lose recent claims (6-minute window plus replay path); _INBOX.> publish within a sprout's own tenant; shared uat and uat-janitor Azure identity (Contributor on a UAT-only subscription); plaintext by decision: test.ping, join event, cancel, boxkey.rotate trigger, log shipping, health and version answers; the farmer chart implies allowInsecure for its bundled dev-mode OpenBao (T5); a plain push failure after a live tenant re-check is logged, not returned (T4); a forged plaintext message can set the "needs upgrade" marker until the sprout's next sealed report (U3). Dispatch and self-update flags may be turned on in: UAT now. Staging and production only after the OpenBao runbook launch gates (owner-filled sections, bucket versioning on the accounts bucket), a release signed end to end and a green UAT run that exercises the update path.
+---
+item: P21
+action: update
+next-append: **P3 (2026-10-19):** security review recorded; accepted, no fix owed. The remaining gate is a UAT run (Runs 2 and 3).
+---
+item: P22
+action: update
+next-append: **P3 (2026-10-19):** security review recorded; accepted, no fix owed. Dispatch and self-update stay off outside UAT until the first release is signed and registered end to end.
