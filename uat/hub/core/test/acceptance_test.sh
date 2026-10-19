@@ -7,10 +7,10 @@
 #     token in a header file, never argv), restart, the log retention Job,
 #     the retention settings and log-count;
 #   - with Docker: the stub kubectl's exec runs in real containers, so the
-#     SQL runs on MySQL 8.4 with the repository's farmer and saas
-#     migrations, the objects on the UAT's RustFS image, the Valkey reads
-#     on Valkey 9.1.2 (the chart's) with a password, and the OpenBao reads on an OpenBao dev
-#     server. Without Docker (or without the images) that part is reported
+#     SQL runs on PXC 8.4 (the farmer chart's image) with the repository's
+#     farmer and saas migrations, the objects on the UAT's RustFS image, the
+#     Valkey reads on Valkey 9.1.2 (the chart's) with a password, and the
+#     OpenBao reads on an OpenBao dev server. Without Docker (or without the images) that part is reported
 #     SKIPPED, never passed.
 # The checks use `test && ok || bad` on purpose: ok and bad always return 0.
 # shellcheck disable=SC2015
@@ -135,7 +135,7 @@ out=$(printf 'cook exceeded its render budget' | acc log-count farmer 600 2>/dev
 
 # --- with containers ----------------------------------------------------------------------
 rustfs_image=$(sed -n 's/^  image: \(docker.io\/rustfs\/rustfs:[^ ]*\)$/\1/p' "$core/chart/values.yaml")
-images=(mysql:8.4 valkey/valkey:9.1.2 "$rustfs_image" openbao/openbao:2.6.3)
+images=(percona/percona-xtradb-cluster:8.4.8-8.1 valkey/valkey:9.1.2 "$rustfs_image" openbao/openbao:2.6.3)
 have_images() {
 	command -v docker >/dev/null && docker info >/dev/null 2>&1 || return 1
 	local i
@@ -144,12 +144,12 @@ have_images() {
 	done
 }
 if ! have_images; then
-	skip "acceptance.sh against MySQL, Valkey, RustFS and OpenBao containers (no Docker, or the images ${images[*]} can't be pulled)"
+	skip "acceptance.sh against PXC, Valkey, RustFS and OpenBao containers (no Docker, or the images ${images[*]} can't be pulled)"
 else
 	run=imas-acc-$$
 	export ACC_MYSQL=$run-mysql ACC_VALKEY=$run-valkey ACC_RUSTFS=$run-rustfs ACC_OPENBAO=$run-openbao
 	containers=("$ACC_MYSQL" "$ACC_VALKEY" "$ACC_RUSTFS" "$ACC_OPENBAO")
-	docker run -d --name "$ACC_MYSQL" -e MYSQL_ROOT_PASSWORD=pw mysql:8.4 >/dev/null
+	docker run -d --name "$ACC_MYSQL" -e MYSQL_ROOT_PASSWORD=pw -e CLUSTER_NAME=acc percona/percona-xtradb-cluster:8.4.8-8.1 >/dev/null
 	docker run -d --name "$ACC_VALKEY" valkey/valkey:9.1.2 valkey-server --requirepass vpw >/dev/null
 	docker run -d --name "$ACC_RUSTFS" -e RUSTFS_ACCESS_KEY=uatroot -e RUSTFS_SECRET_KEY=uatrootsecret1234 \
 		-e RUSTFS_VOLUMES=/data -e RUSTFS_ADDRESS=:9000 -e RUSTFS_CONSOLE_ENABLE=false "$rustfs_image" >/dev/null
@@ -163,7 +163,7 @@ else
 		done
 		return 1
 	}
-	wait_for docker exec "$ACC_MYSQL" mysql -uroot -ppw -e 'SELECT 1' || bad "MySQL did not start"
+	wait_for docker exec "$ACC_MYSQL" mysql -uroot -ppw -e 'SELECT 1' || bad "PXC did not start"
 	wait_for docker exec "$ACC_RUSTFS" curl -sf http://127.0.0.1:9000/health/ready || bad "RustFS did not start"
 	wait_for docker exec -e BAO_ADDR=http://127.0.0.1:8200 "$ACC_OPENBAO" bao status || bad "OpenBao did not start"
 	mysql_root() { docker exec -i "$ACC_MYSQL" mysql -uroot -ppw "$@" 2>/dev/null; }
@@ -200,8 +200,8 @@ INSERT INTO farmer.job_status (tenant_id, sprout_id, jid, status, steps_total, s
 	('$tb', 'web-01', '0b5f2a2e-1b9d-4d6e-9c1a-2f3e4d5c6b7a', 'succeeded', 1, 1, 1, 1, NOW(3));
 INSERT INTO farmer.job_leases (name, last_run_at) VALUES ('recipe_audit_expiry', NOW(3));
 SQL
-	[[ "$(mysql_root -N -e "SELECT COUNT(*) FROM saas.tenants")" == 2 ]] && ok "MySQL: the migrations and the seed rows apply" ||
-		bad "MySQL: seeding failed"
+	[[ "$(mysql_root -N -e "SELECT COUNT(*) FROM saas.tenants")" == 2 ]] && ok "PXC: the migrations and the seed rows apply" ||
+		bad "PXC: seeding failed"
 
 	spec=$(jq -cn --arg t "$tb" '{tenant_id: $t, tables: ["farmer.props", "farmer.job_status", "saas.enrollment_keys", "saas.asset_action_items", "farmer.pki_nkeys"]}')
 	out=$(acc inventory <<<"$spec" 2>"$tmp/err") &&

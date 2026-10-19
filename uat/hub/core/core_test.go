@@ -364,7 +364,7 @@ func TestValuesMatchLib(t *testing.T) {
 
 // TestAcceptanceScript runs test/acceptance_test.sh: acceptance.sh (the
 // in-cluster reads and changes of uat/tests' W1 cases) against a stub
-// kubectl and curl, and, where Docker can pull them, against real MySQL
+// kubectl and curl, and, where Docker can pull them, against real PXC
 // (with the repository's migrations), Valkey, RustFS and OpenBao
 // containers. A part that couldn't run is printed as skipped, never as
 // passed.

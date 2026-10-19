@@ -97,3 +97,64 @@ Done when:
   gain the UAT case ID for L12 and the S/U items where they apply.
 
 Needs: none.
+
+## Brief corrections (W1, 2026-10-19)
+
+Decided by the order of `docs/briefs/ORCHESTRATOR.md` rule 6 (the Owner
+decisions above, then the code on main, then the smallest change), and
+built that way:
+
+- **IDs.** B1, E1, D1, U1, N1 and RB1 were free in the catalogue and in
+  section 4h, and are used as proposed. N1's tier is `core` (the catalogue
+  takes tier names only); "standalone only" is in its title and is a
+  written SKIP on the hosted stack.
+- **Scope.** The cases need to look inside the core hub, which the harness
+  could not: `uat/hub/core/acceptance.sh` (with its container-backed test)
+  does it, next to `bind-tenant.sh` and with the same arguments. D1's log
+  retention needs log shipping, which the UAT core hub had off: turning it
+  on took the log bucket, two users with the chart's own policies and their
+  Secrets (`rustfs-setup.sh`, `install.sh` for Versity Gateway and external
+  S3, `lib/common.sh`) and a RustFS ingress rule for the shipper's pods
+  (`chart/`), beyond the values files. `uat/lite` has no values of its own:
+  the rig installs with `uat/hub/core`'s.
+- **Short settings have floors.** saasapi accepts no
+  `SAASAPI_TENANT_PURGE_AFTER` under 1h and no
+  `SAASAPI_TERMINAL_ROW_RETENTION` under 24h; its prune runs at start and
+  then hourly; farmer's recipe audit sweep runs at start and then at most
+  once in 23 hours. So the UAT values set those floors (and a backlog cap
+  of 20, and one day of recipe audit and log retention), and the cases move
+  their own rows' times back past them (`acceptance.sh backdate`), restart
+  saasapi, clear the sweep's last run, and plant dated audit records and
+  log objects, instead of waiting hours or days. `values/values-ha.yaml`
+  puts the backlog cap back to 2000: the ha tier's traffic loops would
+  otherwise hit it.
+- **D1, "pending ones kept".** A provisioning job can't be held pending
+  from outside (farmer answers within seconds). D1 checks the prune keeps a
+  batch with a pending item and an offboarded tenant's finished jobs (the
+  tombstone's record, the documented keep rule), and removes a finished
+  batch, a live tenant's finished jobs and an expired key.
+- **E1, "bus account".** A purge keeps the tenant's locked-out Account JWT
+  in the accounts bucket by design (`internal/tenantpurge` KeepRoots: a bus
+  node started empty must load the tenant locked out). E1 checks that every
+  sprout identity is gone (`pki_nkeys`, `sprout_user_jwt`, the sprout JWT
+  objects, box keys) with the KV keypair and both Transit keys, and that the
+  tombstone's rows stay.
+- **U1, "jobs.follow shows the steps".** `jobs.follow` is the CLI's leg,
+  whose users belong to farmer's own organization and may view only its
+  sprouts; the run's sprouts are in SaaS tenants. U1 checks the steps where
+  farmer records them from the sealed events (`farmer.job_status` and the
+  job's objects); the forged messages come from a sprout U1 enrols and
+  connects through Envoy, the way a sprout does.
+- **RB1, the product bug.** On a deployed stack a cook farmer refuses for
+  its render budget never fails its batch item: `internal/natsapi/cook.go`
+  answers `dispatched` with a jid and only logs the refusal, so saasapi
+  keeps the item `running` for ever. RB1 asserts the budget error (farmer's
+  log) and the untouched sprout, then fails on the item, with that reason.
+  Recorded as P29 (status fragment `zz-W1.md`); product code is not changed
+  here.
+- **The lite README.** The rig had already run once (the owner, WSL2 and
+  Docker Desktop, `v0.1.0-rc.14`, `docs/status/days/2026-10-19/rig-rc14.md`),
+  so its status says that rather than "the first real run is the owner's":
+  the systemd containers on Docker Desktop and the published ports worked
+  there. The kind node image is pinned to the digest kind v0.30.0 lists.
+  `test_lite.sh` has 304 checks.

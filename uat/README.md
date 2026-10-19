@@ -26,6 +26,7 @@ catalogue, the owner prerequisites); this page is the owner's guide to it.
 | Enrolment through Envoy, with a pinned UAT CA, one-time keys, and sprouts reaching the bus only through Envoy | Real RHEL: AlmaLinux 9 stands in for it (same dnf and rpm path; no subscription, RHUI or FIPS; see `uat/enroll/README.md`) |
 | Tenant isolation: two tenants with the same sprout IDs (`ubuntu-01`, `alma-01`, `win-01`) resolve to different machines, and nothing crosses (T6, S2, S4, R3, X4) | SUSE and zypper: out of scope for this gate (add one more tenant VM later) |
 | Auth: Keycloak tokens checked by saasapi (issuer, audience, roles, `organization.id`), the BFF shared secret, Envoy's `jwt_authn` gate, sealing (X1 to X5) | The internet path: sprouts reach Envoy on the DMZ's private address, and Envoy sits behind no application gateway or public load balancer |
+| The S, T and U fixes on the deployed stack (brief W1): the action backlog cap (B1), tenant erasure after offboarding by the operator route and the retention sweeper (E1), retention of recipe audit days, log days and terminal rows with Fluent Bit shipping (D1), sealed facts and step events and the "needs upgrade" mark (U1), the per-cook render budget (RB1); N1 (the proof of possession on `PUT /pki/putnkey`) is for standalone installs and skips on this hosted stack, saying so | The proof of possession on `PUT /pki/putnkey` on a standalone install (N1 skips here: the hosted stack serves neither route) |
 | Commands, recipes and cooks on every OS (C1 to C8, R1 to R6), resilience to reboots and restarts (L1 to L3), and with UAT.7 every ingredient method and the package upgrade (I.*, L4) | Scale and load, the web UI, key expiry (the minimum is an hour; unit tests cover it), the self update cycle (L5) unless `dispatch_flags` is ticked, a Windows host with Desktop Experience |
 | The sprout release of `release_tag` registers through saasapi's operator plane with its GPG-signed `checksums.txt` and signature (`finish.sh` fails otherwise); with `dispatch_flags`, a sprout on an earlier release self-updates to it, verifying the signature against its packaged keyring, and refuses a release whose `checksums.txt` was altered (L5) | That the flags are safe outside UAT: they stay off until the security review |
 
@@ -299,8 +300,9 @@ who reads the seal Secret and a raft volume reads OpenBao
 (`imasuat<run_id>`, `object_store` output) when core has several nodes; the
 workflow writes its name and key (masked) to
 `<state>/hub/core/sensitive/azure-blob/`, and `install.sh` makes Versity
-Gateway's Secrets from them, its root credential and the four users' pairs
-(the accounts reader's goes to the DMZ as before). The chart's
+Gateway's Secrets from them, its root credential and the six users' pairs
+(the accounts reader's goes to the DMZ as before; the two log users' are
+for Fluent Bit and the log retention CronJob). The chart's
 `createBuckets` Job makes the buckets (containers) and their policies;
 `validate-object-store.sh` then proves each user's reach through the
 gateway. The DMZ's bus loader reads the accounts bucket on core's private

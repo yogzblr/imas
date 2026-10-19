@@ -215,7 +215,7 @@ elif [[ "$S3_MODE" == versity ]]; then
 else
 	# External S3 (object_store.mode external): buckets, users and policies
 	# are the operator's. The credential files below are theirs too; they
-	# become the three Secrets the farmer chart names. The accounts reader's
+	# become the five Secrets the farmer chart names. The accounts reader's
 	# pair (accounts-reader/) is for the DMZ (uat/hub/dmz/install.sh
 	# --accounts-reader-dir) and is only checked here.
 	s3dir="$SENSITIVE_DIR/s3"

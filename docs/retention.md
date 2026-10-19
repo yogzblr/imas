@@ -82,3 +82,13 @@ The bus keeps no data: its Account resolver directory is an `emptyDir`
 rebuilt from the accounts bucket (design D10, D11), and it logs to stdout.
 There is no JetStream. farmer and saasapi keep nothing on disk and log to
 stdout (D16); the log shipper above is what keeps logs.
+
+## Checked on a deployed stack
+
+The UAT gate's acceptance case D1 (with E1 for the purge delay;
+`uat/tests/README.md`, "The W1 cases") checks these settings on a running
+hub. The UAT core hub sets the shortest values the services accept
+(`uat/hub/core/values/farmer-uat.yaml`: one day of recipe audit and logs,
+24h for terminal rows, a purge one hour after offboarding) and the cases
+move their own rows' and objects' dates back past them; the defaults above
+stay as shipped.

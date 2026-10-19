@@ -26,7 +26,7 @@
 #      the operator API's answer decides; validate-object-store.sh against a
 #      curl that answers with the UAT policies, for RustFS and for Versity
 #      Gateway (test/object_store_test.sh); acceptance.sh against stub
-#      kubectl and curl and, with Docker, real MySQL, Valkey, RustFS and
+#      kubectl and curl and, with Docker, real PXC, Valkey, RustFS and
 #      OpenBao containers (test/acceptance_test.sh)
 #   9. go test ./uat/hub/core/ (helm template and lint of the farmer chart
 #      with values/farmer-uat.yaml, and of chart/)

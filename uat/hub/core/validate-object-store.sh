@@ -3,15 +3,19 @@
 #
 # Proves, against the UAT's object store, that each scoped credential reaches
 # what it must and nothing else (design D22, P13): with each user's own
-# access key it PUTs, GETs and lists in the recipe, job and sprout JWT
-# buckets and the accounts bucket, and expects 200 where its policy allows
-# the call and 403 where it does not:
+# access key it PUTs, GETs, lists and deletes in the recipe, job and
+# sprout JWT buckets, the accounts bucket and the log bucket, and expects
+# 200 (204) where its policy allows the call and 403 where it does not:
 #
 #   farmer           recipes, jobs, sprout JWTs: put, get, list. accounts: none
 #   saasapi          recipes under tenants/*/recipes/: put, get, list; the
 #                    rest of the recipe bucket, jobs, sprout JWTs, accounts: none
 #   accounts writer  accounts: put, get, list. recipes, sprout JWTs: none
 #   accounts reader  accounts: get, list, but no put. recipes, sprout JWTs: none
+#   logs writer      logs under logs/: put only (no get, no list, nothing
+#                    outside the prefix). recipes: none
+#   logs retention   logs: list, and delete under logs/; no get, no put.
+#                    recipes: none
 #
 # The store is the endpoints file's object_store.mode:
 #   rustfs   the UAT RustFS (rustfs-setup.sh made the users and policies).
@@ -47,13 +51,15 @@ esac
 s3dir="$SENSITIVE_DIR/s3"
 for f in farmer-access-key-id farmer-secret-access-key saasapi-access-key-id saasapi-secret-access-key \
 	accounts-writer-access-key-id accounts-writer-secret-access-key \
-	accounts-reader/access-key-id accounts-reader/secret-access-key; do
+	accounts-reader/access-key-id accounts-reader/secret-access-key \
+	logs-writer-access-key-id logs-writer-secret-access-key logs-retention-access-key-id logs-retention-secret-access-key; do
 	[[ -s "$s3dir/$f" ]] || die "no $s3dir/$f: run rustfs-setup.sh (or, for Versity Gateway, install.sh) first"
 done
 
 run_id="uat-validate-$(openssl rand -hex 4)"
-R=$RECIPE_BUCKET J=$JOB_BUCKET W=$SPROUT_JWT_BUCKET A=$ACCOUNTS_BUCKET
+R=$RECIPE_BUCKET J=$JOB_BUCKET W=$SPROUT_JWT_BUCKET A=$ACCOUNTS_BUCKET L=$LOG_BUCKET
 P=$run_id
+LP="${LOG_PREFIX}$run_id"
 T="tenants/$run_id/recipes"
 
 # The program each probe batch runs: line 1 of stdin is the access key, line
@@ -150,12 +156,19 @@ probes "accounts writer" "$s3dir/accounts-writer-access-key-id" "$s3dir/accounts
 probes "accounts reader" "$s3dir/accounts-reader/access-key-id" "$s3dir/accounts-reader/secret-access-key" \
 	"allow GET /$A/$P/account get on $A" "allow GET $(list "$A" "$P") list on $A" "deny PUT /$A/$P/reader put on $A" \
 	"deny GET /$R/$P/recipe get on $R" "deny GET $(list "$R" "$P") list on $R" "deny GET /$W/$P/jwt get on $W"
+probes "logs writer" "$s3dir/logs-writer-access-key-id" "$s3dir/logs-writer-secret-access-key" \
+	"allow PUT /$L/$LP/log put on $L/$LOG_PREFIX" "deny PUT /$L/$P/log put on $L outside $LOG_PREFIX" \
+	"deny GET /$L/$LP/log get on $L" "deny GET $(list "$L" "$LP") list on $L" "deny PUT /$R/$P/logs put on $R"
+probes "logs retention" "$s3dir/logs-retention-access-key-id" "$s3dir/logs-retention-secret-access-key" \
+	"allow GET $(list "$L" "$LP") list on $L" "deny GET /$L/$LP/log get on $L" "deny PUT /$L/$LP/retention put on $L" \
+	"allow DELETE /$L/$LP/log delete on $L/$LOG_PREFIX" "deny GET /$R/$P/recipe get on $R"
 
 # Clean up with the root credential: RustFS's from the pod (empty key
 # lines), the gateway's from its files.
 cleanup=()
 for o in "$R/$P/recipe" "$R/$T/recipe" "$J/$P/job" "$W/$P/jwt" "$A/$P/account" \
-	"$R/$P/saasapi" "$J/$P/saasapi" "$A/$P/saasapi" "$A/$P/farmer" "$R/$P/writer" "$A/$P/reader"; do
+	"$R/$P/saasapi" "$J/$P/saasapi" "$A/$P/saasapi" "$A/$P/farmer" "$R/$P/writer" "$A/$P/reader" \
+	"$L/$LP/log" "$L/$P/log" "$L/$LP/retention" "$R/$P/logs"; do
 	cleanup+=("gone DELETE /$o delete $o")
 done
 root_keys() {
