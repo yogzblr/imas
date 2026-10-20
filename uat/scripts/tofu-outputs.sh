@@ -16,7 +16,8 @@
 # object_store` then fails with 'Output "object_store" not found'. So
 # object_store is read from the full `tofu output -json` (piped, never
 # written: it holds the sensitive outputs too), and a missing or null output
-# writes null. uat and ha_node_names are objects for every node count and
+# writes null; any other value (false included) fails the check below. uat
+# and ha_node_names are objects for every node count and
 # object_store_account_key is a string (empty in the single-node run), so
 # those keep the direct call, which fails loudly if one is ever missing.
 #
@@ -38,7 +39,7 @@ outputs() {
   # The HA run's Azure Blob account for Versity Gateway (null in the
   # single-node run, which keeps RustFS). Name only; the key is read by
   # credentials.
-  out -json | jq '.object_store.value // null' >"$state/object_store.json"
+  out -json | jq 'if has("object_store") then .object_store.value else null end' >"$state/object_store.json"
   jq -e 'type == "null" or (type == "object" and (.account_name | strings | length > 0))' \
     "$state/object_store.json" >/dev/null ||
     die "tofu output object_store is neither null nor an object with account_name"

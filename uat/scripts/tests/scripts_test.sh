@@ -775,6 +775,9 @@ jq '.object_store.value = {blob_endpoint: "x"}' "$STUB_STATE/tofu_outputs.json" 
 mkdir -p "$STUB_STATE/state"
 tout outputs "$STUB_STATE/state"
 check "outputs: an object_store without account_name: exit 1, named" test "$rc" -eq 1 -a -n "$(grep 'neither null nor an object' <<<"$out")"
+jq '.object_store.value = false' "$STUB_STATE/tofu_outputs.json" >"$STUB_STATE/o" && mv "$STUB_STATE/o" "$STUB_STATE/tofu_outputs.json"
+tout outputs "$STUB_STATE/state"
+check "outputs: an object_store of false is not read as null: exit 1, named" test "$rc" -eq 1 -a -n "$(grep 'neither null nor an object' <<<"$out")"
 
 new_state tofu-no-uat
 tofu_state missing

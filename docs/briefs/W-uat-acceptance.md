@@ -212,9 +212,10 @@ product code.
 - The workflow's two output steps are `uat/scripts/tofu-outputs.sh outputs
   STATE` and `tofu-outputs.sh credentials STATE SECRETS`. `object_store` is
   read from the full `tofu output -json` (piped into jq, never written; it
-  holds the sensitive outputs too) as `.object_store.value // null`, so a
-  missing or null output writes `null` and the HA run's writes the object;
-  anything else fails the step.
+  holds the sensitive outputs too) as `if has("object_store") then
+  .object_store.value else null end`, so a missing or null output writes
+  `null` and the HA run's writes the object; anything else, `false`
+  included, fails the step.
 - The other outputs cannot be null: `uat` and `ha_node_names` are objects
   for every node count, `ssh_private_key` and `windows_admin_password` are
   generated strings, and `object_store_account_key` is `""` in the
