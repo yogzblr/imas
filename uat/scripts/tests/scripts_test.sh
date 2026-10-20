@@ -180,6 +180,11 @@ for c in 203.0.113.7/24 0.0.0.0/0 4.0.0.0/08 10.0.0.0/7 1.2.3.4/33 256.1.2.3/32 
   run_inputs INGRESS_CIDRS="$c"
   check "ingress_cidrs '$c' fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input ingress_cidrs: '$c'" <<<"$out")"
 done
+for c in ',' ', ,' '  '; do
+  inputs_state ingress-no-range
+  run_inputs INGRESS_CIDRS="$c"
+  check "ingress_cidrs '$c' (no range) fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input ingress_cidrs '$c' holds no range" <<<"$out")"
+done
 inputs_state ingress-repeated
 run_inputs INGRESS_CIDRS="203.0.113.7/32 203.0.113.7/32"
 check "a repeated ingress range fails, named" test "$rc" -eq 1 -a -n "$(grep -F "'203.0.113.7/32' is repeated" <<<"$out")"

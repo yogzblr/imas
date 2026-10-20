@@ -171,6 +171,11 @@ public_ingress_cidrs="[]"
 cidrs=()
 raw=${INGRESS_CIDRS:-}
 raw=${raw//,/ }
+# Something typed that holds no range (only commas or spaces) is a mistake,
+# not a request for the Internet default: fail rather than open the ports.
+if [ -n "$raw" ] && [ -z "${raw//[[:space:]]/}" ]; then
+  problem "input ingress_cidrs '${INGRESS_CIDRS}' holds no range (leave it empty to open the ports to the Internet)"
+fi
 for c in $raw; do
   if ! [[ "$c" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})/(0|[1-9][0-9]?)$ ]]; then
     problem "input ingress_cidrs: '$c' is not an IPv4 range a.b.c.d/N"
