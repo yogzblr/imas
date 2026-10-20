@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests the logic of uat/scripts against stubbed az, gh, curl and tofu
+# Tests the logic of uat/scripts against stubbed az, gh and tofu
 # (tests/stubs). Nothing reaches Azure or GitHub.
 # Run: bash uat/scripts/tests/scripts_test.sh
 set -uo pipefail
@@ -41,12 +41,6 @@ run() {
   out=$(PATH="$stubs:$PATH" bash "$scripts/$1" "${@:2}" 2>&1)
   rc=$?
 }
-# run_out SCRIPT ARGS...: the same, stdout only in out, stderr in err.
-run_out() {
-  out=$(PATH="$stubs:$PATH" bash "$scripts/$1" "${@:2}" 2>"$work/stderr")
-  rc=$?
-  err=$(cat "$work/stderr")
-}
 
 ###############################################################################
 echo "# run-id.sh"
@@ -74,75 +68,6 @@ printf '\377\001\002\003\004\005\006\007\010\011\012' >"$work/bytes"
 id=$(RUN_ID_RANDOM_SOURCE="$work/bytes" bash "$scripts/run-id.sh")
 check "biased bytes are skipped and bytes map to the alphabet (got $id)" test "$id" = bbcdefgh
 if bash "$scripts/run-id.sh" extra 2>/dev/null; then nok "an unknown argument is a usage error"; else ok "an unknown argument is a usage error"; fi
-
-###############################################################################
-echo "# runner-cidr.sh"
-srcs="https://one.example https://two.example https://three.example"
-set_ip() { # set_ip HOST ANSWER
-  mkdir -p "$STUB_STATE/curl"
-  printf '%b' "$2" >"$STUB_STATE/curl/$1"
-}
-
-new_state cidr-agree
-for h in one.example two.example three.example; do set_ip "$h" '20.193.10.7\n'; done
-RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-check "three agreeing answers give the /32 (got '$out')" test "$rc" -eq 0 -a "$out" = 20.193.10.7/32
-check "every request is IPv4 only and https only" test "$(grep -c -- '-4 .*--proto =https' "$STUB_STATE/calls.log")" -eq 3
-
-new_state cidr-one-down
-set_ip one.example '20.193.10.7'
-set_ip three.example '  20.193.10.7 \r\n'
-RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-check "two agreeing answers (one service down, white space trimmed) are enough" test "$rc" -eq 0 -a "$out" = 20.193.10.7/32
-
-new_state cidr-disagree
-set_ip one.example '20.193.10.7'
-set_ip two.example '20.193.10.8'
-set_ip three.example '20.193.10.7'
-RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-check "disagreeing answers fail, without printing an address" test "$rc" -eq 1 -a -z "$out"
-check "the disagreement is named" grep -q "disagree" <<<"$err"
-
-new_state cidr-only-one
-set_ip two.example '20.193.10.7'
-RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-check "a single answer is not enough by default" test "$rc" -eq 1 -a -z "$out"
-RUNNER_IP_MIN_AGREE=1 RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-check "a single answer is enough with RUNNER_IP_MIN_AGREE=1" test "$rc" -eq 0 -a "$out" = 20.193.10.7/32
-
-new_state cidr-garbage
-set_ip one.example '<html>blocked</html>'
-set_ip two.example '20.193.10.7\n20.193.10.8\n'
-set_ip three.example '20.193.10.7'
-RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-check "a non-address and a two-line answer are ignored, leaving too few" test "$rc" -eq 1 -a -z "$out"
-
-for a in 256.1.2.3 020.1.2.3 1.2.3 1.2.3.4.5 '1.2.3.4/32' '::1'; do
-  new_state cidr-invalid
-  for h in one.example two.example three.example; do set_ip "$h" "$a"; done
-  RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-  check "'$a' is not accepted as an address" test "$rc" -eq 1 -a -z "$out"
-done
-
-for a in 10.1.2.3 172.20.0.1 192.168.1.1 100.64.0.1 127.0.0.1 169.254.169.254 0.0.0.0 \
-  192.0.2.1 198.51.100.7 203.0.113.9 198.18.0.1 224.0.0.1 255.255.255.255; do
-  new_state cidr-private
-  for h in one.example two.example three.example; do set_ip "$h" "$a"; done
-  RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-  check "non-public $a is refused" test "$rc" -eq 1 -a -z "$out"
-done
-for a in 172.15.255.1 172.32.0.1 100.63.0.1 100.128.0.1 192.169.0.1 11.0.0.1 223.255.255.1; do
-  new_state cidr-public
-  for h in one.example two.example three.example; do set_ip "$h" "$a"; done
-  RUNNER_IP_SOURCES=$srcs run_out runner-cidr.sh
-  check "public $a, next to a reserved range, is accepted" test "$rc" -eq 0 -a "$out" = "$a/32"
-done
-
-new_state cidr-http
-set_ip one.example '20.193.10.7'
-set_ip two.example '20.193.10.7'
-RUNNER_IP_SOURCES="http://one.example https://two.example" RUNNER_IP_MIN_AGREE=2 run_out runner-cidr.sh
-check "a plain http source is refused, not asked" test "$rc" -eq 1 -a "$(grep -c 'one.example' "$STUB_STATE/calls.log")" -eq 0
 
 ###############################################################################
 echo "# check-inputs.sh"
@@ -238,6 +163,34 @@ check "outputs: dispatch_flags=off for false" test "$rc" -eq 0 -a -n "$(grep -x 
 inputs_state dispatch-bad
 run_inputs DISPATCH_FLAGS=yes
 check "dispatch_flags yes fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input dispatch_flags 'yes' must be true or false" <<<"$out")"
+
+# ingress_cidrs (W5): empty opens the internet-facing ports to the Internet;
+# ranges are the hardened mode, checked by uat/tofu's rule.
+inputs_state ingress-default
+run_inputs
+check "outputs: public_ingress=internet by default" grep -qx "public_ingress=internet" "$STUB_STATE/github_output"
+check "outputs: public_ingress_cidrs=[] by default" grep -qxF "public_ingress_cidrs=[]" "$STUB_STATE/github_output"
+inputs_state ingress-cidrs
+run_inputs INGRESS_CIDRS="203.0.113.0/24, 198.51.100.7/32 4.0.0.0/8"
+check "ingress ranges pass" test "$rc" -eq 0
+check "outputs: public_ingress=cidrs with ranges" grep -qx "public_ingress=cidrs" "$STUB_STATE/github_output"
+check "outputs: the ranges as a JSON list, in order" grep -qxF 'public_ingress_cidrs=["203.0.113.0/24","198.51.100.7/32","4.0.0.0/8"]' "$STUB_STATE/github_output"
+for c in 203.0.113.7/24 0.0.0.0/0 4.0.0.0/08 10.0.0.0/7 1.2.3.4/33 256.1.2.3/32 020.1.2.3/32 1.2.3/24 203.0.113.7 'Internet' '1.2.3.4/32;id' '::1/128'; do
+  inputs_state ingress-bad
+  run_inputs INGRESS_CIDRS="$c"
+  check "ingress_cidrs '$c' fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input ingress_cidrs: '$c'" <<<"$out")"
+done
+for c in ',' ', ,' '  '; do
+  inputs_state ingress-no-range
+  run_inputs INGRESS_CIDRS="$c"
+  check "ingress_cidrs '$c' (no range) fails, named" test "$rc" -eq 1 -a -n "$(grep -F "input ingress_cidrs '$c' holds no range" <<<"$out")"
+done
+inputs_state ingress-repeated
+run_inputs INGRESS_CIDRS="203.0.113.7/32 203.0.113.7/32"
+check "a repeated ingress range fails, named" test "$rc" -eq 1 -a -n "$(grep -F "'203.0.113.7/32' is repeated" <<<"$out")"
+inputs_state ingress-many
+run_inputs INGRESS_CIDRS="$(for i in $(seq 1 51); do printf '20.0.%d.0/24 ' "$i"; done)"
+check "more than 50 ingress ranges fail, named" test "$rc" -eq 1 -a -n "$(grep -F "51 ranges is more than 50" <<<"$out")"
 
 inputs_state draft
 run_inputs RELEASE_TAG=v0.1.0-rc.5

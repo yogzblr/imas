@@ -71,11 +71,11 @@ done
 
 # Destroy does not depend on these, but the configuration requires them. The
 # caller's own values win. The node counts (core_node_count, dmz_node_count)
-# have defaults: destroy removes every resource in the run's state, an HA
-# run's nodes and load balancers included, whatever counts are set.
+# and public_ingress have defaults: destroy removes every resource in the
+# run's state, an HA run's nodes and load balancers included, whatever counts
+# or ingress sources are set.
 export TF_VAR_run_id="$run_id"
 export TF_VAR_release_tag="${TF_VAR_release_tag:-v0.0.0}"
-export TF_VAR_runner_cidr="${TF_VAR_runner_cidr:-192.0.2.1/32}"
 
 tofu_ok=1
 

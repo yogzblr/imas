@@ -2203,7 +2203,9 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
 - Inputs: run_id (lowercase letters and digits, 6 to 10), release_tag (a vX.Y.Z or
   vX.Y.Z-rc.N tag; the chart, images and packages all come from this release, never
   latest), region (default centralindia, a variable; the owner confirms size and quota
-  there), runner_cidr (one /32, the only source allowed in from the internet), keep_hours
+  there), public_ingress (W5, owner 2026-10-20: who may reach the internet-facing ports;
+  Internet by default, or public_ingress_cidrs, explicit public ranges; it replaced
+  runner_cidr, one /32, which did not follow the runner's egress address), keep_hours
   (default 0; above 0 skips the final destroy and the janitor deletes it after that time).
 - Names: resource group imas-uat-<run_id>; every resource tagged purpose=imas-uat,
   run_id, expires_at (RFC 3339, UTC). Public DNS labels uat<run_id>-dmz and uat<run_id>-core
@@ -2223,7 +2225,8 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
   and documents them): sprouts reach only Envoy in the DMZ; the DMZ reaches only the farmer
   API port on core; core reaches only the farmerbus client port on the DMZ (farmer and saasapi
   connect to farmerbus; sprouts reach the bus only through Envoy); the internet
-  (runner_cidr only) reaches only 443 on core (saasapi and Keycloak) and Envoy's port on the DMZ;
+  (public_ingress) reaches only 443 on core (saasapi and Keycloak), Envoy's port on the DMZ
+  and the Bastion's 443;
   SSH, WinRM and the Kubernetes API are not open to the internet and are reached only through
   Azure Bastion. Every VM has a Standard public IP for outbound traffic only. Nothing else is open. A sprout must not be able to open a connection to core.
 - Ports and exposure (owner decisions, 2026-10-06): on the DMZ, Envoy is node port 8443 (NodePort,
@@ -2326,7 +2329,7 @@ full, including the Shared contract; follow it exactly, it is the interface the 
 briefs are written against. FLAG FOR SECURITY REVIEW (cloud credentials, network rules and
 destroy semantics).
 Build under uat/tofu: (1) A main module taking the inputs in the contract (run_id,
-release_tag, region, runner_cidr, keep_hours, sizes, image URNs) that creates: the resource
+release_tag, region, runner_cidr (since W5 public_ingress), keep_hours, sizes, image URNs) that creates: the resource
 group imas-uat-run_id with the tags in the contract; one VNet 10.60.0.0/16 with the three
 subnets and a fourth, AzureBastionSubnet 10.60.4.0/26, holding one Azure Bastion with the Standard SKU,
 native client tunnelling on and its own Standard public IP (follow Azure's rules for NSGs on that
@@ -2561,7 +2564,8 @@ region, keep_hours (default 0), tier (smoke, core, resilience, ingredients, life
 all), upgrade_from_tag (optional, for scenario L4) and an optional list of scenario ids, passed to
 uat/tests/run.sh; it runs in the GitHub environment
 uat (required reviewer), permission id-token write, logs in with azure/login by OIDC using the three
-environment variables, finds the runner's public address and passes it as runner_cidr, generates
+environment variables, finds the runner's public address and passes it as runner_cidr (since W5:
+passes public_ingress from the ingress_cidrs input instead, Internet by default), generates
 run_id, and runs in order: tofu apply (uat/tofu), opening the Bastion tunnels with uat/access/tunnels.sh
 open (after installing the Azure CLI bastion and ssh extensions), k0s bootstrap, core install, DMZ install, enrolment,
 the tests, then a step with if always() that closes the tunnels, and a final destroy step with if

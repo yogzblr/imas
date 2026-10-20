@@ -27,12 +27,24 @@
 #                      dispatch_flags, which turns the fleet update flags on
 #                      in the hubs' values (uat/hub/core/gen-values.sh) and
 #                      tells the tests they are on
+#   INGRESS_CIDRS      optional public IPv4 ranges, separated by spaces or
+#                      commas (a.b.c.d/N, N from 8 to 32, no host bits set,
+#                      at most 50): the hardened mode of uat/tofu's
+#                      public_ingress. Empty (default) opens the three
+#                      internet-facing ports (Bastion 443, core 443, DMZ
+#                      Envoy) to the Internet, so they follow whatever egress
+#                      address the runner uses (owner, 2026-10-20, W5)
 #   GITHUB_REPOSITORY  owner/repo, for the tag and release lookups (gh api)
 #
 # Writes, when GITHUB_OUTPUT is set, the normalised values as step outputs:
 #   release_tag region keep_hours tier upgrade_from_tag scenarios hub_nodes
 #   dispatch_flags     on or off: IMAS_UAT_DISPATCH_FLAGS for the core hub
 #                      install and the tests
+#   public_ingress     internet (no INGRESS_CIDRS) or cidrs: uat/tofu's
+#                      public_ingress
+#   public_ingress_cidrs
+#                      the ranges as a JSON list ([] for internet): uat/tofu's
+#                      public_ingress_cidrs
 #   core_node_count, dmz_node_count
 #                      uat/tofu's node counts (both equal hub_nodes)
 #   core_node_size     uat/tofu's core_node_size: Standard_D4s_v5 for the HA
@@ -152,6 +164,56 @@ case "${DISPATCH_FLAGS:-false}" in
   *) problem "input dispatch_flags '${DISPATCH_FLAGS}' must be true or false" ;;
 esac
 
+# The hardened ingress ranges. The same rule as uat/tofu (variables.tf), so a
+# bad range fails here, before anything is created.
+public_ingress=internet
+public_ingress_cidrs="[]"
+cidrs=()
+raw=${INGRESS_CIDRS:-}
+raw=${raw//,/ }
+# Something typed that holds no range (only commas or spaces) is a mistake,
+# not a request for the Internet default: fail rather than open the ports.
+if [ -n "$raw" ] && [ -z "${raw//[[:space:]]/}" ]; then
+  problem "input ingress_cidrs '${INGRESS_CIDRS}' holds no range (leave it empty to open the ports to the Internet)"
+fi
+for c in $raw; do
+  if ! [[ "$c" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})/(0|[1-9][0-9]?)$ ]]; then
+    problem "input ingress_cidrs: '$c' is not an IPv4 range a.b.c.d/N"
+    continue
+  fi
+  o1=${BASH_REMATCH[1]} o2=${BASH_REMATCH[2]} o3=${BASH_REMATCH[3]} o4=${BASH_REMATCH[4]} bits=${BASH_REMATCH[5]}
+  if [ "$o1" -gt 255 ] || [ "$o2" -gt 255 ] || [ "$o3" -gt 255 ] || [ "$o4" -gt 255 ]; then
+    problem "input ingress_cidrs: '$c' is not an IPv4 range a.b.c.d/N"
+    continue
+  fi
+  if [ "$bits" -lt 8 ] || [ "$bits" -gt 32 ]; then
+    problem "input ingress_cidrs: '$c' must be a /8 to a /32 (leave ingress_cidrs empty to open the ports to the Internet)"
+    continue
+  fi
+  addr=$(((o1 << 24) | (o2 << 16) | (o3 << 8) | o4))
+  host=$(((1 << (32 - bits)) - 1))
+  if [ $((addr & host)) -ne 0 ]; then
+    problem "input ingress_cidrs: '$c' has host bits set"
+    continue
+  fi
+  for seen in "${cidrs[@]}"; do
+    if [ "$seen" = "$c" ]; then
+      problem "input ingress_cidrs: '$c' is repeated"
+      continue 2
+    fi
+  done
+  cidrs+=("$c")
+done
+if [ "${#cidrs[@]}" -gt 50 ]; then
+  problem "input ingress_cidrs: ${#cidrs[@]} ranges is more than 50"
+elif [ "${#cidrs[@]}" -gt 0 ]; then
+  public_ingress=cidrs
+  # Each range is digits, dots and a slash only (checked above), so it needs
+  # no JSON escaping.
+  public_ingress_cidrs="[$(printf '"%s",' "${cidrs[@]}")"
+  public_ingress_cidrs="${public_ingress_cidrs%,}]"
+fi
+
 # Scenario ids reach uat/tests/run.sh as separate arguments, so only plain ids
 # get through; run.sh itself rejects an id that is not in the tier.
 scenarios=""
@@ -191,6 +253,8 @@ upgrade_from_tag=$upgrade_from_tag
 scenarios=$scenarios
 hub_nodes=$hub_nodes
 dispatch_flags=$dispatch_flags
+public_ingress=$public_ingress
+public_ingress_cidrs=$public_ingress_cidrs
 core_node_count=$hub_nodes
 dmz_node_count=$hub_nodes
 core_node_size=$core_node_size

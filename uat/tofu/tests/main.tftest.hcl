@@ -113,7 +113,6 @@ override_resource {
 variables {
   run_id      = "abc123"
   release_tag = "v0.1.0-rc.4"
-  runner_cidr = "203.0.113.7/32"
 }
 
 run "names_tags_and_layout" {
@@ -363,7 +362,7 @@ run "network_rules" {
 
   assert {
     condition = alltrue([for r in azurerm_network_security_group.subnet["core"].security_rule :
-      (r.name != "AllowRunnerHttpsIn" || (r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "443")) &&
+      (r.name != "AllowRunnerHttpsIn" || (r.source_address_prefix == "Internet" && r.destination_port_range == "443")) &&
       (r.name != "AllowDmzFarmerApiIn" || (r.source_address_prefix == "10.60.1.0/24" && r.destination_port_range == "5405")) &&
       (r.name != "AllowDmzAccountsStoreIn" || (r.source_address_prefix == "10.60.1.0/24" && r.destination_port_range == "9000")) &&
       (r.name != "AllowBusOut" || (r.destination_address_prefix == "10.60.1.0/24" && r.destination_port_range == "8442"))
@@ -380,7 +379,7 @@ run "network_rules" {
     condition = alltrue([for r in azurerm_network_security_group.subnet["dmz"].security_rule :
       (r.name != "AllowCoreBusIn" || (r.source_address_prefix == "10.60.2.0/24" && r.destination_port_range == "8442")) &&
       (r.name != "AllowSproutsEnvoyPrivateIn" || (r.source_address_prefix == "10.60.3.0/24" && r.destination_port_range == "8443")) &&
-      (r.name != "AllowRunnerEnvoyIn" || (r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "8443")) &&
+      (r.name != "AllowRunnerEnvoyIn" || (r.source_address_prefix == "Internet" && r.destination_port_range == "8443")) &&
       (r.name != "AllowFarmerApiOut" || (r.destination_address_prefix == "10.60.2.0/24" && r.destination_port_range == "5405")) &&
       (r.name != "AllowAccountsStoreOut" || (r.destination_address_prefix == "10.60.2.0/24" && r.destination_port_range == "9000"))
     ])
@@ -415,9 +414,18 @@ run "network_rules" {
 
   assert {
     condition = anytrue([for r in azurerm_network_security_group.subnet["bastion"].security_rule :
-      r.name == "AllowHttpsInbound" && r.source_address_prefix == "203.0.113.7/32" && r.destination_port_range == "443"
+      r.name == "AllowHttpsInbound" && r.source_address_prefix == "Internet" && r.source_address_prefixes == null && r.destination_port_range == "443"
     ])
-    error_message = "bastion: 443 from the runner only"
+    error_message = "bastion: 443 from the Internet by default (public_ingress, W5)"
+  }
+
+  # The internet is let in by these three rules and no other.
+  assert {
+    condition = toset(flatten([for n in ["dmz", "core", "tenants", "bastion"] : [
+      for r in azurerm_network_security_group.subnet[n].security_rule : "${n}/${r.name}"
+      if r.direction == "Inbound" && r.access == "Allow" && contains(concat(r.source_address_prefix == null ? [] : [r.source_address_prefix], r.source_address_prefixes == null ? [] : tolist(r.source_address_prefixes)), "Internet")
+    ]])) == toset(["dmz/AllowRunnerEnvoyIn", "core/AllowRunnerHttpsIn", "bastion/AllowHttpsInbound"])
+    error_message = "only Envoy on the DMZ, 443 on core and 443 on the Bastion are open to the internet"
   }
 
   assert {
@@ -498,14 +506,121 @@ run "bad_run_id" {
   expect_failures = [var.run_id]
 }
 
-run "bad_runner_cidr" {
+# The hardened mode (W5): the three internet-facing rules take the explicit
+# ranges instead of Internet, all of them, and nothing else changes source.
+run "public_ingress_cidrs" {
   command = plan
 
   variables {
-    runner_cidr = "0.0.0.0/0"
+    public_ingress       = "cidrs"
+    public_ingress_cidrs = ["203.0.113.0/24", "198.51.100.7/32"]
   }
 
-  expect_failures = [var.runner_cidr]
+  assert {
+    condition = alltrue(flatten([for n in ["dmz", "core", "bastion"] : [
+      for r in azurerm_network_security_group.subnet[n].security_rule :
+      r.source_address_prefix == null && toset(r.source_address_prefixes) == toset(["203.0.113.0/24", "198.51.100.7/32"])
+      if contains(["AllowRunnerEnvoyIn", "AllowRunnerHttpsIn", "AllowHttpsInbound"], r.name)
+    ]])) && length(flatten([for n in ["dmz", "core", "bastion"] : [for r in azurerm_network_security_group.subnet[n].security_rule : r if contains(["AllowRunnerEnvoyIn", "AllowRunnerHttpsIn", "AllowHttpsInbound"], r.name)]])) == 3
+    error_message = "cidrs: Envoy, core 443 and Bastion 443 all take public_ingress_cidrs"
+  }
+
+  assert {
+    condition = alltrue(flatten([for n in ["dmz", "core", "tenants", "bastion"] : [
+      for r in azurerm_network_security_group.subnet[n].security_rule : r.source_address_prefix != "Internet"
+    ]]))
+    error_message = "cidrs: no rule is open to the Internet"
+  }
+}
+
+run "public_ingress_one_cidr" {
+  command = plan
+
+  variables {
+    public_ingress       = "cidrs"
+    public_ingress_cidrs = ["203.0.113.7/32"]
+  }
+
+  assert {
+    condition = anytrue([for r in azurerm_network_security_group.subnet["bastion"].security_rule :
+      r.name == "AllowHttpsInbound" && r.source_address_prefix == "203.0.113.7/32" && r.source_address_prefixes == null
+    ])
+    error_message = "cidrs: a single range uses the singular source field"
+  }
+}
+
+run "bad_public_ingress" {
+  command = plan
+
+  variables {
+    public_ingress = "open"
+  }
+
+  expect_failures = [var.public_ingress]
+}
+
+run "bad_public_ingress_cidrs_missing" {
+  command = plan
+
+  variables {
+    public_ingress = "cidrs"
+  }
+
+  expect_failures = [var.public_ingress_cidrs]
+}
+
+run "bad_public_ingress_cidrs_with_internet" {
+  command = plan
+
+  variables {
+    public_ingress_cidrs = ["203.0.113.7/32"]
+  }
+
+  expect_failures = [var.public_ingress_cidrs]
+}
+
+run "bad_public_ingress_cidrs_whole_internet" {
+  command = plan
+
+  variables {
+    public_ingress       = "cidrs"
+    public_ingress_cidrs = ["0.0.0.0/0"]
+  }
+
+  expect_failures = [var.public_ingress_cidrs]
+}
+
+run "bad_public_ingress_cidrs_host_bits" {
+  command = plan
+
+  variables {
+    public_ingress       = "cidrs"
+    public_ingress_cidrs = ["203.0.113.7/24"]
+  }
+
+  expect_failures = [var.public_ingress_cidrs]
+}
+
+run "bad_public_ingress_cidrs_not_an_address" {
+  command = plan
+
+  variables {
+    public_ingress       = "cidrs"
+    public_ingress_cidrs = ["256.1.2.3/32"]
+  }
+
+  expect_failures = [var.public_ingress_cidrs]
+}
+
+run "bad_public_ingress_cidrs_repeated" {
+  command = plan
+
+  variables {
+    public_ingress       = "cidrs"
+    public_ingress_cidrs = ["203.0.113.7/32", "203.0.113.7/32"]
+  }
+
+  expect_failures = [var.public_ingress_cidrs]
 }
 
 run "bad_release_tag" {

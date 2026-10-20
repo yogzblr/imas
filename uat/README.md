@@ -36,8 +36,11 @@ native tunnelling), `uat-dmz` (single-node k0s, the nats chart), `uat-core`
 (single-node k0s, the farmer chart plus RustFS and Keycloak, both UAT only) and
 six sprouts: `t1-ubuntu`, `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma`,
 `t2-win`. SSH, WinRM and the Kubernetes API are reached only through Bastion
-tunnels; only Envoy (8443 on the DMZ) and 443 on core are open, and only to
-the runner's own address. The HA run (`hub_nodes` 3, P24) makes each hub three k0s
+tunnels; only Envoy (8443 on the DMZ), 443 on core and the Bastion's 443 are
+open from outside the VNet. By default they are open to the Internet, so they
+follow whatever egress address the caller uses (owner, 2026-10-20, W5: Run 2
+failed when the Bastion admitted only the one /32 the runner's address check
+saw); the `ingress_cidrs` input narrows all three to named ranges. The HA run (`hub_nodes` 3, P24) makes each hub three k0s
 nodes over the region's zones, `uat-dmz-1` to `uat-dmz-3` and `uat-core-1` to
 `uat-core-3`, behind an internal and a public Standard load balancer
 (`uat/tofu/README.md`, "HA topology"), each node a k0s controller+worker on
@@ -56,7 +59,7 @@ etcd (`uat/k0s/README.md`, "HA hubs").
 | `uat/tests` | UAT.5 | The acceptance suite (`run.sh`, the harness, the report) |
 | `uat/cases`, `uat/tests/ingredients` | UAT.7 | Ingredient conformance and L4/L5 |
 | `uat/lite` | UAT.8 | The local rig |
-| `uat/scripts` | UAT.6 | The workflow's helpers: input checks, run id, runner address, test material, artifact allowlist, teardown check, janitor |
+| `uat/scripts` | UAT.6 | The workflow's helpers: input checks, run id, test material, artifact allowlist, teardown check, janitor |
 | `.github/workflows/uat.yml`, `uat-janitor.yml` | UAT.6 | The gate and the janitor |
 
 ## Prerequisites (once)
@@ -161,6 +164,7 @@ The inputs of the next two runs (Run 2, Run 3) are in [`RUNBOOK.md`](RUNBOOK.md)
 | `scenarios` | empty | Scenario ids of the tier, separated by spaces or commas (`C1 X4`), passed to `uat/tests/run.sh`. Ingredient ids (`I.file.managed`) go in an `ingredients` run of their own |
 | `hub_nodes` | `1` | k0s nodes per hub. `1` is the single-node run. `3` is the HA run (P24): `uat/tofu` gets `core_node_count=3`, `dmz_node_count=3` and `core_node_size=Standard_D4s_v5` (3 core nodes of D4s_v5, 3 DMZ nodes of D2s_v5, each hub behind load balancers; `uat/tofu/README.md`, "HA topology"), which needs 18 Dsv5 vCPU of quota |
 | `dispatch_flags` | `false` | `true` turns the fleet update flags on in the core hub (saasapi `SAASAPI_FLEET_UPDATE_DISPATCH_ENABLED`, farmer `IMAS_SELF_UPDATE_ENABLED`, through the chart values `saasapi.fleetUpdateDispatch.enabled` and `farmer.selfUpdate.enabled`) and runs L5; `false` leaves both off and L5 skips. Passed as `IMAS_UAT_DISPATCH_FLAGS=on\|off` to the core install and the tests. UAT only |
+| `ingress_cidrs` | empty | Who may reach the three ports open from outside the VNet (Bastion 443, core 443, Envoy on the DMZ). Empty: the Internet (`uat/tofu` `public_ingress=internet`), the UAT gate's default (owner, 2026-10-20, W5). Public IPv4 ranges, separated by spaces or commas (`a.b.c.d/N`, N from 8 to 32, no host bits, at most 50): the hardened mode (`public_ingress=cidrs`), only those ranges. They must cover every egress address of the caller: a GitHub hosted runner's address is not fixed, so the hardened mode suits a runner with known egress ranges. UAT only; recorded in the P3 security review |
 
 What the run does, in order (each step is a step of the job, so the failed one
 names the piece):
@@ -169,15 +173,15 @@ names the piece):
    Azure variables are set and are GUIDs; `release_tag` (and
    `upgrade_from_tag`) is a release tag that exists and has a published
    release, and `release_tag`'s release is GPG signed (`checksums.txt.sig`);
-   region, `keep_hours`, tier, `hub_nodes`, `dispatch_flags` and scenario ids
-   are well formed. Every
+   region, `keep_hours`, tier, `hub_nodes`, `dispatch_flags`, `ingress_cidrs`
+   and scenario ids are well formed. Every
    problem is reported at once, by name, and nothing is created.
 2. Tools: Go, Python, OpenTofu 1.11.5, Helm v4.3.0, k0sctl and kubectl at
    `uat/k0s` pins, Ansible with pywinrm.
-3. **Azure login** by OIDC (`azure/login`), then the **runner's public
-   address** (`runner-cidr.sh`: three services asked over IPv4, at least two
-   must answer and all must agree, and the address must be public), and a
-   fresh **run_id** (`run-id.sh`: 8 characters, a letter first).
+3. **Azure login** by OIDC (`azure/login`), then a fresh **run_id**
+   (`run-id.sh`: 8 characters, a letter first). The run no longer looks up
+   the runner's public address (W5): one lookup did not match the address
+   the Bastion saw later in the run.
 4. **tofu apply** (`uat/tofu`), state in the bootstrap account at
    `imas-uat/<run_id>.tfstate`. A plan and `uat/tofu/quota-check.sh` come
    first: the step fails before anything is created, naming the quota family
@@ -350,14 +354,16 @@ tofu init -reconfigure -backend-config=resource_group_name=imas-uat-state \
   -backend-config=key=imas-uat/$RUN.tfstate
 tofu output -json uat >/tmp/uat-$RUN.json
 (umask 077; tofu output -raw ssh_private_key >/tmp/uat-$RUN.key)
-# The NSGs admit only the runner's old address. Let yours in (this also moves
-# the Envoy and core 443 rules to you); keep the run's release_tag, region,
-# keep_hours, run_budget_hours and hub_nodes (all in the outputs artifact's
-# run.json). For an HA run (hub_nodes 3) also pass -var core_node_count=3
-# -var dmz_node_count=3 -var core_node_size=Standard_D4s_v5, or the apply
-# removes the extra nodes.
+# A run with the default ingress (public_ingress internet in run.json) already
+# admits you; skip this apply. A run with ingress_cidrs admits only those
+# ranges: add yours (this moves the Envoy, core 443 and Bastion 443 rules
+# together). Keep the run's release_tag, region, keep_hours, run_budget_hours
+# and hub_nodes (all in the outputs artifact's run.json). For an HA run
+# (hub_nodes 3) also pass -var core_node_count=3 -var dmz_node_count=3
+# -var core_node_size=Standard_D4s_v5, or the apply removes the extra nodes.
 tofu apply -var run_id=$RUN -var release_tag=<tag> -var region=<region> -var keep_hours=<hours> \
-  -var run_budget_hours=<3 or 7> -var runner_cidr=$(curl -4 -s https://api.ipify.org)/32
+  -var run_budget_hours=<3 or 7> -var public_ingress=cidrs \
+  -var 'public_ingress_cidrs=["<each of the run ranges>","<your address>/32"]'
 cd ../..
 uat/access/tunnels.sh open /tmp/uat-$RUN.json /tmp/uat-$RUN-access
 jq . /tmp/uat-$RUN-access/access.json      # local ports per VM

@@ -8,7 +8,10 @@
 # stateful: replies to an allowed flow need no rule of their own.
 
 locals {
-  runner = [var.runner_cidr]
+  # The source of every rule that lets the internet in (variables.tf,
+  # public_ingress): the service tag Internet, or the explicit ranges. Each
+  # internet-facing rule uses it, so they move together.
+  public_ingress = var.public_ingress == "internet" ? ["Internet"] : var.public_ingress_cidrs
 
   # Node to node inside an HA hub (P24): k0s's own ports (docs.k0sproject.io,
   # "Networking": etcd peer and client 2380 and 2379, the API 6443, the
@@ -45,7 +48,7 @@ locals {
     dmz = concat([
       { name = "AllowBastionSshKubeIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.dmz], ports = ["22", "6443"] },
       { name = "AllowSproutsEnvoyPrivateIn", priority = 110, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.tenants], dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
-      { name = "AllowRunnerEnvoyIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
+      { name = "AllowRunnerEnvoyIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.public_ingress, dst = [local.cidr.dmz], ports = [tostring(var.envoy_port)] },
       { name = "AllowCoreBusIn", priority = 140, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
       { name = "AllowFarmerApiOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.farmer_api_port)] },
       { name = "AllowAccountsStoreOut", priority = 110, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.accounts_store_port)] },
@@ -54,7 +57,7 @@ locals {
     core = concat([
       { name = "AllowBastionSshKubeIn", priority = 100, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.bastion], dst = [local.cidr.core], ports = ["22", "6443"] },
       { name = "AllowDmzFarmerApiIn", priority = 110, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.farmer_api_port)] },
-      { name = "AllowRunnerHttpsIn", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = [local.cidr.core], ports = [tostring(var.core_public_port)] },
+      { name = "AllowRunnerHttpsIn", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.public_ingress, dst = [local.cidr.core], ports = [tostring(var.core_public_port)] },
       { name = "AllowDmzAccountsStoreIn", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr.dmz], dst = [local.cidr.core], ports = [tostring(var.accounts_store_port)] },
       { name = "AllowBusOut", priority = 100, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr.core], dst = [local.cidr.dmz], ports = [tostring(var.bus_port)] },
     ], local.ha_rules.core, local.deny_tail)
@@ -66,12 +69,12 @@ locals {
       { name = "DenyDmzPublicOut", priority = 210, direction = "Outbound", access = "Deny", protocol = "*", src = ["*"], dst = [for ip in local.hub_public_ips.dmz : "${ip}/32"], ports = ["*"] },
     ], local.deny_tail)
 
-    # Azure's documented rules for AzureBastionSubnet, with the internet
-    # source narrowed to runner_cidr (Azure allows Internet or a list of
-    # public addresses there). Outbound to the VMs adds 5986 and 6443 to the
+    # Azure's documented rules for AzureBastionSubnet. The internet source of
+    # AllowHttpsInbound is public_ingress: Internet, as Azure documents it, by
+    # default, or the hardened list of public ranges (Azure allows either). Outbound to the VMs adds 5986 and 6443 to the
     # documented 22 and 3389 for native client tunnels on those ports.
     bastion = [
-      { name = "AllowHttpsInbound", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.runner, dst = ["*"], ports = ["443"] },
+      { name = "AllowHttpsInbound", priority = 120, direction = "Inbound", access = "Allow", protocol = "Tcp", src = local.public_ingress, dst = ["*"], ports = ["443"] },
       { name = "AllowGatewayManagerInbound", priority = 130, direction = "Inbound", access = "Allow", protocol = "Tcp", src = ["GatewayManager"], dst = ["*"], ports = ["443"] },
       { name = "AllowAzureLoadBalancerInbound", priority = 140, direction = "Inbound", access = "Allow", protocol = "Tcp", src = ["AzureLoadBalancer"], dst = ["*"], ports = ["443"] },
       { name = "AllowBastionHostCommunication", priority = 150, direction = "Inbound", access = "Allow", protocol = "*", src = ["VirtualNetwork"], dst = ["VirtualNetwork"], ports = ["8080", "5701"] },
