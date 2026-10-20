@@ -792,40 +792,30 @@ func TestCoreN1_PutNKeyProof(t *testing.T) {
 // stack: every render of one cook (the recipe and everything it includes,
 // rendered once to find the includes and once to build the steps) shares
 // farmer's per-cook budget (the chart's farmer.recipes.templateLimits,
-// 100000 range iterations; 10000 per render). A recipe including seven
-// recipes of 9000 iterations each passes every per-render limit and the
-// upload checks, but its cook (126000) runs out of budget: farmer logs the
-// budget error, sends the sprout nothing, and the item fails with
-// job_refused (P29). One including two of them (36000) applies.
+// 100000 range iterations; 10000 per render). Each part
+// (harness.RB1PartRecipe) ranges nine times over the 1000 characters of
+// printf "%01000d" 0, the widest printf farmer allows: 9000 iterations in
+// one render. A recipe including seven parts passes every per-render
+// limit and the upload checks, but its cook (7 parts x 2 renders x 9000 =
+// 126000) runs out of budget: farmer logs the budget error, sends the
+// sprout nothing, and the item fails with job_refused (P29). One including
+// two parts (36000) applies. harness's TestRB1RecipesAgainstCook renders
+// the same recipes with internal/cook's limits, without a cluster.
 func TestCoreRB1_CookRenderBudget(t *testing.T) {
 	sc := harness.Begin(t, "RB1")
 	needCore(sc)
 	f := ready(t, sc)
 	nonce := strings.ToLower(harness.Nonce(8))
-	const spin = `{{ range split (printf "%09000d" 0) "" }}{{ end }}`
 	var parts []string
-	for i := range 7 {
+	for i := range harness.RB1OverParts {
 		p := fmt.Sprintf("uat.rb1.%s.p%d", nonce, i)
-		upload(t, sc, 1, p, spin+"steps: {}\n")
+		upload(t, sc, 1, p, harness.RB1PartRecipe)
 		parts = append(parts, p)
-	}
-	mainRecipe := func(includes []string, file, text string) string {
-		return "include:\n  - " + strings.Join(includes, "\n  - ") + fmt.Sprintf(`
-steps:
-  uat rb1 marker:
-    file.content:
-{{- if eq (props "os") "windows" }}
-      - name: 'C:\Windows\Temp\%[1]s'
-{{- else }}
-      - name: /var/tmp/%[1]s
-{{- end }}
-      - text: "%[2]s"
-`, file, text)
 	}
 	overFile, inFile := "imas-uat-rb1-"+nonce+"-over.txt", "imas-uat-rb1-"+nonce+"-in.txt"
 	over, in := "uat.rb1."+nonce+".over", "uat.rb1."+nonce+".in"
-	upload(t, sc, 1, over, mainRecipe(parts, overFile, "rb1 over "+nonce))
-	upload(t, sc, 1, in, mainRecipe(parts[:2], inFile, "rb1 in "+nonce))
+	upload(t, sc, 1, over, harness.RB1MainRecipe(parts, overFile, "rb1 over "+nonce))
+	upload(t, sc, 1, in, harness.RB1MainRecipe(parts[:harness.RB1InParts], inFile, "rb1 in "+nonce))
 
 	f.EachSprout(t, sc, f.Sprouts(harness.InTenant(1)), func(t *testing.T, sc *harness.Scenario, sp harness.Sprout) {
 		ctx := ctxFor(t, 20*time.Minute)
