@@ -1,7 +1,8 @@
 name: Ansible
 
 # Lints and tests the customer-run Ansible under ansible/ (M.4):
-# ansible-lint, the imas_verify module's pytest unit tests, and the
+# ansible-lint, imas_verify's pytest tests (its Linux module, and its
+# Windows wait against a stub win_powershell), and the
 # molecule/default scenario, which builds imas-sprout from this checkout,
 # packages it with nfpm, publishes it to signed local apt/rpm repositories,
 # starts the stub farmer (ansible/molecule/stubfarmer), and converges the

@@ -1,0 +1,34 @@
+---
+# Runs the imas_verify role's Windows path on the controller, against the
+# stand-in win_powershell in collections/: see ../test_imas_verify_windows.py.
+- name: Run imas_verify as if on Windows
+  hosts: win
+  gather_facts: false
+  vars:
+    # Skips the role's fact gathering and takes its Windows path.
+    ansible_os_family: Windows
+    ansible_env:
+      ProgramData: 'C:\ProgramData'
+    imas_verify_config_file: "{{ playbook_dir }}/sprout.yml"
+  tasks:
+    - name: Verify, and record the outcome
+      block:
+        - name: Verify
+          ansible.builtin.include_role:
+            name: imas_verify
+        - name: Record a pass
+          ansible.builtin.set_fact:
+            _outcome: {passed: true, status: "{{ _imas_verify_status }}"}
+      rescue:
+        - name: Record the failure
+          ansible.builtin.set_fact:
+            _outcome:
+              passed: false
+              task: "{{ ansible_failed_task.name }}"
+              msg: "{{ ansible_failed_result.msg }}"
+      always:
+        - name: Write the outcome
+          ansible.builtin.copy:
+            content: "{{ _outcome | to_json }}"
+            dest: "{{ lookup('ansible.builtin.env', 'IMAS_STUB_OUTCOME') }}"
+            mode: "0644"

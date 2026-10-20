@@ -219,6 +219,15 @@ log lines (from `journalctl -u imas-sprout`, or
 - **no connection to its bus**: the host can't reach the bus addresses shown
   in the message, or the bus rejects it. Look for TLS or authorization
   errors in the log.
+- **WinRM to this host did not answer** (Windows): the sprout's state is
+  unknown, not "not connected". The first PowerShell calls on a freshly
+  installed VM can stall for minutes (module load, assembly compile, a
+  Defender scan), and a WinRM read timeout makes Ansible report the host
+  unreachable, which `until` never retries. So on Windows `imas_verify` warms
+  WinRM up and retries an unreachable attempt until `imas_verify_timeout`
+  has passed. If it still fails, check the VM is up and raise
+  `ansible_winrm_read_timeout_sec` (keep `ansible_winrm_operation_timeout_sec`
+  below it).
 
 The sprout doesn't report whether it is connected. `imas_verify` checks
 instead for an established TCP connection from the sprout's process to one
@@ -249,7 +258,7 @@ itself.
 
 ```sh
 cd ansible/
-python -m pytest tests/unit              # imas_verify's Linux module
+python -m pytest tests/unit              # imas_verify's Linux module, and its Windows wait against a stub
 go test ./molecule/stubfarmer/           # the test farmer
 molecule test                            # the Linux roles end to end, in Docker
 ```

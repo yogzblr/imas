@@ -306,8 +306,13 @@ def build(args) -> tuple[dict, dict, dict, str | None]:
             # by through the tunnel, and it is self-signed: not validated.
             # NTLM still encrypts the messages inside TLS.
             "ansible_winrm_server_cert_validation": "ignore",
-            "ansible_winrm_read_timeout_sec": 120,
-            "ansible_winrm_operation_timeout_sec": 100,
+            # The first PowerShell calls on a freshly installed Server Core
+            # VM (module load, assembly compile, a Defender scan of the new
+            # files) took over 120 s in UAT Run 2, and a read timeout makes
+            # Ansible report the host UNREACHABLE, which `until` never
+            # retries. pywinrm needs the operation timeout below the read one.
+            "ansible_winrm_read_timeout_sec": 300,
+            "ansible_winrm_operation_timeout_sec": 240,
         }
         if args.winrm_password_file and not args.winrm_password_dir:
             w["ansible_password"] = lookup_file(os.path.abspath(args.winrm_password_file))
