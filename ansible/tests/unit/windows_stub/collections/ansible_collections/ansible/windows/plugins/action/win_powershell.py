@@ -5,7 +5,8 @@ warm-up, its check, its log read), the outcomes listed in the JSON file
 $IMAS_STUB_SCENARIO: {"warmup": [...], "check": [...], "log": [...]}. The last
 outcome repeats. "unreachable" raises the error the winrm connection plugin
 raised in UAT Run 2; a check outcome is "connected", "enrolled" (enrolled and
-running, no bus connection) or "none" (not enrolled). Every call is appended
+running, no bus connection) or "none" (not enrolled); "check_seconds" makes
+each check take that long. Every call is appended
 to $IMAS_STUB_CALLS, one kind per line.
 """
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from ansible.errors import AnsibleConnectionFailure
 from ansible.plugins.action import ActionBase
@@ -35,7 +37,8 @@ class ActionModule(ActionBase):
         super().run(tmp, task_vars)
         kind = _kind(self._task.args.get("parameters") or {})
         with open(os.environ["IMAS_STUB_SCENARIO"], encoding="utf-8") as f:
-            outcomes = json.load(f).get(kind) or ["ok"]
+            scenario = json.load(f)
+        outcomes = scenario.get(kind) or ["ok"]
         calls_file = os.environ["IMAS_STUB_CALLS"]
         n = 0
         if os.path.exists(calls_file):
@@ -48,6 +51,7 @@ class ActionModule(ActionBase):
             raise AnsibleConnectionFailure(READ_TIMEOUT)
         result = {"changed": False}
         if kind == "check":
+            time.sleep(scenario.get("check_seconds", 0))
             enrolled = outcome in ("enrolled", "connected")
             result["result"] = {
                 "enrolled": enrolled,

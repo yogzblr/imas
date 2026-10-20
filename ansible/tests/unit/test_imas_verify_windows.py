@@ -101,3 +101,10 @@ def test_enrolled_but_not_connected(tmp_path):
     assert not out["passed"], out
     assert out["msg"][0].startswith("imas-sprout is enrolled and running, but has held no connection")
 
+
+
+def test_slow_checks_stop_at_the_deadline(tmp_path):
+    # retries alone would allow ceil(2 / 1) = 2 more checks of 3 s each.
+    out, calls, _ = run_verify(tmp_path, {"check": ["enrolled"], "check_seconds": 3}, timeout=2)
+    assert not out["passed"], out
+    assert calls.count("check") == 1, calls

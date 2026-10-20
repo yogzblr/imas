@@ -98,9 +98,13 @@
       }
   register: _imas_verify_ps
   # An unreachable attempt has no result, so it never counts as connected; it
-  # ends this task's retries, and the round after it carries on.
-  until: _imas_verify_ps.result.connected | default(false)
-  # As many checks as fit before the deadline; the first runs regardless.
+  # ends this task's retries, and the round after it carries on. `retries`
+  # bounds attempts, not time, so a check slower than the interval stops at
+  # the deadline too.
+  until: >-
+    (_imas_verify_ps.result.connected | default(false))
+    or now().timestamp() >= _imas_verify_deadline | float
+  # At most as many checks as fit before the deadline; the first runs regardless.
   retries: "{{ [0, ((_imas_verify_deadline | float - now().timestamp()) / imas_verify_interval | int) | round(0, 'ceil') | int] | max }}"
   delay: "{{ imas_verify_interval }}"
   # Reported by the fail task in main.yml, with the reason.
