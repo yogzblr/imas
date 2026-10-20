@@ -77,6 +77,11 @@ on:
         required: false
         default: false
         type: boolean
+      ingress_cidrs:
+        description: "Public IPv4 ranges allowed to Bastion 443, core 443 and Envoy (hardened); empty opens them to the Internet"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -141,6 +146,7 @@ jobs:
           SCENARIOS: ${{ inputs.scenarios }}
           HUB_NODES: ${{ inputs.hub_nodes }}
           DISPATCH_FLAGS: ${{ inputs.dispatch_flags }}
+          INGRESS_CIDRS: ${{ inputs.ingress_cidrs }}
         run: uat/scripts/check-inputs.sh
 
       # The run's working directories. STATE holds the run's files, several of
@@ -201,15 +207,6 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # The only internet source the run's network rules let in.
-      - name: Find the runner's public address
-        id: runner
-        run: |
-          set -euo pipefail
-          cidr=$(uat/scripts/runner-cidr.sh)
-          echo "runner_cidr=$cidr" >>"$GITHUB_OUTPUT"
-          echo "runner_cidr $cidr"
-
       - name: Generate run_id
         id: runid
         env:
@@ -222,7 +219,8 @@ jobs:
           SCENARIOS: ${{ steps.inputs.outputs.scenarios }}
           HUB_NODES: ${{ steps.inputs.outputs.hub_nodes }}
           DISPATCH_FLAGS: ${{ steps.inputs.outputs.dispatch_flags }}
-          RUNNER_CIDR: ${{ steps.runner.outputs.runner_cidr }}
+          PUBLIC_INGRESS: ${{ steps.inputs.outputs.public_ingress }}
+          PUBLIC_INGRESS_CIDRS: ${{ steps.inputs.outputs.public_ingress_cidrs }}
         run: |
           set -euo pipefail
           id=$(uat/scripts/run-id.sh)
@@ -232,7 +230,7 @@ jobs:
             --arg tier "$TIER" --argjson keep_hours "$KEEP_HOURS" --argjson run_budget_hours "$RUN_BUDGET_HOURS" \
             --arg upgrade_from_tag "$UPGRADE_FROM_TAG" \
             --arg scenarios "$SCENARIOS" --argjson hub_nodes "$HUB_NODES" --arg dispatch_flags "$DISPATCH_FLAGS" \
-            --arg runner_cidr "$RUNNER_CIDR" \
+            --arg public_ingress "$PUBLIC_INGRESS" --argjson public_ingress_cidrs "$PUBLIC_INGRESS_CIDRS" \
             --arg github_run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
             --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '$ARGS.named' >"$STATE/run.json"
@@ -250,7 +248,10 @@ jobs:
           TF_VAR_region: ${{ steps.inputs.outputs.region }}
           TF_VAR_keep_hours: ${{ steps.inputs.outputs.keep_hours }}
           TF_VAR_run_budget_hours: ${{ steps.inputs.outputs.run_budget_hours }}
-          TF_VAR_runner_cidr: ${{ steps.runner.outputs.runner_cidr }}
+          # Who may reach Bastion 443, core 443 and Envoy: the Internet unless
+          # ingress_cidrs names ranges (uat/tofu variables.tf, W5).
+          TF_VAR_public_ingress: ${{ steps.inputs.outputs.public_ingress }}
+          TF_VAR_public_ingress_cidrs: ${{ steps.inputs.outputs.public_ingress_cidrs }}
           TF_VAR_core_node_count: ${{ steps.inputs.outputs.core_node_count }}
           TF_VAR_dmz_node_count: ${{ steps.inputs.outputs.dmz_node_count }}
           CORE_NODE_SIZE: ${{ steps.inputs.outputs.core_node_size }}
@@ -516,7 +517,8 @@ jobs:
         env:
           TF_VAR_release_tag: ${{ steps.inputs.outputs.release_tag }}
           TF_VAR_region: ${{ steps.inputs.outputs.region }}
-          TF_VAR_runner_cidr: ${{ steps.runner.outputs.runner_cidr }}
+          TF_VAR_public_ingress: ${{ steps.inputs.outputs.public_ingress }}
+          TF_VAR_public_ingress_cidrs: ${{ steps.inputs.outputs.public_ingress_cidrs }}
           TF_VAR_core_node_count: ${{ steps.inputs.outputs.core_node_count }}
           TF_VAR_dmz_node_count: ${{ steps.inputs.outputs.dmz_node_count }}
         run: uat/tofu/destroy.sh "$RUN_ID"

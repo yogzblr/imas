@@ -285,7 +285,9 @@ Only curl and openssl touch the network (plus jq for the endpoints file and
 coreutils). OpenSSL 3 is required. Every probe connects to `dmz.public_ip`
 (or the FQDN, or `--connect ADDRESS`, for instance a load balancer's) and
 sends the FQDN as SNI and Host; curl never uses a proxy,
-because the DMZ admits only the runner's own address. The UAT CA is the only
+because the probe must come from the runner's own connection, the one the
+DMZ NSG is set for (`uat/tofu` `public_ingress`; the hardened mode admits
+only its ranges). The UAT CA is the only
 trust anchor: the system store is switched off for openssl (`-no-CAfile
 -no-CApath -no-CAstore`) and for curl (an empty `--capath`).
 

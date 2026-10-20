@@ -58,7 +58,8 @@ From the Shared contract, plus what the brief makes a variable.
 | `run_id` | required | 6 to 10 lowercase letters and digits |
 | `release_tag` | required | `vX.Y.Z` or `vX.Y.Z-rc.N`. Recorded as a tag only; the hub and enrolment briefs install from it |
 | `region` | `centralindia` | The owner confirms sizes and quota there |
-| `runner_cidr` | required | One `/32`, the only internet source let in (Envoy, 443 on core, 443 on the Bastion) |
+| `public_ingress` | `internet` | The source of the three rules that let the internet in: Envoy on the DMZ (`AllowRunnerEnvoyIn`), 443 on core (`AllowRunnerHttpsIn`) and 443 on the Bastion (`AllowHttpsInbound`). `internet`: the service tag `Internet`, so the rules follow whatever egress address the caller uses (owner, 2026-10-20, W5; the UAT gate's default). `cidrs`: only `public_ingress_cidrs`, the hardened mode. Replaces `runner_cidr` (one `/32`), which Run 2 proved does not follow the caller. UAT only; recorded in the P3 security review (`docs/security-review-pack.md` 3.7) |
+| `public_ingress_cidrs` | `[]` | With `public_ingress = "cidrs"`: 1 to 50 public IPv4 ranges, each `a.b.c.d/N` with N from 8 to 32 and no host bits set, none repeated. Must be empty with `internet`. They must cover every egress address of every caller (the runner, and you for a kept environment) |
 | `keep_hours` | `0` | 0 to 168. Above 0 the workflow skips the final destroy and the janitor deletes the group after `expires_at` |
 | `run_budget_hours` | `4` | `expires_at` = time of the first apply + `run_budget_hours` + `keep_hours`, so even a run whose destroy never ran is collected by the janitor |
 | `dmz_node_count`, `core_node_count` | `1`, `1` | 1, 3 or 5 (etcd needs an odd number). 1 is the single-node run, unchanged; the HA run (P24, owner 2026-10-13) sets 3 and 3 (workflow input `hub_nodes`) |
@@ -179,7 +180,7 @@ balancer in the single-node run (the HA run adds them, owner 2026-10-13; see
 |---|---|---|---|---|---|---|---|
 | dmz | in | 100 | AllowBastionSshKubeIn | `10.60.4.0/26` | dmz | TCP 22, 6443 | Management only through Bastion tunnels: SSH (k0sctl) and the Kubernetes API (helm, kubectl) |
 | dmz | in | 110 | AllowSproutsEnvoyPrivateIn | tenants `10.60.3.0/24` | dmz | TCP `envoy_port` (8443, owner's decision) | Owner: sprouts connect to nats via Envoy, on the DMZ private address (`dmz.<zone>`), and Envoy is node port 8443. Envoy serves `/v1/enroll`, `/v1/refresh`, `/files/` and `wss://` |
-| dmz | in | 130 | AllowRunnerEnvoyIn | `runner_cidr` | dmz | TCP `envoy_port` (8443, owner's decision) | The runner's Envoy checks (UAT.3a) and tests (X2) |
+| dmz | in | 130 | AllowRunnerEnvoyIn | `public_ingress` (Internet, or `public_ingress_cidrs`) | dmz | TCP `envoy_port` (8443, owner's decision) | The runner's Envoy checks (UAT.3a) and tests (X2) |
 | dmz | in | 140 | AllowCoreBusIn | core `10.60.2.0/24` | dmz | TCP `bus_port` (8442, owner's decision) | Owner: farmer and saasapi connect to farmerbus, through its node port 8442. Behind it is the bus client port 5406 (nats `bus.ports.client`), which they dial at `farmerbusurl`; core dials out, the bus never dials core |
 | dmz | in | 4000 | DenyVnetIn | VirtualNetwork | any | any | Overrides `AllowVnetInBound` |
 | dmz | in | 4096 | DenyAllIn | any | any | any | Everything else, including the Azure load balancer default |
@@ -188,7 +189,7 @@ balancer in the single-node run (the HA run adds them, owner 2026-10-13; see
 | dmz | out | 4000 | DenyVnetOut | any | VirtualNetwork | any | Overrides `AllowVnetOutBound`: the DMZ reaches nothing else in the VNet. Internet outbound (images) stays allowed |
 | core | in | 100 | AllowBastionSshKubeIn | `10.60.4.0/26` | core | TCP 22, 6443 | As for dmz |
 | core | in | 110 | AllowDmzFarmerApiIn | dmz `10.60.1.0/24` | core | TCP 5405 | Envoy to farmer's API (farmer `farmer.apiPort`; farmer NetworkPolicy "farmer in from the nats chart's Envoy") |
-| core | in | 120 | AllowRunnerHttpsIn | `runner_cidr` | core | TCP 443 | saasapi and Keycloak, from the runner only (Shared contract) |
+| core | in | 120 | AllowRunnerHttpsIn | `public_ingress` (Internet, or `public_ingress_cidrs`) | core | TCP 443 | saasapi and Keycloak, for the runner (Shared contract). Both check their own credentials; the source follows the caller (W5) |
 | core | in | 130 | AllowDmzAccountsStoreIn | dmz `10.60.1.0/24` | core | TCP `accounts_store_port` (9000) | The DMZ bus's account loader to RustFS's hostPort (see dmz out 110); the core NetworkPolicy admits the DMZ private address only, on that port |
 | core | in | 4000, 4096 | DenyVnetIn, DenyAllIn | | | | As for dmz. A sprout cannot open a connection to core |
 | core | out | 100 | AllowBusOut | core | dmz | TCP `bus_port` (8442, owner's decision) | farmer and saasapi to the bus node port (see dmz 140) |
@@ -215,7 +216,7 @@ assumed:
 2. **Envoy is node port 8443 (owner, 2026-10-06).** The owner: "The envoy
    should be behind an app gateway in production. For simplicity let's use
    8443 as node port. It should support both load balancer and node port",
-   and later "no load balancer". So the runner (`runner_cidr` only) and the
+   and later "no load balancer". So the runner (from `public_ingress`) and the
    sprouts reach Envoy on the DMZ host at 8443 (`envoy_port`; it is also the
    chart's `envoy.listenerPort`). The single-node run creates no load
    balancer or Application Gateway; the HA run puts Standard load balancers
@@ -242,12 +243,13 @@ assumed:
 ### AzureBastionSubnet
 
 An NSG **is attached**, with Azure's documented rules for that subnet
-(learn.microsoft.com, "Working with NSG access and Azure Bastion"), narrowed
-where Azure allows it:
+(learn.microsoft.com, "Working with NSG access and Azure Bastion"). Their
+internet source, `Internet`, is kept by default and narrowed only in the
+hardened mode (`public_ingress = "cidrs"`):
 
 | Dir | Prio | Rule | From | To | Port |
 |---|---|---|---|---|---|
-| in | 120 | AllowHttpsInbound | `runner_cidr` (Azure allows Internet or a list of public addresses) | any | TCP 443 |
+| in | 120 | AllowHttpsInbound | `public_ingress`: Internet (default, as Azure documents it), or `public_ingress_cidrs` (Azure allows a list of public addresses) | any | TCP 443 |
 | in | 130 | AllowGatewayManagerInbound | GatewayManager | any | TCP 443 |
 | in | 140 | AllowAzureLoadBalancerInbound | AzureLoadBalancer | any | TCP 443 |
 | in | 150 | AllowBastionHostCommunication | VirtualNetwork | VirtualNetwork | 8080, 5701 |
@@ -260,11 +262,24 @@ where Azure allows it:
 
 Azure checks this NSG when the Bastion is created. **The Bastion fails
 closed** (owner's decision, 2026-10-06): if Azure refuses the NSG as not
-compliant (for example because of the narrowed internet source), the apply
+compliant (for example because of a narrowed internet source), the apply
 fails; there is no switch to run the Bastion without an NSG (confirmed by the
-owner: "Bastion NSG stays fail-closed"). To reach a kept
-environment from your own machine, re-apply with your address as
-`runner_cidr`; that also moves the Envoy and core 443 rules to you.
+owner: "Bastion NSG stays fail-closed").
+
+**Why Internet by default (W5, owner 2026-10-20).** Until W5 this rule, the
+core 443 rule and the Envoy rule admitted one `/32`, `runner_cidr`, the
+address an echo service saw at the start of the run. UAT Run 2 (rc.15) failed
+at "Tenants and enrolment": the Bastion's 443 admitted only that `/32`, the
+runner's connections to it came from another egress address, and an NSG
+drop is silent, so the tunnels hung (Windows WinRM read timeouts, Linux
+UNREACHABLE). An allowlist of one address does not follow the caller. The
+Bastion's own authentication (Entra ID and the run's RBAC) and saasapi's,
+Keycloak's and Envoy's credentials still guard all three ports; the WinRM,
+firewall, tenants NSG and Bastion outbound rules are unchanged, and so is
+scenario X3 (a sprout cannot reach core). To reach a kept environment from
+your own machine: with the default, nothing to do; in the hardened mode, add
+your address to `public_ingress_cidrs` and re-apply, which moves all three
+rules.
 
 ### Private DNS
 
@@ -447,7 +462,9 @@ tofu init \
   -backend-config=storage_account_name=<from the bootstrap output> \
   -backend-config=container_name=tfstate \
   -backend-config=key=imas-uat/$RUN.tfstate
-VARS="-var run_id=$RUN -var release_tag=v0.1.0-rc.4 -var runner_cidr=<your address>/32"
+VARS="-var run_id=$RUN -var release_tag=v0.1.0-rc.4"
+# Hardened mode instead of the Internet default: add
+#   -var public_ingress=cidrs -var 'public_ingress_cidrs=["<your address>/32"]'
 # The HA run adds: -var core_node_count=3 -var dmz_node_count=3 -var core_node_size=Standard_D4s_v5
 tofu plan $VARS -out=run.tfplan && tofu show -json run.tfplan > plan.json
 ./quota-check.sh plan.json centralindia && rm -f plan.json
@@ -474,7 +491,7 @@ delete` on it, but only if the group carries `purpose=imas-uat` and that
 resource tagged `run_id=<run_id>` remains anywhere in the subscription, and
 exits 1 listing them if any does. `--skip-init` reuses an already initialised
 directory (same job as the apply). Destroy needs no real `release_tag` or
-`runner_cidr`; the script fills placeholders unless you set `TF_VAR_*`.
+the ingress variables; the script fills placeholders unless you set `TF_VAR_*`.
 
 Last resort, by hand:
 

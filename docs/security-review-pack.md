@@ -258,6 +258,25 @@ Accepted, Fix needed (with a note) or Not applicable.
    production chart defaults are off.
 5. Bastion tunnels and NSG rules added for the HA run (H1, H2) open only
    what the node-to-node ports need.
+6. UAT-only relaxation (W5, owner 2026-10-20, recorded after the P3 sign-off
+   of 2026-10-19): the run's three internet-facing allow rules (Bastion 443
+   `AllowHttpsInbound`, core 443 `AllowRunnerHttpsIn` for saasapi and
+   Keycloak, DMZ Envoy `AllowRunnerEnvoyIn`) take their source from
+   `uat/tofu`'s `public_ingress`, which defaults to the service tag
+   `Internet`. Before W5 they admitted one `/32` (`runner_cidr`); Run 2
+   showed that address does not follow the runner's egress, and the
+   Bastion's tunnels hung. What still guards each port: the Bastion's Entra
+   ID login and the run's RBAC, then the VM's SSH key or WinRM password;
+   saasapi's and Keycloak's tokens; Envoy's `jwt_authn` gate and the
+   enrolment key on `/v1/enroll`.
+   Unchanged: SSH, WinRM and the Kubernetes API reach the VMs only from
+   `AzureBastionSubnet`, the tenants NSG, the Bastion's outbound rules and
+   scenario X3. The hardened mode (`public_ingress = "cidrs"`, workflow
+   input `ingress_cidrs`) admits only named public ranges on all three. The
+   environment lives for one run (at most `run_budget_hours` plus
+   `keep_hours`, janitor-enforced). Production layouts do not use
+   `uat/tofu`; this is no precedent for them. Owner decision, recorded as
+   a UAT-only residual of P3 (status fragment 2026-10-20 `zz-W5.md`).
 
 ## 4. Decisions already made: do not reopen unless you disagree
 

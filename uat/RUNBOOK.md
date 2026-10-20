@@ -94,6 +94,7 @@ Actions, **UAT gate**, Run workflow on `main`, with:
 | `scenarios` | empty |
 | `hub_nodes` | `1` |
 | `dispatch_flags` | `true` |
+| `ingress_cidrs` | empty (Bastion 443, core 443 and Envoy open to the Internet, W5) |
 
 ```sh
 gh workflow run uat.yml --ref main -f release_tag=v0.1.0-rc.15 -f region=centralindia \

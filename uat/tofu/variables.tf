@@ -26,17 +26,46 @@ variable "region" {
   default     = "centralindia"
 }
 
-variable "runner_cidr" {
-  description = "The one /32 allowed in from the internet: Envoy on the DMZ, 443 on core and 443 on the Bastion."
+# Who may reach the run's three internet-facing ports: 443 on the Bastion
+# (the management tunnels), 443 on core (saasapi and Keycloak) and Envoy on
+# the DMZ. Owner, 2026-10-20 (W5): the UAT gate opens them to the Internet,
+# because the caller's egress address is not one fixed /32 (UAT Run 2: the
+# runner's address as an echo service saw it was not the address the Bastion
+# saw, so the tunnels hung). "cidrs" is the hardened mode, for a caller whose
+# egress ranges are known. UAT only; recorded in the P3 security review
+# (docs/security-review-pack.md, 3.7).
+variable "public_ingress" {
+  description = "Source of the three internet-facing allow rules (Bastion 443, core 443, DMZ Envoy): internet (default, the UAT gate) or cidrs (only public_ingress_cidrs)."
   type        = string
+  default     = "internet"
 
   validation {
-    condition = (
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/32$", var.runner_cidr)) &&
-      can(cidrhost(var.runner_cidr, 0)) &&
-      var.runner_cidr != "0.0.0.0/32"
-    )
-    error_message = "runner_cidr must be a single IPv4 address as a /32, for example 203.0.113.7/32."
+    condition     = contains(["internet", "cidrs"], var.public_ingress)
+    error_message = "public_ingress must be internet or cidrs."
+  }
+}
+
+variable "public_ingress_cidrs" {
+  description = "With public_ingress = cidrs: the public IPv4 ranges allowed in (1 to 50, each a.b.c.d/N with N from 8 to 32 and no host bits set). Must be empty with public_ingress = internet."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([for c in var.public_ingress_cidrs :
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/([89]|[12][0-9]|3[0-2])$", c)) &&
+      can(cidrhost(c, 0)) && try(cidrhost(c, 0) == split("/", c)[0], false)
+    ])
+    error_message = "public_ingress_cidrs: each entry must be an IPv4 range a.b.c.d/N, N from 8 to 32, with no host bits set (for example 203.0.113.0/24 or 203.0.113.7/32)."
+  }
+
+  validation {
+    condition     = length(var.public_ingress_cidrs) == length(distinct(var.public_ingress_cidrs)) && length(var.public_ingress_cidrs) <= 50
+    error_message = "public_ingress_cidrs: at most 50 entries, none repeated."
+  }
+
+  validation {
+    condition     = (var.public_ingress == "cidrs") == (length(var.public_ingress_cidrs) > 0)
+    error_message = "public_ingress_cidrs must be set (at least one range) when public_ingress is cidrs, and empty when it is internet."
   }
 }
 
@@ -216,7 +245,7 @@ variable "accounts_store_port" {
 }
 
 variable "core_public_port" {
-  description = "saasapi and Keycloak on the core host, from the runner only (Shared contract)."
+  description = "saasapi and Keycloak on the core host, reached from the source public_ingress names (Shared contract)."
   type        = number
   default     = 443
 }

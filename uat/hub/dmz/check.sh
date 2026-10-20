@@ -111,7 +111,8 @@ host=$DMZ_FQDN port=$DMZ_ENVOY_PORT
 base="https://$host:$port"
 # Connect to the public address while sending the FQDN as SNI and Host, so
 # the check needs no public DNS and still verifies the name. Never through a
-# proxy: the DMZ admits only the runner's own address (runner_cidr).
+# proxy: the runner's own connection is the one the DMZ NSG is set for
+# (uat/tofu public_ingress).
 curl_args=(-sS --http1.1 --noproxy '*' --max-time 20 --cacert "$ca_file" --capath "$tmp/capath")
 if [[ $DMZ_CONNECT_ADDR != "$host" ]]; then
 	curl_args+=(--resolve "$host:$port:$DMZ_CONNECT_ADDR")
