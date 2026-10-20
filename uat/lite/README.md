@@ -12,18 +12,35 @@ the Bastion tunnels give the gate: two clusters, four sprout machines, the
 UAT CA, name resolution, a `vmctl.sh`, and the files in the Shared contract's
 shapes.
 
-**Status (2026-10-19): the rig has run once, on the owner's WSL2 with Docker
-Desktop, on `v0.1.0-rc.14`** from the published charts and deb/rpm packages:
-smoke 10 passed; core 58 passed, 0 failed, 3 skipped (T3, S6's clean
-re-enrolment after a purge, X5), nothing missing, `RESULT: PASS`. So the
-systemd sprout containers on Docker Desktop's WSL2 backend, the published
-ports (host access `published`), the hub installs and enrolment have worked
-there. Not run yet: the resilience, lifecycle and ingredients tiers, and the
-W1 cases (B1, E1, D1, U1, N1, RB1, [below](#what-the-rig-proves-and-what-it-cannot)),
-which the owner's next rig run is the first to run. Every script is also
-checked without Docker by `tests/test_lite.sh` (304 checks, [Tests](#tests)),
-and the W1 cases run green against the in-memory fake stack
-(`uat/tests/README.md`).
+**Status (2026-10-20): the rig has run twice, on the owner's WSL2 with
+Docker Desktop**, from the published charts and deb/rpm packages.
+
+- `v0.1.0-rc.14` (2026-10-19): smoke 10 passed; core 58 passed, 0 failed,
+  3 skipped (T3, S6's clean re-enrolment after a purge, X5), nothing
+  missing, `RESULT: PASS`. So the systemd sprout containers on Docker
+  Desktop's WSL2 backend, the published ports (host access `published`),
+  the hub installs and enrolment have worked there.
+- `v0.1.0-rc.15` (2026-10-20), the first run of the W1 cases: core 65
+  passed, 2 failed, 4 skipped. Both failures were bugs in the cases, not
+  in the product, and are fixed in the tests (unit W2; the tests run from
+  the checkout, so rc.15 itself needs no new release): **E1** counted
+  every table of its inventory by `tenant_id`, which `saas.tenants` does
+  not have (`ERROR 1054 Unknown column 'tenant_id'`); `acceptance.sh` now
+  counts each table by its own key column (`id` for `saas.tenants` and
+  `farmer.pki_tenants`) and refuses a table it has none for. **RB1**'s
+  recipes used `printf "%09000d"`, over farmer's printf width cap of 1000,
+  so saasapi refused their upload (`recipe_template_failed`); each part
+  now ranges nine times over `printf "%01000d" 0`, and
+  `uat/tests/harness`'s `TestRB1RecipesAgainstCook` renders the exact
+  recipes with `internal/cook`'s own limits under `go test ./...`. The
+  next rig run is the first of the fixed E1 and RB1 on a deployed stack.
+
+Not run yet: the resilience, lifecycle and ingredients tiers (`run.sh`
+takes every tier `uat/tests/run.sh` takes: [Running other
+tiers](#running-other-tiers)). Every script is also checked without Docker
+by `tests/test_lite.sh` (318 checks, [Tests](#tests)), and the W1 cases
+(B1, E1, D1, U1, N1, RB1, [below](#what-the-rig-proves-and-what-it-cannot))
+run green against the in-memory fake stack (`uat/tests/README.md`).
 
 ## What the rig proves, and what it cannot
 
@@ -43,7 +60,7 @@ and the W1 cases run green against the in-memory fake stack
 |---|---|
 | `up.sh` | Brings the rig up: network, clusters, add-ons, CA, names, sprouts, the material files, the hub installs, enrolment. Every step is safe to repeat |
 | `down.sh` | Removes everything `up.sh` made, and nothing else |
-| `run.sh` | Brings the rig up if needed, runs `uat/tests/run.sh` for `smoke`, `core` or `all`, and reports, adding the Windows and X3 skips |
+| `run.sh` | Brings the rig up if needed, runs `uat/tests/run.sh` for any of its tiers (`smoke`, `core`, `resilience`, `ingredients`, `lifecycle`, `ha`, `all`), and reports, adding the Windows and X3 skips |
 | `vmctl.sh` | The Access interface's `vmctl.sh`, on Docker |
 | `write-material.sh` | Writes `uat.json`, `access.json`, `endpoints.json` and `harness.json` |
 | `lib.sh`, `config.env`, `versions.env` | Shared helpers, settings, version pins |
@@ -118,19 +135,20 @@ One rig per machine: the network, the cluster names, the host ports 443 and
 
 Use the latest release candidate, `<latest rc>`: `git tag --list
 'v0.1.0-rc.*' --sort=-v:refname | head -1`, published as the next section
-says. On 2026-10-19 that is `v0.1.0-rc.14`:
+says. On 2026-10-20 that is `v0.1.0-rc.15`:
 
 ```sh
-uat/lite/up.sh --release-tag <latest rc>         # e.g. v0.1.0-rc.14; 20 to 40 minutes the first time
+uat/lite/up.sh --release-tag <latest rc>         # e.g. v0.1.0-rc.15; 20 to 40 minutes the first time
 uat/lite/run.sh smoke
 uat/lite/run.sh core
 uat/lite/run.sh core C2 X4                       # some scenarios
 uat/lite/run.sh core B1 E1 D1 U1 N1 RB1          # the W1 cases
+uat/lite/run.sh resilience                       # L1 to L3
 uat/lite/down.sh
 ```
 
 `run.sh` brings the rig up itself when it is not up for the release:
-`uat/lite/run.sh --release-tag v0.1.0-rc.14 smoke` on a clean machine does
+`uat/lite/run.sh --release-tag v0.1.0-rc.15 smoke` on a clean machine does
 everything. The state (kubeconfigs, keys, the hub scripts' outputs, reports)
 goes to `~/.local/state/imas-uat-lite/<run_id>/` (`--state` to change it),
 outside the repository because it holds secrets. Reports are under
@@ -293,8 +311,11 @@ be restarted.
 ## run.sh
 
 ```sh
-uat/lite/run.sh [--state DIR] [--release-tag TAG] [--no-up] [--with-x3] smoke|core|all [ids...]
+uat/lite/run.sh [--state DIR] [--release-tag TAG] [--no-up] [--with-x3] TIER [ids...]
 ```
+
+`TIER` is any tier `uat/tests/run.sh` takes: `smoke`, `core`,
+`resilience`, `ingredients`, `lifecycle`, `ha` or `all`.
 
 It runs `uat/tests/run.sh` unchanged, with `IMAS_UAT_DIR` the state
 directory, `IMAS_UAT_VMCTL` this `vmctl.sh`, `IMAS_UAT_RELEASE_TAG`, and the
@@ -312,8 +333,27 @@ counted as passed:
   anyway (it will fail).
 
 `all` is two runs, because ingredient ids cannot share a run with the
-others: the static scenarios of every tier, then `ingredients`. The
-lifecycle and ingredients tiers need UAT.7. The exit status is
+others: the static scenarios of every tier, then `ingredients`. Every
+other tier without ids (`smoke`, `resilience`, `ingredients`, `lifecycle`,
+`ha`) holds no X3 and runs as `uat/tests/run.sh` runs it. The
+lifecycle and ingredients tiers need UAT.7.
+
+### Running other tiers
+
+The resilience tier is L1 to L3 (a sprout reboot, a farmer restart, a
+farmerbus and Envoy restart):
+
+```sh
+uat/lite/run.sh resilience                       # L1, L2 and L3
+uat/lite/run.sh resilience L2 L3                 # some of them
+uat/lite/run.sh all                              # every tier, then ingredients
+```
+
+On the rig L1's reboot is a container restart (systemd stops and starts,
+the kernel does not), and the WSL2 fallback's host sprout cannot be
+restarted at all (`vmctl.sh restart` exits 255, so L1 fails there, never
+passes). `ha` runs, and its scenarios skip, each saying it needs
+`hub_nodes` 3 (one node per hub here). The exit status is
 `uat/tests/run.sh`'s; the last line says `RIG RESULT: PASS on the Linux
 sprouts only` or `RIG RESULT: FAIL`.
 
@@ -376,7 +416,7 @@ No Go dependency is added (`lite_test.go` uses the standard library and
 ## Tests
 
 ```sh
-bash uat/lite/tests/test_lite.sh     # 304 checks, stubbed docker/kind/kubectl/helm
+bash uat/lite/tests/test_lite.sh     # 318 checks, stubbed docker/kind/kubectl/helm
 go test ./uat/lite/                  # the same, plus shellcheck, yamllint, harness parsing
 ```
 
@@ -393,7 +433,7 @@ and the stop points; direct and published host access; the host sprout
 fallback; `vmctl.sh` (exit codes, streams, quoting, hub kubeconfig, service
 commands, restart waits, timeouts, a hub that moved, a stopped container,
 the SSH path); `down.sh` (only the rig's things, repeatable, a network
-still in use); `run.sh` (the ids passed for each tier, X3 and Windows skip
+still in use); `run.sh` (every tier of `uat/tests/run.sh`, the ids passed for each, X3 and Windows skip
 lines, exit status, bringing the rig up). It also feeds the generated files
 to the **real readers, unchanged**: `uat/hub/dmz/lib.sh`'s
 `dmz_load_endpoints`, `uat/hub/core/lib/common.sh`'s `load_endpoints`, and
@@ -406,7 +446,7 @@ These tests run no Docker, kind or cluster. The real path is the owner's
 rig run (Status, above): on WSL2 with Docker Desktop it built the sprout
 images, created both clusters with the kubeadm patch, booted the systemd
 containers, installed `v0.1.0-rc.14` through the published ports and passed
-smoke and core. Docker Engine on a Linux host (host access `direct`) and
+smoke and core, and ran core again on `v0.1.0-rc.15` with the W1 cases. Docker Engine on a Linux host (host access `direct`) and
 the WSL2 fallback with the distribution as a sprout have not been run. The
 kind node image is pinned to the digest kind v0.30.0 lists for
 `v1.34.0` (`versions.env`).
