@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Stub tofu for uat/scripts/tests/scripts_test.sh: `tofu -chdir=DIR output`
+# as OpenTofu 1.11 answers it from state. $STUB_STATE/tofu_outputs.json is
+# the state's outputs in the shape of `tofu output -json`
+# ({NAME: {sensitive, type, value}}); an output missing from it is one tofu
+# did not store (a null output is not stored).
+set -u
+echo "tofu $*" >>"$STUB_STATE/calls.log"
+outputs="$STUB_STATE/tofu_outputs.json"
+case "${1:-}" in -chdir=*) shift ;; esac
+[ "${1:-}" = output ] || { echo "stub tofu: unexpected call: $*" >&2; exit 99; }
+shift
+mode=human
+case "${1:-}" in -json) mode=json; shift ;; -raw) mode=raw; shift ;; esac
+if [ $# -eq 0 ]; then
+  [ "$mode" = json ] || { echo "stub tofu: unexpected call: output $mode" >&2; exit 99; }
+  cat "$outputs"
+  exit 0
+fi
+name=$1
+if ! jq -e --arg n "$name" 'has($n)' "$outputs" >/dev/null; then
+  printf '\nError: Output "%s" not found\n\nThe output variable requested could not be found in the state file.\n' "$name" >&2
+  exit 1
+fi
+case "$mode" in
+  json) jq --arg n "$name" '.[$n].value' "$outputs" ;;
+  raw) jq -j --arg n "$name" '.[$n].value | if type == "string" then . else error("unsupported value for -raw") end' "$outputs" ;;
+  *) echo "stub tofu: unexpected call: output $name" >&2; exit 99 ;;
+esac

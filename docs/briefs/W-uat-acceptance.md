@@ -198,3 +198,39 @@ stack and `acceptance.sh`, and changes no product code.
   per-render cap of 8999 refuses a part.
 - **The unit table.** `docs/briefs/ORCHESTRATOR.md` had no W2 row; one is
   added (needs W1).
+
+## W3: the null object_store output (Run 2, rc.15)
+
+Run 2 of the Azure UAT gate (`hub_nodes` 1, `v0.1.0-rc.15`) applied
+`uat/tofu` (53 resources added) and then failed with `Error: Output
+"object_store" not found`. `uat/tofu/outputs.tf` gives `object_store` the
+value `null` when the core hub has one node, and OpenTofu 1.11 does not
+store a null output in state, so `tofu output -json object_store` fails.
+Only `hub_nodes` 1 is affected. W3 changes the workflow and its scripts, no
+product code.
+
+- The workflow's two output steps are `uat/scripts/tofu-outputs.sh outputs
+  STATE` and `tofu-outputs.sh credentials STATE SECRETS`. `object_store` is
+  read from the full `tofu output -json` (piped into jq, never written; it
+  holds the sensitive outputs too) as `if has("object_store") then
+  .object_store.value else null end`, so a missing or null output writes
+  `null` and the HA run's writes the object; anything else, `false`
+  included, fails the step.
+- The other outputs cannot be null: `uat` and `ha_node_names` are objects
+  for every node count, `ssh_private_key` and `windows_admin_password` are
+  generated strings, and `object_store_account_key` is `""` in the
+  single-node run (stored). They keep the direct call, which fails loudly if
+  one is missing. The account key is read only when `object_store.json` is
+  an object, and an empty key there fails the step.
+- `uat/scripts/tests/scripts_test.sh` runs the script against a stub
+  `tofu` (`tests/stubs/tofu`) whose state has no `object_store`, a null one
+  and the HA run's object.
+
+### Brief corrections (W3, 2026-10-20)
+
+- **The unit table.** `docs/briefs/ORCHESTRATOR.md` had no W3 row and this
+  file no W3 section; both are added (needs none).
+- **Where the test reads the steps.** The task asked for the fake `tofu` to
+  drive the workflow's steps. The steps' shell moved into
+  `uat/scripts/tofu-outputs.sh` so the test runs exactly the code the
+  workflow runs, rather than a copy of the YAML's `run:` blocks.

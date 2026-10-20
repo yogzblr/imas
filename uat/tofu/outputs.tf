@@ -92,8 +92,10 @@ output "windows_admin_password" {
 
 # The HA run's object store (object-store.tf): the Azure Blob account the
 # farmer chart's Versity Gateway serves as S3. null in the single-node run
-# (RustFS on the core hub). Not part of uat, whose top-level keys the Shared
-# contract fixes; the workflow writes it next to uat.json. No credential.
+# (RustFS on the core hub); OpenTofu does not store a null output, so
+# uat/scripts/tofu-outputs.sh reads it from the full tofu output -json. Not
+# part of uat, whose top-level keys the Shared contract fixes; the workflow
+# writes it next to uat.json. No credential.
 output "object_store" {
   description = "The HA run's Azure Blob account for Versity Gateway: account_name and blob_endpoint; null when the core hub has one node."
   value = local.object_store_enabled ? {

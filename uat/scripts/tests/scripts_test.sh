@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests the logic of uat/scripts against stubbed az, gh and curl
+# Tests the logic of uat/scripts against stubbed az, gh, curl and tofu
 # (tests/stubs). Nothing reaches Azure or GitHub.
 # Run: bash uat/scripts/tests/scripts_test.sh
 set -uo pipefail
@@ -698,6 +698,104 @@ new_state setup_fedfail
 touch "$STUB_STATE/fed_fail"
 srun --yes
 check "a failed federated credential: exit 1" test "$rc" -eq 1
+
+###############################################################################
+echo "# tofu-outputs.sh"
+# tofu_state CASE: the stub tofu's state outputs. CASE is missing (the
+# single-node run: object_store is null, so OpenTofu 1.11 does not store it),
+# null (a stored null) or object (the HA run).
+tofu_state() {
+  local os
+  case "$1" in
+    missing) os='{}' ;;
+    null) os='{"object_store": {"sensitive": false, "type": "dynamic", "value": null}}' ;;
+    object) os='{"object_store": {"sensitive": false, "type": ["object", {"account_name": "string", "blob_endpoint": "string"}], "value": {"account_name": "imasuatabc123", "blob_endpoint": "https://imasuatabc123.blob.core.windows.net/"}}}' ;;
+  esac
+  local key=""
+  [ "$1" = object ] && key=s3cr3tAccountKey==
+  jq -n --argjson os "$os" --arg key "$key" '{
+    uat: {sensitive: false, type: "dynamic", value: {run_id: "abc12345", resource_group: "imas-uat-abc12345"}},
+    ha_node_names: {sensitive: false, type: "dynamic", value: {core: [], dmz: []}},
+    ssh_private_key: {sensitive: true, type: "string", value: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"},
+    windows_admin_password: {sensitive: true, type: "string", value: "Wp4ss-word!"},
+    object_store_account_key: {sensitive: true, type: "string", value: $key}
+  } + $os' >"$STUB_STATE/tofu_outputs.json"
+}
+jqok() { jq -e "$@" >/dev/null; }
+# tout ARGS...: tofu-outputs.sh with the stubs on PATH, in a TOFU_DIR of its own.
+tout() {
+  out=$(cd "$STUB_STATE" && PATH="$stubs:$PATH" TOFU_DIR=tofu bash "$scripts/tofu-outputs.sh" "$@" 2>&1)
+  rc=$?
+}
+# The step the workflow had before (Run 2, hub_nodes 1, v0.1.0-rc.15): the
+# direct call fails on the output tofu did not store.
+new_state tofu-old
+tofu_state missing
+out=$(PATH="$stubs:$PATH" tofu -chdir=uat/tofu output -json object_store 2>&1)
+check "the old direct read of a null object_store fails as Run 2 did" grep -q 'Output "object_store" not found' <<<"$out"
+
+for c in missing null object; do
+  new_state "tofu-$c"
+  tofu_state "$c"
+  mkdir -p "$STUB_STATE/state" "$STUB_STATE/secrets"
+  tout outputs "$STUB_STATE/state"
+  check "outputs ($c object_store): exit 0" test "$rc" -eq 0
+  check "outputs ($c): uat.json is the uat output" jqok '.resource_group == "imas-uat-abc12345"' "$STUB_STATE/state/uat.json"
+  check "outputs ($c): ha_node_names.json is the ha_node_names output" jqok '. == {core: [], dmz: []}' "$STUB_STATE/state/ha_node_names.json"
+  if [ "$c" = object ]; then
+    check "outputs (object): object_store.json is the object" jqok '. == {account_name: "imasuatabc123", blob_endpoint: "https://imasuatabc123.blob.core.windows.net/"}' "$STUB_STATE/state/object_store.json"
+  else
+    check "outputs ($c): object_store.json is null" test "$(cat "$STUB_STATE/state/object_store.json")" = null
+  fi
+  check "outputs ($c): no sensitive value in the state directory" test -z "$(grep -rlE 'OPENSSH|Wp4ss|s3cr3t' "$STUB_STATE/state")"
+  check "outputs ($c): the tofu root is TOFU_DIR" test -z "$(grep -v '^tofu -chdir=tofu output' "$STUB_STATE/calls.log")"
+
+  : >"$STUB_STATE/calls.log"
+  tout credentials "$STUB_STATE/state" "$STUB_STATE/secrets"
+  check "credentials ($c): exit 0" test "$rc" -eq 0
+  check "credentials ($c): the SSH key, 0600" test "$(stat -c %a "$STUB_STATE/secrets/ssh_key")" = 600 -a "$(sed -n 2p "$STUB_STATE/secrets/ssh_key")" = b3BlbnNzaC1rZXktdjEAAAAA
+  check "credentials ($c): the WinRM password, 0600" test "$(stat -c %a "$STUB_STATE/secrets/winrm_password")" = 600 -a "$(cat "$STUB_STATE/secrets/winrm_password")" = 'Wp4ss-word!'
+  check "credentials ($c): the SSH key body is masked" grep -qx '::add-mask::b3BlbnNzaC1rZXktdjEAAAAA' <<<"$out"
+  check "credentials ($c): the password is masked" grep -qx '::add-mask::Wp4ss-word!' <<<"$out"
+  blob="$STUB_STATE/state/hub/core/sensitive/azure-blob"
+  if [ "$c" = object ]; then
+    check "credentials (object): the account key is read" grep -qx 'tofu -chdir=tofu output -raw object_store_account_key' "$STUB_STATE/calls.log"
+    check "credentials (object): the account key is masked" grep -qx '::add-mask::s3cr3tAccountKey==' <<<"$out"
+    check "credentials (object): account-key and account-name for Versity Gateway" test "$(cat "$blob/account-key")" = 's3cr3tAccountKey==' -a "$(cat "$blob/account-name")" = imasuatabc123
+    check "credentials (object): account-key is 0600" test "$(stat -c %a "$blob/account-key")" = 600
+  else
+    check "credentials ($c): the account key is not read" test -z "$(grep object_store_account_key "$STUB_STATE/calls.log")"
+    check "credentials ($c): no azure-blob directory" test ! -e "$blob"
+  fi
+done
+
+new_state tofu-bad-object
+tofu_state object
+jq '.object_store.value = {blob_endpoint: "x"}' "$STUB_STATE/tofu_outputs.json" >"$STUB_STATE/o" && mv "$STUB_STATE/o" "$STUB_STATE/tofu_outputs.json"
+mkdir -p "$STUB_STATE/state"
+tout outputs "$STUB_STATE/state"
+check "outputs: an object_store without account_name: exit 1, named" test "$rc" -eq 1 -a -n "$(grep 'neither null nor an object' <<<"$out")"
+jq '.object_store.value = false' "$STUB_STATE/tofu_outputs.json" >"$STUB_STATE/o" && mv "$STUB_STATE/o" "$STUB_STATE/tofu_outputs.json"
+tout outputs "$STUB_STATE/state"
+check "outputs: an object_store of false is not read as null: exit 1, named" test "$rc" -eq 1 -a -n "$(grep 'neither null nor an object' <<<"$out")"
+
+new_state tofu-no-uat
+tofu_state missing
+jq 'del(.uat)' "$STUB_STATE/tofu_outputs.json" >"$STUB_STATE/o" && mv "$STUB_STATE/o" "$STUB_STATE/tofu_outputs.json"
+mkdir -p "$STUB_STATE/state"
+tout outputs "$STUB_STATE/state"
+check "outputs: a missing uat output still fails" test "$rc" -ne 0
+
+new_state tofu-empty-key
+tofu_state object
+jq '.object_store_account_key.value = ""' "$STUB_STATE/tofu_outputs.json" >"$STUB_STATE/o" && mv "$STUB_STATE/o" "$STUB_STATE/tofu_outputs.json"
+mkdir -p "$STUB_STATE/state" "$STUB_STATE/secrets"
+tout outputs "$STUB_STATE/state"
+tout credentials "$STUB_STATE/state" "$STUB_STATE/secrets"
+check "credentials: an object_store with an empty account key: exit 1, named" test "$rc" -eq 1 -a -n "$(grep 'object_store_account_key is empty' <<<"$out")"
+
+tout bogus
+check "an unknown subcommand is a usage error" test "$rc" -eq 1 -a -n "$(grep usage <<<"$out")"
 
 ###############################################################################
 echo

@@ -306,40 +306,16 @@ jobs:
             fi
             exit 1
           done
-          tofu -chdir=uat/tofu output -json uat >"$STATE/uat.json"
+          # uat.json, ha_node_names.json (the VMs the HA tests stop) and
+          # object_store.json (the HA run's Azure Blob account; null in the
+          # single-node run, whose null output tofu does not store).
+          uat/scripts/tofu-outputs.sh outputs "$STATE"
           jq -e --arg rg "imas-uat-$RUN_ID" '.resource_group == $rg' "$STATE/uat.json" >/dev/null
-          # The VMs the HA tests stop (empty lists for a single-node hub).
-          tofu -chdir=uat/tofu output -json ha_node_names >"$STATE/ha_node_names.json"
-          # The HA run's Azure Blob account for Versity Gateway (null in the
-          # single-node run, which keeps RustFS). Name only; the key is below.
-          tofu -chdir=uat/tofu output -json object_store >"$STATE/object_store.json"
 
       # The per-run credentials, into 0600 files that are never uploaded. The
       # password is masked before it is used anywhere.
       - name: Fetch the run's credentials
-        run: |
-          set -euo pipefail
-          umask 077
-          tofu -chdir=uat/tofu output -raw ssh_private_key >"$SECRETS/ssh_key"
-          while IFS= read -r line; do
-            case "$line" in -----*) ;; ?????*) echo "::add-mask::$line" ;; esac
-          done <"$SECRETS/ssh_key"
-          pw=$(tofu -chdir=uat/tofu output -raw windows_admin_password)
-          echo "::add-mask::$pw"
-          printf '%s' "$pw" >"$SECRETS/winrm_password"
-          unset pw
-          # The HA run's storage account (uat/tofu object-store.tf): its name
-          # and key for Versity Gateway, where uat/hub/core/install.sh reads
-          # them (<state>/core/sensitive/azure-blob). The key is masked first.
-          if [ "$(jq -r 'type' "$STATE/object_store.json")" = object ]; then
-            blob="$STATE/hub/core/sensitive/azure-blob"
-            mkdir -p "$blob"
-            key=$(tofu -chdir=uat/tofu output -raw object_store_account_key)
-            echo "::add-mask::$key"
-            printf '%s' "$key" >"$blob/account-key"
-            unset key
-            jq -j .account_name "$STATE/object_store.json" >"$blob/account-name"
-          fi
+        run: uat/scripts/tofu-outputs.sh credentials "$STATE" "$SECRETS"
 
       - name: Azure CLI extensions (bastion, ssh)
         run: |
