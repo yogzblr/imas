@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yogzblr/imas/internal/migrations"
 	"github.com/yogzblr/imas/internal/tenantpurge"
 	"github.com/yogzblr/imas/uat/tests/harness/fakestack"
 )
@@ -102,6 +106,124 @@ func TestTenantDataSpec(t *testing.T) {
 	}
 }
 
+// Every table the E1 inventories name is counted by its tenant key
+// column (rig rc.15: saas.tenants has no tenant_id), and the column is
+// the one the migrations give it: id, the primary key, for a tenant's own
+// registry rows, which have no tenant_id; tenant_id for the rest.
+// acceptance.sh's tenant_key and the fake's are the same map.
+func TestInventoryKeyColumns(t *testing.T) {
+	const tid = "t_aaaaaaaaaaaaaaaa"
+	for _, spec := range []InventorySpec{TenantDataSpec(tid), TombstoneSpec(tid)} {
+		for _, table := range spec.Tables {
+			if InventoryKeyColumns[table] == "" {
+				t.Errorf("%s is inventoried but has no key column in InventoryKeyColumns", table)
+			}
+		}
+	}
+	if _, ok := InventoryKeyColumns["farmer.job_leases"]; ok {
+		t.Error("farmer.job_leases is keyed by name (pushall:<tenant_id>): no tenant key column counts it")
+	}
+
+	tables := map[string]migrationTable{}
+	for schemaName, set := range map[string]migrations.Set{"farmer": migrations.Farmer, "saas": migrations.Saas} {
+		for name, mt := range migrationTables(t, set) {
+			tables[schemaName+"."+name] = mt
+		}
+	}
+	for table, col := range InventoryKeyColumns {
+		mt, ok := tables[table]
+		switch {
+		case !ok:
+			t.Errorf("%s: no migration creates it", table)
+		case !mt.columns[col]:
+			t.Errorf("%s: keyed by %s, which it has no column of", table, col)
+		case col == "id" && (mt.columns["tenant_id"] || !mt.primaryID):
+			t.Errorf("%s: keyed by id, but it has a tenant_id column or id is not its primary key", table)
+		case col != "id" && col != "tenant_id":
+			t.Errorf("%s: key column %s is neither id nor tenant_id", table, col)
+		}
+	}
+	for _, table := range []string{"saas.tenants", "farmer.pki_tenants"} {
+		if InventoryKeyColumns[table] != "id" {
+			t.Errorf("%s is keyed by %q, want id", table, InventoryKeyColumns[table])
+		}
+	}
+
+	script := scriptTenantKey(t)
+	if !maps.Equal(script, InventoryKeyColumns) {
+		t.Errorf("acceptance.sh's tenant_key %v differs from InventoryKeyColumns %v", script, InventoryKeyColumns)
+	}
+	if fake := fakestack.TenantKeyColumns(); !maps.Equal(fake, InventoryKeyColumns) {
+		t.Errorf("fakestack's tenant_key %v differs from InventoryKeyColumns %v", fake, InventoryKeyColumns)
+	}
+}
+
+// migrationTable is what TestInventoryKeyColumns reads of one CREATE TABLE.
+type migrationTable struct {
+	columns   map[string]bool
+	primaryID bool
+}
+
+var (
+	createTableRe = regexp.MustCompile("(?is)CREATE TABLE(?: IF NOT EXISTS)?\\s+`?([a-z0-9_]+)`?\\s*\\((.*?)\\)\\s*ENGINE")
+	columnRe      = regexp.MustCompile("(?m)^\\s*`([a-z0-9_]+)`\\s")
+	addColumnRe   = regexp.MustCompile("(?i)ALTER TABLE\\s+`?([a-z0-9_]+)`?\\s+ADD COLUMN\\s+`?([a-z0-9_]+)`?")
+)
+
+// migrationTables reads every table a migration set creates, with its
+// columns (and any a later ALTER TABLE adds).
+func migrationTables(t *testing.T, set migrations.Set) map[string]migrationTable {
+	t.Helper()
+	out := map[string]migrationTable{}
+	err := fs.WalkDir(set.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".sql") {
+			return err
+		}
+		b, err := fs.ReadFile(set.FS(), path)
+		if err != nil {
+			return err
+		}
+		for _, m := range createTableRe.FindAllStringSubmatch(string(b), -1) {
+			mt := migrationTable{columns: map[string]bool{}, primaryID: strings.Contains(m[2], "PRIMARY KEY (`id`)")}
+			for _, c := range columnRe.FindAllStringSubmatch(m[2], -1) {
+				mt.columns[c[1]] = true
+			}
+			out[m[1]] = mt
+		}
+		for _, m := range addColumnRe.FindAllStringSubmatch(string(b), -1) {
+			if mt, ok := out[m[1]]; ok {
+				mt.columns[m[2]] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) == 0 {
+		t.Fatal("no table found in the migrations: the parser is broken")
+	}
+	return out
+}
+
+// scriptTenantKey reads acceptance.sh's tenant_key map.
+func scriptTenantKey(t *testing.T) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "hub", "core", AcceptanceScriptName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := regexp.MustCompile(`(?s)declare -A tenant_key=\((.*?)\n\)`).FindSubmatch(b)
+	if block == nil {
+		t.Fatal("acceptance.sh has no tenant_key map")
+	}
+	out := map[string]string{}
+	for _, m := range regexp.MustCompile(`\[([a-z_.]+)\]=([a-z_]+)`).FindAllSubmatch(block[1], -1) {
+		out[string(m[1])] = string(m[2])
+	}
+	return out
+}
+
 // The verbs against the fake stack's acceptance endpoint, as the fake
 // acceptance.sh forwards them: purge and the tombstone, the backlog, the
 // prune, the sweeps.
@@ -160,6 +282,18 @@ func TestCoreProbeAgainstFake(t *testing.T) {
 	}
 	if _, r, _ := f.API.GetBatch(c, tok, tid, id); !r.Is(404, "batch_not_found") {
 		t.Errorf("the backdated batch after the prune: %s", r)
+	}
+
+	// The inventory takes every table with a key column, and refuses one
+	// without, as acceptance.sh does.
+	all := InventorySpec{TenantID: tid, Tables: slices.Sorted(maps.Keys(InventoryKeyColumns))}
+	if got, err := f.Inventory(c, all); err != nil || got["saas.tenants"] != 1 || got["farmer.pki_tenants"] != 1 {
+		t.Errorf("inventory of every keyed table: %v, %v", got, err)
+	}
+	for _, table := range []string{"farmer.job_leases", "mysql.user"} {
+		if _, err := f.Inventory(c, InventorySpec{TenantID: tid, Tables: []string{table}}); err == nil {
+			t.Errorf("an inventory of %s is accepted", table)
+		}
 	}
 
 	// An unknown verb, and the purge of a tenant that isn't offboarded.

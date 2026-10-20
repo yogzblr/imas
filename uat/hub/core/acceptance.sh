@@ -26,8 +26,10 @@
 #          "transit": ["transit/nats-tsign-t_..."]}
 #       Prints {"counts": {"farmer.props": n, "objects.recipes": n,
 #       "valkey.heartbeat": n, "kv:<path>": 0|1, "transit:<mount>/<key>":
-#       0|1, ...}}. Tables are counted by tenant_id; buckets are recipes,
-#       jobs, sprout_jwts, accounts or logs (RustFS only).
+#       0|1, ...}}. Each table is counted by its tenant key column
+#       (tenant_key below: id for saas.tenants and farmer.pki_tenants,
+#       tenant_id for the rest; any other table is refused); buckets are
+#       recipes, jobs, sprout_jwts, accounts or logs (RustFS only).
 #   provisioning-jobs <tenant_id>
 #       {"jobs": [{"id", "type", "status"}]}, oldest first.
 #   props <tenant_id> <sprout_id>
@@ -102,6 +104,34 @@ want_args() {
 }
 
 # --- PXC ---------------------------------------------------------------------
+# tenant_key: the column holding the tenant ID in each table inventory
+# counts, from the migrations (internal/migrations): a tenant's own
+# registry rows (saas.tenants, farmer.pki_tenants) are keyed by id, every
+# other table by tenant_id. A table not here is refused: farmer.job_leases
+# is keyed by name (pushall:<tenant_id>), and nothing else is counted.
+# uat/tests/harness InventoryKeyColumns is the same map.
+declare -A tenant_key=(
+	[farmer.props]=tenant_id
+	[farmer.pki_nkeys]=tenant_id
+	[farmer.pki_revoked_nkeys]=tenant_id
+	[farmer.pki_cli_admin_keys]=tenant_id
+	[farmer.pki_sprout_box_keys]=tenant_id
+	[farmer.sprout_user_jwt]=tenant_id
+	[farmer.auth_users]=tenant_id
+	[farmer.auth_cli_box_keys]=tenant_id
+	[farmer.rbac_roles]=tenant_id
+	[farmer.rbac_user_roles]=tenant_id
+	[farmer.rbac_cohorts]=tenant_id
+	[farmer.job_status]=tenant_id
+	[farmer.pki_tenants]=id
+	[saas.asset_action_items]=tenant_id
+	[saas.asset_action_batches]=tenant_id
+	[saas.asset_links]=tenant_id
+	[saas.enrollment_keys]=tenant_id
+	[saas.tenant_update_policy]=tenant_id
+	[saas.provisioning_jobs]=tenant_id
+	[saas.tenants]=id
+)
 # sql <statements>: runs them as root in the first PXC node and prints the
 # rows tab-separated, without column names. The password goes from the
 # Secret over stdin.
@@ -270,7 +300,8 @@ inventory)
 		q=""
 		for t in "${tables[@]}"; do
 			[[ "$t" =~ ^(farmer|saas)\.[a-z_]+$ ]] || die "not a farmer or saas table: $t"
-			q+="SELECT '$t', COUNT(*) FROM $t WHERE tenant_id = '$tenant';"
+			[[ -n "${tenant_key[$t]:-}" ]] || die "no tenant key column known for $t (acceptance.sh's tenant_key)"
+			q+="SELECT '$t', COUNT(*) FROM $t WHERE ${tenant_key[$t]} = '$tenant';"
 		done
 		rows=$(sql "$q") || die "counting the tenant's rows failed"
 		counts=$(jq -c --arg rows "$rows" '. + ($rows | split("\n") | map(select(length > 0) | split("\t") | {(.[0]): (.[1] | tonumber)}) | add // {})' <<<"$counts")
