@@ -1,0 +1,4 @@
+---
+# A Windows sprout's config file, enrolled: what main.yml slurps.
+farmerinterface: dmz.uat.imas.internal
+farmerapiport: 8443

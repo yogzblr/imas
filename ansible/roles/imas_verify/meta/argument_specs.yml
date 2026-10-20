@@ -6,7 +6,8 @@ argument_specs:
       - Polls until the sprout has enrolled and holds an established connection to one of
         its bus addresses, and fails the host with the reason (not enrolled, service not
         running, or no bus connection) and the sprout's recent log if it doesn't within
-        imas_verify_timeout.
+        imas_verify_timeout. On Windows an attempt WinRM doesn't answer is retried within
+        the same time, and a host that never answers is reported as unreachable.
     options:
       imas_verify_timeout:
         type: int

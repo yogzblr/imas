@@ -1,0 +1,133 @@
+---
+# One round of the Windows wait, included by windows.yml and by itself: see
+# windows.yml for why.
+
+# Loads what the check below loads (CIM, and NetTCPIP's Get-NetTCPConnection,
+# asked about a process ID no process has), so the first slow call on a fresh
+# VM is this one. Cheap once warm.
+- name: Warm up WinRM and the PowerShell modules the check uses
+  ansible.windows.win_powershell:
+    parameters:
+      Service: "{{ imas_verify_service_name }}"
+    script: |
+      [CmdletBinding()]
+      param([string]$Service)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $null = Get-CimInstance Win32_Service -Filter "Name='$Service'"
+      $null = @(Get-NetTCPConnection -OwningProcess ([uint32]::MaxValue) -State Established -ErrorAction SilentlyContinue)
+  register: _imas_verify_warmup
+  # A failure here is the check's to report; this only absorbs the slow start.
+  failed_when: false
+  ignore_unreachable: true
+
+- name: Check the sprout is enrolled and connected to the bus
+  ansible.windows.win_powershell:
+    parameters:
+      Service: "{{ imas_verify_service_name }}"
+      UserJwtFile: "{{ _imas_verify_user_jwt_file }}"
+      BusUrlsFile: "{{ _imas_verify_bus_urls_file }}"
+      BusUrls: "{{ _imas_verify_bus_urls_pin }}"
+      LegacyBusUrl: "{{ _imas_verify_legacy_bus_url }}"
+      Hold: "{{ imas_verify_hold | int }}"
+    script: |
+      [CmdletBinding()]
+      param([string]$Service, [string]$UserJwtFile, [string]$BusUrlsFile, [string[]]$BusUrls = @(),
+            [string]$LegacyBusUrl, [int]$Hold)
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+      $defaultPorts = @{ nats = 4222; tls = 4222; wss = 443; ws = 80 }
+
+      # pki.ResolveSproutBusURLs: the busurls pin, else the nats_urls saved
+      # at enrollment, else farmerinterface:farmerbusport.
+      $urls = @($BusUrls | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+      $source = 'config'
+      if ($urls.Count -eq 0) {
+        $source = 'enrollment'
+        if (Test-Path -LiteralPath $BusUrlsFile) {
+          try { $urls = @(Get-Content -Raw -LiteralPath $BusUrlsFile | ConvertFrom-Json | Where-Object { $_ }) } catch { $urls = @() }
+        }
+      }
+      if ($urls.Count -eq 0 -and $LegacyBusUrl.Trim(':')) { $urls = @($LegacyBusUrl); $source = 'legacy' }
+      if ($urls.Count -eq 0) { $source = 'none' }
+
+      $endpoints = @(foreach ($u in $urls) {
+        $s = if ($u -match '://') { $u } else { "nats://$u" }
+        $uri = $null
+        if ([Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$uri) -and $uri.Host) {
+          $port = if ($uri.Port -gt 0) { $uri.Port } else { $defaultPorts[$uri.Scheme.ToLowerInvariant()] }
+          if ($port) {
+            $ips = @(try { [Net.Dns]::GetHostAddresses($uri.Host) | ForEach-Object { $_.ToString() } } catch { })
+            [pscustomobject]@{ host = $uri.Host; port = [int]$port; ips = $ips }
+          }
+        }
+      })
+
+      $enrolled = Test-Path -LiteralPath $UserJwtFile
+      $svc = Get-CimInstance Win32_Service -Filter "Name='$Service'"
+      $active = [bool]($svc -and $svc.State -eq 'Running')
+      $procId = if ($svc) { [int]$svc.ProcessId } else { 0 }
+
+      function Get-BusConnections {
+        @(Get-NetTCPConnection -OwningProcess $procId -State Established -ErrorAction SilentlyContinue |
+          Where-Object {
+            $c = $_
+            @($endpoints | Where-Object {
+              $c.RemotePort -eq $_.port -and ($_.ips.Count -eq 0 -or $_.ips -contains ($c.RemoteAddress -replace '^::ffff:', ''))
+            }).Count -gt 0
+          } | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)>$($_.RemoteAddress):$($_.RemotePort)" })
+      }
+
+      $conns = @()
+      $connected = $false
+      if ($enrolled -and $active -and $procId -and $endpoints.Count) {
+        $first = Get-BusConnections
+        $conns = $first
+        if ($first.Count) {
+          Start-Sleep -Seconds ([Math]::Max($Hold, 0))
+          $later = Get-BusConnections
+          $connected = @($first | Where-Object { $later -contains $_ }).Count -gt 0
+        }
+      }
+
+      $Ansible.Result = @{
+        enrolled = $enrolled; active = $active; pid = $procId
+        bus_urls = $urls; bus_urls_source = $source
+        endpoints = @($endpoints | ForEach-Object { @{ host = $_.host; port = $_.port } })
+        connections = $conns; connected = $connected
+      }
+  register: _imas_verify_ps
+  # An unreachable attempt has no result, so it never counts as connected; it
+  # ends this task's retries, and the round after it carries on. `retries`
+  # bounds attempts, not time, so a check slower than the interval stops at
+  # the deadline too.
+  until: >-
+    (_imas_verify_ps.result.connected | default(false))
+    or now().timestamp() >= _imas_verify_deadline | float
+  # At most as many checks as fit before the deadline; the first runs regardless.
+  retries: "{{ [0, ((_imas_verify_deadline | float - now().timestamp()) / imas_verify_interval | int) | round(0, 'ceil') | int] | max }}"
+  delay: "{{ imas_verify_interval }}"
+  # Reported by the fail task in main.yml, with the reason.
+  failed_when: false
+  ignore_unreachable: true
+  when: _imas_verify_warmup is not unreachable
+
+- name: Note whether WinRM answered
+  ansible.builtin.set_fact:
+    _imas_verify_winrm_error: >-
+      {{ _imas_verify_warmup.msg | default('') if _imas_verify_warmup is unreachable
+         else _imas_verify_ps.msg | default('') if _imas_verify_ps is unreachable else '' }}
+
+- name: Try again while there is time
+  when:
+    - _imas_verify_winrm_error | length > 0
+    - now().timestamp() < _imas_verify_deadline | float
+  block:
+    # On the controller: the host may not answer.
+    - name: Wait before the next round
+      ansible.builtin.wait_for:
+        timeout: "{{ imas_verify_interval | int }}"
+      delegate_to: localhost
+
+    - name: Wait for the sprout again
+      ansible.builtin.include_tasks: windows_round.yml

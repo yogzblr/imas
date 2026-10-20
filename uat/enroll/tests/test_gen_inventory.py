@@ -233,6 +233,23 @@ class TestInventory(Base):
         self.assertEqual(win["ansible_password"], "{{ lookup('ansible.builtin.file', '%s') }}" % self.winrm)
         self.assertIs(win["ansible_become"], False)
 
+    def test_winrm_timeouts(self):
+        # Read as text, so it runs without PyYAML too. A first call on a
+        # fresh Windows VM outlasted 120 s (UAT Run 2); pywinrm refuses an
+        # operation timeout that is not below the read timeout.
+        self.run_gen()
+        text = self.read("group_vars/conn_winrm.yml")
+        values = {}
+        for line in text.splitlines():
+            key, _, value = line.partition(":")
+            if key.startswith("ansible_winrm_") and key.endswith("_timeout_sec"):
+                values[key] = int(value)
+        self.assertEqual(
+            values,
+            {"ansible_winrm_read_timeout_sec": 300, "ansible_winrm_operation_timeout_sec": 240},
+        )
+        self.assertLess(values["ansible_winrm_operation_timeout_sec"], values["ansible_winrm_read_timeout_sec"])
+
     def test_winrm_password_dir(self):
         d = os.path.join(self.tmp, "winrm")
         os.makedirs(d)

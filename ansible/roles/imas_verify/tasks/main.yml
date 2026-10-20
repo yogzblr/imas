@@ -55,7 +55,14 @@
   vars:
     _s: "{{ _imas_verify_status }}"
     _imas_verify_reason: >-
-      {%- if not _s.enrolled | default(false) -%}
+      {%- if _s.unreachable | default(false) -%}
+      {{ [
+        'WinRM to this host did not answer, so whether imas-sprout enrolled and connected is unknown.',
+        'The last attempt failed with: ' ~ _s.msg,
+        'imas_verify retried for ' ~ imas_verify_timeout ~ 's. Check that the host is up and that WinRM answers'
+          ~ ' (ansible_winrm_read_timeout_sec, ansible_winrm_operation_timeout_sec).'
+      ] }}
+      {%- elif not _s.enrolled | default(false) -%}
       {{ [
         'imas-sprout has not enrolled after ' ~ imas_verify_timeout ~ 's (no ' ~ _imas_verify_user_jwt_file ~ ').',
         'Farmer answers every rejected enrollment with the same "enrollment_failed", so check each of:',
