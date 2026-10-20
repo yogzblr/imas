@@ -135,9 +135,13 @@ Shared contract fixes `uat`'s top-level keys; the workflow writes it to
 A third, `object_store`, names the HA run's Azure Blob account
 (`object-store.tf`): `{"account_name": "imasuat<run_id>", "blob_endpoint":
 "https://imasuat<run_id>.blob.core.windows.net/"}`, or `null` when the core
-hub has one node (the single-node run keeps RustFS on core). The workflow
-writes the name, with the key below, to the files `uat/hub/core/install.sh`
-reads (`<state>/core/sensitive/azure-blob/`).
+hub has one node (the single-node run keeps RustFS on core). OpenTofu does
+not store a null output in state, so in the single-node run `tofu output
+object_store` fails with `Output "object_store" not found`;
+`uat/scripts/tofu-outputs.sh` reads it from the full `tofu output -json`
+and writes `null` for a missing or null output. The workflow writes the
+name, with the key below, to the files `uat/hub/core/install.sh` reads
+(`<state>/hub/core/sensitive/azure-blob/`).
 
 Credentials are not in `uat`. Separate outputs hold them, all
 `sensitive`, so `tofu output` and plans print `(sensitive value)`. The owner

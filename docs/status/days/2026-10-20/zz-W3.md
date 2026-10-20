@@ -1,0 +1,5 @@
+change: W3: the UAT workflow reads a null tofu output without failing. Run 2 (`hub_nodes` 1, `v0.1.0-rc.15`) applied `uat/tofu` (53 resources added) and then failed with `Output "object_store" not found`: `object_store` is null in the single-node run and OpenTofu 1.11 does not store a null output. The output and credential steps are now `uat/scripts/tofu-outputs.sh`, which reads `object_store` from the full `tofu output -json` (`.object_store.value // null`, piped, never written), so a missing or null output writes `null` and the HA run's the object; the account key is read only for an object. The other outputs cannot be null. `uat/scripts/tests/scripts_test.sh` runs it against a stub `tofu` (no output, null, object), and the fix was checked against a real OpenTofu 1.11.5 state. No product code.
+---
+item: P1
+action: update
+next-append: **W3 (2026-10-20):** Run 2 (`hub_nodes` 1, rc.15) stopped after tofu apply on `Output "object_store" not found` (a null output is not stored); fixed in the workflow (`uat/scripts/tofu-outputs.sh`). Run 2 is owed again.

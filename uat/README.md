@@ -186,8 +186,9 @@ names the piece):
    (a retry plans and checks again). The per-run SSH key and Windows password go to
    0600 files on the runner, masked in the log; `uat.json`,
    `ha_node_names.json` (the VMs the HA tests stop) and `object_store.json`
-   (the HA run's Azure Blob account, `null` otherwise) go to the run's state
-   directory. On the HA run the account's name and key (masked) go to
+   (the HA run's Azure Blob account, `null` otherwise, also when tofu did
+   not store the null output) go to the run's state directory
+   (`uat/scripts/tofu-outputs.sh`). On the HA run the account's name and key (masked) go to
    `<state>/hub/core/sensitive/azure-blob/`, which the core install turns into
    Versity Gateway's credential Secret.
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
