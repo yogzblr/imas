@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"regexp"
 	"sort"
@@ -338,6 +339,14 @@ func (s *Stack) acceptanceVerb(verb string, args []string, body []byte) (any, er
 		if err := json.Unmarshal(body, &spec); err != nil || !accTenantRe.MatchString(spec.TenantID) {
 			return nil, fmt.Errorf("the inventory spec has no tenant_id")
 		}
+		for _, t := range spec.Tables {
+			if !accTableRe.MatchString(t) {
+				return nil, fmt.Errorf("not a farmer or saas table: %s", t)
+			}
+			if accTenantKey[t] == "" {
+				return nil, fmt.Errorf("no tenant key column known for %s (acceptance.sh's tenant_key)", t)
+			}
+		}
 		return map[string]any{"counts": s.inventory(spec.TenantID, spec.Tables, spec.Objects, spec.Valkey, spec.KV, spec.Transit)}, nil
 	case "provisioning-jobs":
 		tid, err := tenant(0)
@@ -508,6 +517,41 @@ func (s *Stack) hostProps(tid, sid string) {
 			s.setProps(tid, sid, map[string]string{"os": goos, "arch": "amd64", "hostname": h.VM, "sprout_version": "v" + h.Version}, time.Now().Add(5*time.Minute))
 		}
 	}
+}
+
+// accTableRe is acceptance.sh's check on an inventory table's name.
+var accTableRe = regexp.MustCompile(`^(farmer|saas)\.[a-z_]+$`)
+
+// accTenantKey is acceptance.sh's tenant_key: the column holding the
+// tenant ID in each table inventory counts (harness InventoryKeyColumns;
+// its test keeps the three equal). A table not here is refused.
+var accTenantKey = map[string]string{
+	"farmer.props":               "tenant_id",
+	"farmer.pki_nkeys":           "tenant_id",
+	"farmer.pki_revoked_nkeys":   "tenant_id",
+	"farmer.pki_cli_admin_keys":  "tenant_id",
+	"farmer.pki_sprout_box_keys": "tenant_id",
+	"farmer.sprout_user_jwt":     "tenant_id",
+	"farmer.auth_users":          "tenant_id",
+	"farmer.auth_cli_box_keys":   "tenant_id",
+	"farmer.rbac_roles":          "tenant_id",
+	"farmer.rbac_user_roles":     "tenant_id",
+	"farmer.rbac_cohorts":        "tenant_id",
+	"farmer.job_status":          "tenant_id",
+	"farmer.pki_tenants":         "id",
+	"saas.asset_action_items":    "tenant_id",
+	"saas.asset_action_batches":  "tenant_id",
+	"saas.asset_links":           "tenant_id",
+	"saas.enrollment_keys":       "tenant_id",
+	"saas.tenant_update_policy":  "tenant_id",
+	"saas.provisioning_jobs":     "tenant_id",
+	"saas.tenants":               "id",
+}
+
+// TenantKeyColumns returns a copy of the fake's acceptance.sh tenant_key
+// map, for the harness test that keeps it equal to the script's.
+func TenantKeyColumns() map[string]string {
+	return maps.Clone(accTenantKey)
 }
 
 // inventory counts a tenant's data the way acceptance.sh does; s.mu is held.

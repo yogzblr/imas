@@ -159,3 +159,42 @@ built that way:
   the systemd containers on Docker Desktop and the published ports worked
   there. The kind node image is pinned to the digest kind v0.30.0 lists.
   `test_lite.sh` has 304 checks.
+
+## W2: the two failures of the rc.15 rig run
+
+The owner's rig run on `v0.1.0-rc.15` (2026-10-20, core 65 pass, 2 fail,
+4 skip) was the first of the W1 cases on a deployed stack. Both failures
+were bugs in the cases; W2 fixes them in the tests, the harness, the fake
+stack and `acceptance.sh`, and changes no product code.
+
+- **E1.** `acceptance.sh inventory` counted every table `WHERE tenant_id =`,
+  but `saas.tenants` and `farmer.pki_tenants` are keyed by `id` (the
+  migrations; the tombstone's tables come from `internal/tenantpurge`
+  KeepTables). It now counts each table by its key column from one explicit
+  map (`tenant_key`), refuses a table not in it (`farmer.job_leases` is
+  keyed by name, `pushall:<tenant_id>`) and keeps the
+  `^(farmer|saas)\.[a-z_]+$` check. `harness.InventoryKeyColumns` is the
+  same map; its test checks it against the migrations, the script and the
+  fake stack.
+- **RB1.** The parts used `printf "%09000d" 0`, over farmer's printf width
+  cap of 1000 (`internal/cook` maxFormatWidth), so the upload was refused
+  (`recipe_template_failed`). Each part now ranges nine times over
+  `split (printf "%01000d" 0) ""` (`harness.RB1PartRecipe`), and
+  `TestRB1RecipesAgainstCook` renders the exact recipes with the cook
+  package's limits, without a cluster.
+- `uat/lite/run.sh` takes every tier `uat/tests/run.sh` takes, so
+  `uat/lite/run.sh resilience` runs L1 to L3.
+
+### Brief corrections (W2, 2026-10-20)
+
+- **RB1's arithmetic.** The task said "about 9009 iterations per render".
+  The range guard charges each range the length of its list
+  (`internal/cook` farmercook.go), so a part is exactly 9 x 1000 = 9000
+  iterations a render: under the 10000 per render
+  (`DefaultMaxRangeIterations`); a cook renders each recipe twice, so seven
+  parts cost 126000, over the per-cook 100000
+  (`DefaultCookMaxRangeIterations`), and two cost 36000, inside it. The
+  unit test checks each number with the real limits, including that a
+  per-render cap of 8999 refuses a part.
+- **The unit table.** `docs/briefs/ORCHESTRATOR.md` had no W2 row; one is
+  added (needs W1).

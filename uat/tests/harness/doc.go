@@ -50,13 +50,15 @@
 //     VMCtl.StopVM and StartVM stop and start a hub node.
 //   - Inside the core hub (the W1 cases): Fleet.CoreProbe (acceptance.go)
 //     runs uat/hub/core/acceptance.sh, with typed wrappers for the operator
-//     purge, the tenant inventory (TenantDataSpec, from
-//     internal/tenantpurge), backdating rows, restarts, sweeps, objects,
+//     purge, the tenant inventory (TenantDataSpec and TombstoneSpec, from
+//     internal/tenantpurge; each table counted by its InventoryKeyColumns
+//     column), backdating rows, restarts, sweeps, objects,
 //     Valkey keys, props and job status; Enrolment.ConnectThroughEnvoy
 //     and its sealed, forged and plaintext facts and step events
 //     (sproutbus.go) are a sprout on the bus; NKeyNonce, PutNKey and
 //     NKeySubmission (putnkey.go) are a standalone farmer's legacy NKey
-//     registration.
+//     registration; RB1PartRecipe and RB1MainRecipe (renderbudget.go)
+//     are RB1's recipes, rendered by internal/cook in a unit test.
 //   - Scenario (scenario.go): failure messages of the form
 //     "[C1 os=ubuntu tenant=1 vm=t1-ubuntu step=wait for the batch] ...",
 //     and subtest names (t1, t1-ubuntu) that uat/tests/uatreport turns into

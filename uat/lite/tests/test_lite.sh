@@ -107,7 +107,8 @@ t_usage() {
 	check "nothing was created by a usage error" test ! -e "$S"
 	check "no docker call on a usage error" hasnt "$STUB_LOG" "docker network"
 	rc_is 2 "$LITE/run.sh"
-	rc_is 2 "$LITE/run.sh" resilience
+	rc_is 2 "$LITE/run.sh" bogus
+	check "run.sh names the tiers it takes" has "$T/err" "smoke, core, resilience, ingredients, lifecycle, ha or all"
 	rc_is 2 "$LITE/run.sh" --release-tag latest core
 	rc_is 2 "$LITE/run.sh" --bogus core
 	rc_is 2 "$LITE/run.sh" core
@@ -543,6 +544,17 @@ t_run() {
 	args=$(grep '^tests-run all ' "$STUB_LOG")
 	check "all: static ids without X3" bash -c "[[ '$args' == *' L1 '* && '$args' == *' R6 '* && '$args' != *' X3 '* && '$args' != *'I.'* ]]"
 	check "all: then the ingredients tier" grep -qx 'tests-run ingredients' "$STUB_LOG"
+
+	local t
+	for t in resilience ingredients lifecycle ha; do
+		: >"$STUB_LOG"
+		rc_is 0 "$LITE/run.sh" "$t"
+		check "$t runs the tier as is" test "$(grep '^tests-run ' "$STUB_LOG")" = "tests-run $t"
+		check "no X3 line for $t" bash -c "! grep -q 'SKIP   X3' '$T/out'"
+	done
+	: >"$STUB_LOG"
+	rc_is 0 "$LITE/run.sh" resilience L1
+	check "resilience ids pass through" test "$(grep '^tests-run ' "$STUB_LOG")" = "tests-run resilience L1"
 
 	: >"$STUB_LOG"
 	rc_is 0 "$LITE/run.sh" --with-x3 core

@@ -136,7 +136,7 @@ func (s *Stack) recipesRoute(w http.ResponseWriter, r *http.Request, claims map[
 			return
 		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if code, msg := checkRecipe(string(body)); code != "" {
+		if code, msg := CheckRecipe(string(body)); code != "" {
 			writeErr(w, 422, code, msg)
 			return
 		}
@@ -159,14 +159,22 @@ func (s *Stack) recipesRoute(w http.ResponseWriter, r *http.Request, claims map[
 	}
 }
 
-// checkRecipe is a small subset of saasapi's upload checks.
-func checkRecipe(body string) (string, string) {
+// CheckRecipe is a small subset of saasapi's upload checks: the error
+// code and message it refuses body with, or two empty strings.
+func CheckRecipe(body string) (string, string) {
 	if strings.TrimSpace(body) == "" {
 		return "recipe_empty", "the recipe is empty"
 	}
 	for _, f := range []string{"env", "call", "html", "js", "template", "define", "block"} {
 		if regexp.MustCompile(`\{\{-?\s*` + f + `\b`).MatchString(body) {
 			return "recipe_template_forbidden", "forbidden template function " + f
+		}
+	}
+	// Farmer's printf width and precision cap (internal/cook
+	// maxFormatWidth, 1000): an argument error, as saasapi maps it.
+	for _, m := range printfWidthRe.FindAllStringSubmatch(body, -1) {
+		if n, err := strconv.Atoi(m[1]); err != nil || n > maxFormatWidth {
+			return "recipe_template_failed", "the template passed an invalid argument to a function"
 		}
 	}
 	out, err := render(body, map[string]string{}, "")
@@ -201,6 +209,13 @@ func render(src string, props map[string]string, sproutID string) (string, error
 	}
 	return b.String(), nil
 }
+
+// maxFormatWidth is internal/cook's cap on a printf width or precision.
+const maxFormatWidth = 1000
+
+// printfWidthRe finds the width (or precision) of every verb in a printf
+// format a fake recipe writes, flags skipped.
+var printfWidthRe = regexp.MustCompile(`printf "[^"]*?%[-+# 0]*\.?(\d+)`)
 
 // iterRe is the only range a fake recipe counts: over split (printf
 // "%0Nd" 0) "", N iterations (the W1 case RB1's, as in internal/cook's

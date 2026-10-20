@@ -2,7 +2,13 @@
 # run.sh: run the UAT acceptance tests on the local rig (UAT.8; README.md).
 #
 # Usage: run.sh [--state DIR] [--release-tag TAG] [--no-up] [--with-x3]
-#               smoke|core|all [scenario id ...]
+#               TIER [scenario id ...]
+#
+#   TIER              any tier uat/tests/run.sh takes: smoke, core,
+#                     resilience (L1 to L3), ingredients, lifecycle, ha or
+#                     all. On the rig the ha scenarios skip, each saying it
+#                     needs hub_nodes 3, and L1's reboot is a container
+#                     restart (README.md)
 #
 #   --state DIR       the rig's state (default LITE_STATE in config.env)
 #   --release-tag TAG the release under test; needed when the rig is not up
@@ -51,12 +57,13 @@ while (($#)); do
 	*) break ;;
 	esac
 done
-(($# >= 1)) || lite_usage_die "give a tier: smoke, core or all"
+tiers="smoke, core, resilience, ingredients, lifecycle, ha or all"
+(($# >= 1)) || lite_usage_die "give a tier: $tiers"
 tier=$1
 shift
 case $tier in
-smoke | core | all) ;;
-*) lite_usage_die "tier '$tier' is not smoke, core or all (the rig runs these; README.md)" ;;
+smoke | core | resilience | ingredients | lifecycle | ha | all) ;;
+*) lite_usage_die "tier '$tier' is not $tiers (uat/tests/run.sh's tiers; README.md)" ;;
 esac
 ids=("$@")
 [[ -z $release_tag ]] || lite_is_release_tag "$release_tag" ||
@@ -109,12 +116,13 @@ catalogue_ids() {
 		{ n = split($2, t, ","); for (i = 1; i <= n; i++) if (tier == "all" || t[i] == tier) { print $1; break } }' "$CATALOGUE"
 }
 
-# The runs: a label, the tier, the ids.
+# The runs: a label, the tier, the ids. Only a tier holding X3 (core,
+# all) is narrowed to its ids without it; any other runs as is.
 runs=()
 excluded=()
 if ((${#ids[@]} > 0)); then
 	runs+=("$tier|$tier|${ids[*]}")
-elif ((with_x3)) || [[ $tier == smoke ]]; then
+elif ((with_x3)) || [[ " $(catalogue_ids "$tier" | tr '\n' ' ') " != *" X3 "* ]]; then
 	runs+=("$tier|$tier|")
 else
 	mapfile -t static < <(catalogue_ids "$tier" | grep -vx X3)

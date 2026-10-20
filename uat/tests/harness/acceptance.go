@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -154,13 +155,42 @@ func TenantDataSpec(tenantID string) InventorySpec {
 func TombstoneSpec(tenantID string) InventorySpec {
 	s := InventorySpec{TenantID: tenantID}
 	for k := range tenantpurge.KeepTables {
-		schema, table, _ := strings.Cut(k, ".")
-		if table == "job_leases" {
-			continue // keyed pushall:<tenant_id>, not by a tenant_id column
+		if k == "farmer.job_leases" {
+			continue // keyed by name (pushall:<tenant_id>), re-created on demand
 		}
-		s.Tables = append(s.Tables, schema+"."+table)
+		s.Tables = append(s.Tables, k)
 	}
+	slices.Sort(s.Tables)
 	return s
+}
+
+// InventoryKeyColumns is the column holding the tenant ID in each table
+// acceptance.sh inventory counts, from the migrations: a tenant's own
+// registry rows (saas.tenants, farmer.pki_tenants) are keyed by id, every
+// other table by tenant_id. acceptance.sh's tenant_key is the same map and
+// refuses any table not in it; TestInventoryKeyColumns keeps the two equal
+// and checks each column against internal/migrations.
+var InventoryKeyColumns = map[string]string{
+	"farmer.props":               "tenant_id",
+	"farmer.pki_nkeys":           "tenant_id",
+	"farmer.pki_revoked_nkeys":   "tenant_id",
+	"farmer.pki_cli_admin_keys":  "tenant_id",
+	"farmer.pki_sprout_box_keys": "tenant_id",
+	"farmer.sprout_user_jwt":     "tenant_id",
+	"farmer.auth_users":          "tenant_id",
+	"farmer.auth_cli_box_keys":   "tenant_id",
+	"farmer.rbac_roles":          "tenant_id",
+	"farmer.rbac_user_roles":     "tenant_id",
+	"farmer.rbac_cohorts":        "tenant_id",
+	"farmer.job_status":          "tenant_id",
+	"farmer.pki_tenants":         "id",
+	"saas.asset_action_items":    "tenant_id",
+	"saas.asset_action_batches":  "tenant_id",
+	"saas.asset_links":           "tenant_id",
+	"saas.enrollment_keys":       "tenant_id",
+	"saas.tenant_update_policy":  "tenant_id",
+	"saas.provisioning_jobs":     "tenant_id",
+	"saas.tenants":               "id",
 }
 
 // Inventory counts what spec names: by table ("farmer.props"), by

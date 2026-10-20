@@ -78,6 +78,20 @@ refused "a wrong argument count is refused" "takes 1 argument" acc purge
 refused "a Valkey key of no sprout is refused" "not a sprout's Valkey key" acc valkey-get 'imas:*'
 refused "a table outside farmer and saas is refused" "not a farmer or saas table" \
 	bash -c 'echo "{\"tenant_id\":\"$1\",\"tables\":[\"mysql.user\"]}" | "$2" "$3" "$4" "$5" inventory' _ "$ta" "$core/acceptance.sh" "$kubeconfig" "$ep" "$state"
+refused "a farmer or saas table with no known tenant key is refused" "no tenant key column known for farmer.job_leases" \
+	bash -c 'echo "{\"tenant_id\":\"$1\",\"tables\":[\"farmer.props\",\"farmer.job_leases\"]}" | "$2" "$3" "$4" "$5" inventory' _ "$ta" "$core/acceptance.sh" "$kubeconfig" "$ep" "$state"
+# Each table by its own key column (E1, rig rc.15: saas.tenants has no
+# tenant_id). Without containers the stub's exec fails, but the query it
+# was given is in calls.log.
+jq -cn --arg t "$ta" '{tenant_id: $t, tables: ["saas.tenants", "saas.provisioning_jobs", "farmer.pki_tenants", "farmer.props"]}' >"$tmp/keys.json"
+: >"$ACC_STATE/calls.log"
+ACC_MYSQL=none-such acc inventory <"$tmp/keys.json" >/dev/null 2>&1 || true
+grep -qF "SELECT 'saas.tenants', COUNT(*) FROM saas.tenants WHERE id = '$ta';" "$ACC_STATE/calls.log" &&
+	grep -qF "SELECT 'saas.provisioning_jobs', COUNT(*) FROM saas.provisioning_jobs WHERE tenant_id = '$ta';" "$ACC_STATE/calls.log" &&
+	grep -qF "SELECT 'farmer.pki_tenants', COUNT(*) FROM farmer.pki_tenants WHERE id = '$ta';" "$ACC_STATE/calls.log" &&
+	grep -qF "SELECT 'farmer.props', COUNT(*) FROM farmer.props WHERE tenant_id = '$ta';" "$ACC_STATE/calls.log" &&
+	ok "inventory: saas.tenants and farmer.pki_tenants by id, the others by tenant_id" ||
+	bad "inventory key columns: $(grep -o "SELECT .*" "$ACC_STATE/calls.log" | head -n 1)"
 refused "a backdate naming nothing is refused" "names nothing" \
 	bash -c 'echo "{\"tenant_id\":\"$1\",\"seconds\":60}" | "$2" "$3" "$4" "$5" backdate' _ "$ta" "$core/acceptance.sh" "$kubeconfig" "$ep" "$state"
 jq -cn --arg t "$ta" '{tenant_id: $t, seconds: 60, batches: ["b_x'"'"' OR 1=1"]}' >"$tmp/bad-backdate.json"
@@ -214,6 +228,12 @@ SQL
 	out=$(acc inventory <<<"$spec" 2>"$tmp/err") &&
 		jq -e '.counts == {"farmer.props": 3, "farmer.job_status": 1, "saas.enrollment_keys": 1, "saas.asset_action_items": 1, "farmer.pki_nkeys": 0}' <<<"$out" >/dev/null &&
 		ok "inventory: rows counted by tenant_id" || bad "inventory tables: $out $(cat "$tmp/err")"
+	echo "INSERT INTO farmer.pki_tenants (id, name, created_at) VALUES ('$ta', '$ta', 0), ('$tb', 'b', 0)" | mysql_root ||
+		bad "PXC: seeding farmer.pki_tenants failed"
+	spec=$(jq -cn --arg t "$ta" '{tenant_id: $t, tables: ["saas.tenants", "saas.provisioning_jobs", "farmer.pki_tenants"]}')
+	out=$(acc inventory <<<"$spec" 2>"$tmp/err") &&
+		jq -e '.counts == {"saas.tenants": 1, "saas.provisioning_jobs": 2, "farmer.pki_tenants": 1}' <<<"$out" >/dev/null &&
+		ok "inventory: the tombstone's tables, each by its own key column" || bad "inventory tombstone: $out $(cat "$tmp/err")"
 	out=$(acc provisioning-jobs "$ta" 2>/dev/null) &&
 		jq -e '.jobs == [{id: "pj_aaaaaaaaaaaaaaa3", type: "provision", status: "succeeded"}, {id: "pj_aaaaaaaaaaaaaaa2", type: "deprovision", status: "succeeded"}]' <<<"$out" >/dev/null &&
 		ok "provisioning-jobs: the tenant's jobs, oldest first" || bad "provisioning-jobs: $out"
