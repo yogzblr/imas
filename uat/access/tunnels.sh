@@ -147,7 +147,7 @@ cmd_reopen() {
       PREFER["$vm/$kind"]=$port
     done <"$dir/tunnels.pids"
     close_tunnels "$dir"
-    log "tunnels closed; opening them again on the same ports"
+    log "tunnels closed; opening them again, on the same ports where free"
   fi
   cmd_open "$@"
 }

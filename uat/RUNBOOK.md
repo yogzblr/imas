@@ -267,7 +267,8 @@ timing; the mechanism is not proven.
 
 **What the workflow does now (W6).** Every phase from the tunnels on starts
 with `uat/access/session.sh phase`: it logs in again (`az-relogin.sh`, the
-same OIDC exchange as `azure/login`) and reopens every tunnel on its port
+same OIDC exchange as `azure/login`) and reopens every tunnel, on its old port when free (a moved kube port is
+rewritten in the kubeconfigs; `enroll.sh` writes its inventory again)
 when the login or the tunnels are 15 minutes old
 (`UAT_SESSION_REFRESH_AFTER_MIN`), then checks the ages that result: it
 refuses to start a phase if either is still older than 40

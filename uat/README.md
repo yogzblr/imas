@@ -208,7 +208,8 @@ names the piece):
    an hour after it is made, and tunnels opened on it are suspected to hang
    then: Run 2 hung 55 to 60 minutes after its login, a correlation in
    timing, not a proven mechanism (`RUNBOOK.md`). So a phase logs in again
-   and reopens the tunnels (on the same local ports) when either is 15
+   and reopens the tunnels (each on its old local port when that port is free;
+   a moved kube port is rewritten in the kubeconfigs) when either is 15
    minutes old, then refuses to start if either is still older than 40
    (that is, if no refresh happened), and prints `azure login age Xm,
    tunnels age Ym`. A tunnel is never reopened while something
@@ -403,7 +404,8 @@ OpenBao's unseal keys and root token are in `imas-uat-openbao-unseal` and
 `az login`. A tunnel opened on your own `az login` keeps working (an
 interactive login renews itself; the runner's OIDC login cannot). If one
 hangs, `uat/access/tunnels.sh reopen /tmp/uat-$RUN.json /tmp/uat-$RUN-access`
-reopens them all on the same ports. Close your tunnels with `uat/access/tunnels.sh close /tmp/uat-$RUN-access`
+reopens them all, each on its old port when that port is free (it names any
+port that changed). Close your tunnels with `uat/access/tunnels.sh close /tmp/uat-$RUN-access`
 and delete the key file when done.
 
 Changing the expiry: re-apply with another `keep_hours`, or set the group's tag
