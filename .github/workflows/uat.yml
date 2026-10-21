@@ -11,6 +11,15 @@ name: UAT gate
 #   and sprouts (uat/enroll) -> tests (uat/tests/run.sh) -> start any stopped
 #   HA hub VM (the ha tier stops them) -> close tunnels ->
 #   upload the report -> destroy (uat/tofu/destroy.sh) -> verify teardown.
+# The az session comes from a GitHub OIDC login, which stops working about
+# an hour after it is made, and tunnels opened on it then hang (W6; UAT Run 2
+# failed that way 55 to 60 minutes after its login). So every phase starts
+# with uat/access/session.sh phase: it logs in again and reopens the tunnels
+# when either is UAT_SESSION_REFRESH_AFTER_MIN (15) minutes old, refuses to
+# start past UAT_SESSION_MAX_AGE_MIN (40), and prints "azure login age Xm,
+# tunnels age Ym". Enrolment and the tests always refresh first and probe
+# every tunnel, and refresh again between their own steps (enroll.sh between
+# Ansible runs, run.sh between top-level tests), never during one.
 # Core is installed before the DMZ: the bus needs core's public NATS trust
 # (with the loader's JWT), the loader's seed and the accounts bucket's
 # read-only credential when it starts, all made by the core install (owner
@@ -123,6 +132,11 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       TFSTATE_RESOURCE_GROUP: imas-uat-state
+      # The az logins after the first (uat/access/az-relogin.sh, through
+      # session.sh and vmctl.sh) exchange the job's OIDC token for these.
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -156,11 +170,18 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          mkdir -p "$RUNNER_TEMP/uat-state" "$RUNNER_TEMP/uat-secrets" "$RUNNER_TEMP/bin" "$RUNNER_TEMP/uat-artifacts"
+          mkdir -p "$RUNNER_TEMP/uat-state/session" "$RUNNER_TEMP/uat-secrets" "$RUNNER_TEMP/bin" "$RUNNER_TEMP/uat-artifacts"
           {
             echo "STATE=$RUNNER_TEMP/uat-state"
             echo "SECRETS=$RUNNER_TEMP/uat-secrets"
             echo "ARTIFACTS=$RUNNER_TEMP/uat-artifacts"
+            # uat/access/session.sh (W6): the login time (az-relogin.sh's
+            # stamp, also for vmctl.sh's logins), the tunnels it reopens
+            # and the kubeconfigs that point at them.
+            echo "AZ_RELOGIN_DIR=$RUNNER_TEMP/uat-state/session"
+            echo "UAT_SESSION_UAT=$RUNNER_TEMP/uat-state/uat.json"
+            echo "UAT_SESSION_ACCESS=$RUNNER_TEMP/uat-state/access"
+            echo "UAT_SESSION_KUBECONFIGS=$RUNNER_TEMP/uat-state/k0s/core.kubeconfig:$RUNNER_TEMP/uat-state/k0s/dmz.kubeconfig"
           } >>"$GITHUB_ENV"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
@@ -206,6 +227,10 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The login's time, for the age every phase prints and guards (W6).
+      - name: Record the Azure login time
+        run: uat/access/session.sh mark-login
 
       - name: Generate run_id
         id: runid
@@ -325,9 +350,13 @@ jobs:
           az extension add --name ssh --upgrade --yes
           az extension list --query "[].{name:name, version:version}" -o table
 
+      # tofu apply takes about 20 minutes: the tunnels are opened on a login
+      # made just before them, not on the job's first one (W6).
       - name: Open the Bastion tunnels (uat/access)
         id: tunnels
-        run: uat/access/tunnels.sh open "$STATE/uat.json" "$STATE/access"
+        run: |
+          uat/access/session.sh phase "Bastion tunnels" --no-tunnels --force
+          uat/access/tunnels.sh open "$STATE/uat.json" "$STATE/access"
 
       # One node per hub: a single-node cluster each (kine). hub_nodes 3: three
       # controller+worker nodes per hub on etcd, kubectl through the tunnel
@@ -337,6 +366,7 @@ jobs:
         env:
           HUB_NODES: ${{ steps.inputs.outputs.hub_nodes }}
         run: |
+          uat/access/session.sh phase "k0s on both hubs"
           uat/k0s/bootstrap.sh --uat "$STATE/uat.json" --access "$STATE/access/access.json" \
             --ssh-key "$SECRETS/ssh_key" --out "$STATE/k0s" --nodes "$HUB_NODES"
 
@@ -353,6 +383,7 @@ jobs:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
           IMAS_UAT_DISPATCH_FLAGS: ${{ steps.inputs.outputs.dispatch_flags }}
         run: |
+          uat/access/session.sh phase "core hub"
           uat/hub/core/install.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
             "$STATE/hub" "$RELEASE_TAG"
 
@@ -369,6 +400,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
         run: |
+          uat/access/session.sh phase "DMZ hub"
           uat/hub/dmz/install.sh --kubeconfig "$STATE/k0s/dmz.kubeconfig" \
             --endpoints "$STATE/k0s/endpoints.json" --release-tag "$RELEASE_TAG" \
             --seeds-from-kubeconfig "$STATE/k0s/core.kubeconfig" \
@@ -385,6 +417,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
         run: |
+          uat/access/session.sh phase "core hub, second half"
           uat/hub/core/finish.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
             "$STATE/hub" "$RELEASE_TAG"
 
@@ -392,12 +425,21 @@ jobs:
       # waits for the refill.
       - name: DMZ check
         run: |
+          uat/access/session.sh phase "DMZ check"
           uat/hub/dmz/check.sh --endpoints "$STATE/k0s/endpoints.json" \
             --ca-file "$STATE/k0s/uat-ca.crt" --kubeconfig "$STATE/k0s/dmz.kubeconfig"
 
+      # A fresh login and fresh tunnels, every tunnel probed (W6): UAT Run 2
+      # started enrolment on a 50-minute-old login and hung at about 55.
+      - name: Azure login again (before enrolment)
+        run: uat/access/session.sh phase "enrolment" --force --probe
+
+      # UAT_SESSION_HOOK: enroll.sh refreshes again between its Ansible runs
+      # when the login or the tunnels are 15 minutes old (W6).
       - name: Tenants and enrolment (uat/enroll)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          UAT_SESSION_HOOK: ${{ github.workspace }}/uat/access/session.sh
         run: |
           uat/enroll/enroll.sh --uat "$STATE/uat.json" --access "$STATE/access/access.json" \
             --state "$STATE/enroll" --release-tag "$RELEASE_TAG" \
@@ -411,13 +453,11 @@ jobs:
             "$STATE/enroll" "$STATE/hub"
 
       # vmctl.sh (reboots, run-command) calls Azure during the tests, possibly
-      # hours after the first login: log in again for a fresh token.
+      # hours after the first login, and the tests reach both hubs' APIs
+      # through the tunnels: log in again, reopen the tunnels and probe them
+      # (W6; the same OIDC exchange as azure/login, by az-relogin.sh).
       - name: Azure login again (before the tests)
-        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: uat/access/session.sh phase "tests" --force --probe
 
       # go test's own timeout stays under the step's, so a slow run still
       # writes its report.
@@ -438,9 +478,9 @@ jobs:
           # The ha tier stops and starts hub VMs through vmctl.sh (stop-vm,
           # start-vm) with this login too.
           UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # run.sh runs each top-level test in its own process and refreshes
+          # the login and the tunnels between them when 15 minutes old (W6).
+          UAT_SESSION_HOOK: ${{ github.workspace }}/uat/access/session.sh
         run: |
           set -euo pipefail
           export IMAS_UAT_DIR="$STATE/hub"
@@ -462,16 +502,22 @@ jobs:
         if: always() && steps.tests.outcome != 'skipped' && steps.inputs.outputs.hub_nodes == '3'
         env:
           UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
-          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           set -euo pipefail
+          # Best effort: vmctl.sh logs in again by itself on AADSTS700024.
+          uat/access/session.sh phase "start the HA hubs' VMs" --no-tunnels || true
           status=0
           while IFS= read -r vm; do
             uat/access/vmctl.sh "$STATE/uat.json" start-vm "$vm" || status=1
           done < <(jq -r '.core[], .dmz[]' "$STATE/ha_node_names.json")
           exit "$status"
+
+      # The failure-time diagnostic (W6): how old the login and the tunnels
+      # were, whether each tunnel's process still ran, and the end of each
+      # tunnel's log. Nothing secret is in them.
+      - name: Azure login and tunnel ages (on failure)
+        if: failure() && steps.tunnels.outcome != 'skipped'
+        run: uat/access/session.sh ages "at the failure"
 
       - name: Close the Bastion tunnels
         if: always() && steps.tunnels.outcome != 'skipped'
@@ -503,7 +549,10 @@ jobs:
           retention-days: 30
 
       # Teardown, whatever happened above, unless keep_hours is above zero.
+      # The azure/login action, as for the first login: the destroy does
+      # not depend on uat/access, and the age guard never stops it (W6).
       - name: Azure login again (before the destroy)
+        id: login_destroy
         if: always() && steps.apply.outcome != 'skipped' && steps.inputs.outputs.destroy == 'true'
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6  # v2
         with:
@@ -521,7 +570,11 @@ jobs:
           TF_VAR_public_ingress_cidrs: ${{ steps.inputs.outputs.public_ingress_cidrs }}
           TF_VAR_core_node_count: ${{ steps.inputs.outputs.core_node_count }}
           TF_VAR_dmz_node_count: ${{ steps.inputs.outputs.dmz_node_count }}
-        run: uat/tofu/destroy.sh "$RUN_ID"
+          LOGIN_OUTCOME: ${{ steps.login_destroy.outcome }}
+        run: |
+          if [ "$LOGIN_OUTCOME" = success ]; then uat/access/session.sh mark-login || true; fi
+          uat/access/session.sh ages "destroy" || true
+          uat/tofu/destroy.sh "$RUN_ID"
 
       # Independent of destroy.sh's own check: the job fails if the group or
       # anything tagged with the run_id is left.
@@ -533,6 +586,7 @@ jobs:
         if: always() && steps.apply.outcome != 'skipped' && steps.inputs.outputs.destroy == 'false'
         run: |
           set -euo pipefail
+          uat/access/session.sh phase "kept environment" --no-tunnels || true
           expires=$(az group show --name "imas-uat-$RUN_ID" --query tags.expires_at -o tsv 2>/dev/null || echo unknown)
           {
             echo "### Environment kept: imas-uat-$RUN_ID"
