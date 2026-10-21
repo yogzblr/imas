@@ -189,6 +189,7 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 | `imas_sprout_update_repo_token` | `imas_sprout_repo_token` (Linux), `""` (Windows) | Read token the sprout sends (basic auth, user `buildkite`) to `imas_sprout_update_repo_url` only (`sproutupdaterepotoken`), stored in the sprout's mode-0600 config file. |
 | `imas_sprout_verify` | `true` | Wait for the bus connection after installing. |
 | `imas_verify_timeout` | `300` | Seconds to wait for it. |
+| `imas_verify_connection_timeout` | `300` | Seconds the host has to answer (`wait_for_connection`) before `imas_verify` reads the sprout's config file. |
 
 ## If a host fails
 
@@ -197,6 +198,13 @@ Set these in `group_vars`/`host_vars`. `roles/*/defaults/main.yml` and
 log lines (from `journalctl -u imas-sprout`, or
 `%ProgramData%\imas\logs\sprout.log` on Windows):
 
+- **No ssh (or winrm) connection to ... so the sprout's config file cannot
+  be read**: Ansible could not reach the host at all, and the message
+  carries the connection error. `imas_verify` checks the connection
+  before its only `no_log` task (the config file may hold the join token),
+  so the reason is never hidden. In the UAT gate, where hosts are reached
+  through Bastion tunnels, every host failing like this together is the
+  stale login or tunnel case of `uat/RUNBOOK.md`.
 - **has not enrolled**: farmer returns the same `enrollment_failed` for
   every rejection, on purpose, so the log can't show why. Check that:
   - the key hasn't expired, been revoked, or run out of `max_uses`

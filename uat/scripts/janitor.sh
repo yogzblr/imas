@@ -27,8 +27,17 @@
 # what it deleted, what failed, what it kept and why. It writes the same to
 # GITHUB_STEP_SUMMARY when that is set.
 #
-# Environment: AZ (default az); JANITOR_NOW (epoch seconds or RFC 3339) stands
-# in for the current time in run, for tests only.
+# Each az group delete waits for the deletion (often 10 minutes or more), so
+# a run with several groups outlives its OIDC login, which stops working
+# after about an hour (W6). With UAT_SESSION_HOOK set (the janitor workflow
+# sets uat/access/session.sh), `$UAT_SESSION_HOOK phase "janitor: <group>"
+# --no-tunnels` runs before each group is read again and deleted: it logs in
+# again when the login is 15 minutes old and prints its age. A failed hook
+# fails that group (left for the next run) and the run.
+#
+# Environment: AZ (default az); UAT_SESSION_HOOK (optional, above);
+# JANITOR_NOW (epoch seconds or RFC 3339) stands in for the current time in
+# run, for tests only.
 #
 # Exit status: 0 when every selected group was deleted (or none was due);
 # 1 when listing or any deletion failed; 2 on a usage error.
@@ -159,6 +168,11 @@ cmd_run() {
 
   while IFS=$'\t' read -r name exp; do
     [ -n "$name" ] || continue
+    if [ -n "${UAT_SESSION_HOOK:-}" ] && ! "$UAT_SESSION_HOOK" phase "janitor: $name" --no-tunnels >&2; then
+      failed+=("$name (expired $exp; the Azure login could not be refreshed)")
+      status=1
+      continue
+    fi
     # Read the group again: its tags may have changed since the listing.
     if ! $AZ group show --name "$name" -o json >"$work/one.json" 2>/dev/null; then
       echo "$prog: $name is gone already" >&2

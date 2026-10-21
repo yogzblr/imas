@@ -1,4 +1,23 @@
 ---
+# First, before any fact gathering, and unmasked, so a host that does not
+# answer gets the whole wait and is named with the reason here instead of
+# behind the no_log task below (UAT Run 2: UNREACHABLE with the
+# reason hidden; a stale Bastion tunnel looks like this, uat/RUNBOOK.md).
+- name: Check the connection to the host
+  block:
+    - name: Wait for the connection to the host
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ imas_verify_connection_timeout }}"
+        sleep: 5
+  rescue:
+    - name: Fail with the connection error
+      ansible.builtin.fail:
+        msg: >-
+          No {{ ansible_connection | default('ssh') }} connection to
+          {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }}:{{ ansible_port | default('default port') }})
+          within {{ imas_verify_connection_timeout }}s, so the sprout's config file cannot be read:
+          {{ ansible_failed_result.msg | default('no reason given') }}
+
 - name: Gather the facts the role needs
   ansible.builtin.setup:
     gather_subset: [min]
@@ -17,7 +36,8 @@
     _sep: "{{ _imas_verify_backslash if ansible_os_family == 'Windows' else '/' }}"
     _windows_root: "{{ (ansible_env.ProgramData | default(_imas_verify_program_data_fallback)) ~ _sep ~ 'imas' }}"
 
-# It may still hold the join token if the sprout hasn't enrolled.
+# It may still hold the join token if the sprout hasn't enrolled; no_log is
+# for this read only.
 - name: Read the sprout's config file
   ansible.builtin.slurp:
     src: "{{ _imas_verify_config_file }}"

@@ -23,6 +23,13 @@
 #   5. collect.yml              imas_verify again, then the enrolled sprout IDs
 #   6. wait-connected.sh        farmer's view, through saasapi; writes DIR/sprouts.json
 #
+# With UAT_SESSION_HOOK set (W6; the UAT workflow sets it to
+# uat/access/session.sh), `$UAT_SESSION_HOOK phase "enrolment: <step>"` runs
+# before steps 3, 4, 5 and 6, between two Ansible runs and never during one:
+# it refreshes the Azure login and reopens the Bastion tunnels when they are
+# old enough, so no step starts on a stale tunnel. The inventory is written
+# again after it, from access.json, in case a tunnel's port changed.
+#
 # --core-state, --core-kubeconfig and --endpoints are the <state-dir>,
 # <kubeconfig> and <endpoints.json> the core hub's scripts took (--core-scripts,
 # default uat/hub/core).
@@ -150,6 +157,13 @@ gen+=(--access "$ACCESS")
 python3 "$here/gen-inventory.py" "${gen[@]}"
 inventory="$STATE/inventory/hosts.yml"
 
+# boundary STEP: a phase boundary between two Ansible runs (W6).
+boundary() {
+	[[ -n "${UAT_SESSION_HOOK:-}" ]] || return 0
+	"$UAT_SESSION_HOOK" phase "enrolment: $1" || die "the session refresh before '$1' failed (see above)"
+	python3 "$here/gen-inventory.py" "${gen[@]}" >/dev/null
+}
+
 # The repository's ansible.cfg (forks, interpreter discovery) and roles, from
 # wherever this runs. Host key checking is off for the tunnels; see README.md.
 export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
@@ -159,19 +173,23 @@ export ANSIBLE_RETRY_FILES_ENABLED=False
 run_playbook() { ansible-playbook -i "$inventory" "$@" "${playbook_args[@]}"; }
 
 if ((SEED)); then
+	boundary "3/6 seed the sprout IDs"
 	step "3/6 seed the sprout IDs"
 	run_playbook "$here/playbooks/seed-sproutid.yml"
 else
 	step "3/6 seed the sprout IDs: skipped (sprout IDs default to host names)"
 fi
 
+boundary "4/6 ansible/site.yml"
 step "4/6 ansible/site.yml with $RELEASE_TAG"
 run_playbook "$ANSIBLE_DIR/site.yml"
 
+boundary "5/6 imas_verify and the enrolled sprout IDs"
 step "5/6 imas_verify and the enrolled sprout IDs"
 collect=(-e "uat_out_dir=$STATE")
 ((SEED)) || collect+=(-e uat_skip_sprout_id_check=true)
 run_playbook "$here/playbooks/collect.yml" "${collect[@]}"
 
+boundary "6/6 farmer's view"
 step "6/6 farmer's view"
 "$here/wait-connected.sh" --state "$STATE" --timeout "$CONNECT_TIMEOUT" "${saas[@]}"

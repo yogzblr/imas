@@ -364,10 +364,12 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 		}
 		return dir
 	}
-	runSh := func(dir string, args ...string) (int, string) {
+	runShEnv := func(env []string, dir string, args ...string) (int, string) {
 		cmd := exec.Command("bash", append([]string{filepath.Join("..", "run.sh")}, args...)...)
 		cmd.Env = append(os.Environ(), "IMAS_UAT_DIR="+dir, "IMAS_UAT_REPORT_DIR="+filepath.Join(dir, "report-"+args[0]),
-			"IMAS_UAT_VMCTL=", "IMAS_UAT_BIND_TENANT=", "IMAS_UAT_CORE_KUBECONFIG=", "IMAS_UAT_ENDPOINTS=", "IMAS_UAT_DMZ_KUBECONFIG=")
+			"IMAS_UAT_VMCTL=", "IMAS_UAT_BIND_TENANT=", "IMAS_UAT_CORE_KUBECONFIG=", "IMAS_UAT_ENDPOINTS=", "IMAS_UAT_DMZ_KUBECONFIG=",
+			"UAT_SESSION_HOOK=")
+		cmd.Env = append(cmd.Env, env...)
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -377,9 +379,39 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 		}
 		return code, string(out)
 	}
+	runSh := func(dir string, args ...string) (int, string) { return runShEnv(nil, dir, args...) }
 	dir := startFake("flat", ".ready")
 	if code, out := runSh(dir, "smoke"); code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   C1                     windows  2") {
 		t.Errorf("smoke against the fake: exit %d\n%s", code, out)
+	}
+	// W6: with UAT_SESSION_HOOK each top-level test runs in its own process,
+	// the hook's "phase tests: <Test>" before each; the result is the same.
+	hookDir := t.TempDir()
+	hookLog := filepath.Join(hookDir, "calls")
+	hook := filepath.Join(hookDir, "hook")
+	if err := os.WriteFile(hook, []byte("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\""+hookLog+"\"\n"+
+		"[ ! -f \""+hookLog+".fail\" ] || exit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runShEnv([]string{"UAT_SESSION_HOOK=" + hook}, dir, "smoke")
+	calls, _ := os.ReadFile(hookLog)
+	if code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "one test process per top-level test") ||
+		!regexp.MustCompile(`(?m)^phase tests: Test\w*C1_\w+$`).Match(calls) {
+		t.Errorf("smoke with the session hook: exit %d\nhook calls:\n%s\n%s", code, calls, out)
+	}
+	if n := strings.Count(string(calls), "phase tests: Test"); n < 2 || n != strings.Count(string(calls), "\n") {
+		t.Errorf("the hook must run once before each top-level test, and only so: %d calls\n%s", n, calls)
+	}
+	// A failed refresh stops the run, says why, and fails it.
+	if err := os.WriteFile(hookLog+".fail", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out = runShEnv([]string{"UAT_SESSION_HOOK=" + hook}, dir, "smoke")
+	if code == 0 || !strings.Contains(out, "the session refresh before Test") || !strings.Contains(out, "not running the rest") {
+		t.Errorf("smoke with a failing session hook must fail and say why: exit %d\n%s", code, out)
+	}
+	if code, out := runShEnv([]string{"UAT_SESSION_HOOK=" + hook, "IMAS_UAT_TIMEOUT=forever"}, dir, "smoke"); code != 2 {
+		t.Errorf("a timeout run.sh cannot split must be a usage error with the hook: exit %d\n%s", code, out)
 	}
 	if code, out := runSh(dir, "resilience", "L2"); code != 0 || !strings.Contains(out, "PASS   L2") {
 		t.Errorf("L2 against the fake: exit %d\n%s", code, out)
@@ -401,7 +433,7 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	// no Keycloak admin): smoke passes, T1 getting the user for the tenant
 	// it creates from the fake bind-tenant.sh --scratch-user.
 	core := startFake("core", ".ready")
-	code, out := runSh(core, "smoke")
+	code, out = runSh(core, "smoke")
 	if code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   K1") ||
 		!strings.Contains(out, "PASS   T1") || strings.Contains(out, "SKIP   T1") {
 		t.Errorf("smoke against the fake in the core layout: exit %d\n%s", code, out)

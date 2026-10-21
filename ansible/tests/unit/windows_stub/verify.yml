@@ -27,7 +27,9 @@
               task: "{{ ansible_failed_task.name }}"
               msg: "{{ ansible_failed_result.msg }}"
       always:
+        # On the controller, also when the host has no connection.
         - name: Write the outcome
+          delegate_to: localhost
           ansible.builtin.copy:
             content: "{{ _outcome | to_json }}"
             dest: "{{ lookup('ansible.builtin.env', 'IMAS_STUB_OUTCOME') }}"

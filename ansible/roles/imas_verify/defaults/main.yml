@@ -8,6 +8,10 @@ imas_verify_interval: 10
 # attempt the bus rejects (a wrong or revoked User JWT) doesn't pass.
 imas_verify_hold: 5
 
+# Seconds the host has to answer (wait_for_connection) before the role
+# reads the sprout's config file.
+imas_verify_connection_timeout: 300
+
 imas_verify_service_name: imas-sprout
 # The sprout's config file. Empty: the OS default (/etc/imas/sprout, or
 # %ProgramData%\imas\sprout).

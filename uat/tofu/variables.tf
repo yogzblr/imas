@@ -29,9 +29,11 @@ variable "region" {
 # Who may reach the run's three internet-facing ports: 443 on the Bastion
 # (the management tunnels), 443 on core (saasapi and Keycloak) and Envoy on
 # the DMZ. Owner, 2026-10-20 (W5): the UAT gate opens them to the Internet,
-# because the caller's egress address is not one fixed /32 (UAT Run 2: the
-# runner's address as an echo service saw it was not the address the Bastion
-# saw, so the tunnels hung). "cidrs" is the hardened mode, for a caller whose
+# because the caller's egress address need not be one fixed /32 (a hosted
+# runner's can change). W5 took this as the cause of UAT Run 2's tunnel hang;
+# W6 later found the hang matches the age of the run's Azure login instead
+# (uat/RUNBOOK.md), so that cause is not established, but the allowlist
+# change stands on its own. "cidrs" is the hardened mode, for a caller whose
 # egress ranges are known. UAT only; recorded in the P3 security review
 # (docs/security-review-pack.md, 3.7).
 variable "public_ingress" {

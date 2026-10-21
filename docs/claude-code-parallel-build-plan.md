@@ -2205,7 +2205,7 @@ runs at tier smoke with keep_hours set, widening the tier as it goes green.
   latest), region (default centralindia, a variable; the owner confirms size and quota
   there), public_ingress (W5, owner 2026-10-20: who may reach the internet-facing ports;
   Internet by default, or public_ingress_cidrs, explicit public ranges; it replaced
-  runner_cidr, one /32, which did not follow the runner's egress address), keep_hours
+  runner_cidr, one /32, which need not follow the runner's egress address), keep_hours
   (default 0; above 0 skips the final destroy and the janitor deletes it after that time).
 - Names: resource group imas-uat-<run_id>; every resource tagged purpose=imas-uat,
   run_id, expires_at (RFC 3339, UTC). Public DNS labels uat<run_id>-dmz and uat<run_id>-core
@@ -2568,7 +2568,10 @@ environment variables, finds the runner's public address and passes it as runner
 passes public_ingress from the ingress_cidrs input instead, Internet by default), generates
 run_id, and runs in order: tofu apply (uat/tofu), opening the Bastion tunnels with uat/access/tunnels.sh
 open (after installing the Azure CLI bastion and ssh extensions), k0s bootstrap, core install, DMZ install, enrolment,
-the tests, then a step with if always() that closes the tunnels, and a final destroy step with if
+the tests (since W6, owner 2026-10-21: every phase from the tunnels on starts with
+uat/access/session.sh phase, which logs in again and reopens the tunnels when either is 15 minutes
+old, then refuses if either is still past 40, and prints both ages; enrolment and the tests always refresh and probe first,
+and refresh again between their own Ansible runs and top-level tests), then a step with if always() that closes the tunnels, and a final destroy step with if
 always() unless keep_hours is above zero; it uploads the
 test report and the sensitive-free outputs as artifacts and never the unseal keys or kubeconfigs. It
 checks up front that the three Azure variables exist and that release_tag is a tag that exists and has

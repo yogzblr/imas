@@ -38,9 +38,11 @@ six sprouts: `t1-ubuntu`, `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma`,
 `t2-win`. SSH, WinRM and the Kubernetes API are reached only through Bastion
 tunnels; only Envoy (8443 on the DMZ), 443 on core and the Bastion's 443 are
 open from outside the VNet. By default they are open to the Internet, so they
-follow whatever egress address the caller uses (owner, 2026-10-20, W5: Run 2
-failed when the Bastion admitted only the one /32 the runner's address check
-saw); the `ingress_cidrs` input narrows all three to named ranges. The HA run (`hub_nodes` 3, P24) makes each hub three k0s
+follow whatever egress address the caller uses (owner, 2026-10-20, W5: one
+/32 from the runner's address check need not be the address the Bastion
+sees; W5 took that for Run 2's cause, which W6 found matches the age of the
+Azure login instead, `RUNBOOK.md`); the `ingress_cidrs` input narrows all
+three to named ranges. The HA run (`hub_nodes` 3, P24) makes each hub three k0s
 nodes over the region's zones, `uat-dmz-1` to `uat-dmz-3` and `uat-core-1` to
 `uat-core-3`, behind an internal and a public Standard load balancer
 (`uat/tofu/README.md`, "HA topology"), each node a k0s controller+worker on
@@ -51,7 +53,7 @@ etcd (`uat/k0s/README.md`, "HA hubs").
 | Directory | Brief | What |
 |---|---|---|
 | `uat/tofu` | UAT.1 | The OpenTofu module of one run, the bootstrap stack (state storage, budget), `destroy.sh` |
-| `uat/access` | UAT.1 | `tunnels.sh` (Bastion tunnels) and `vmctl.sh` (reboot, stop and start a sprout, run a command): every Azure call of the gate |
+| `uat/access` | UAT.1 | `tunnels.sh` (Bastion tunnels) and `vmctl.sh` (reboot, stop and start a sprout, run a command): every Azure call of the gate; `session.sh` (W6) keeps the run's Azure login and tunnels fresh at each phase and prints their ages |
 | `uat/k0s` | UAT.2 | k0s on both hubs, local-path storage, cert-manager, the per-run UAT CA, the endpoints file |
 | `uat/hub/core` | UAT.3b | The core hub: farmer chart, OpenBao bootstrap, RustFS, Keycloak, the edge |
 | `uat/hub/dmz` | UAT.3a | The DMZ hub: nats chart (farmerbus, Envoy), its exposure and `check.sh` |
@@ -178,7 +180,8 @@ names the piece):
    problem is reported at once, by name, and nothing is created.
 2. Tools: Go, Python, OpenTofu 1.11.5, Helm v4.3.0, k0sctl and kubectl at
    `uat/k0s` pins, Ansible with pywinrm.
-3. **Azure login** by OIDC (`azure/login`), then a fresh **run_id**
+3. **Azure login** by OIDC (`azure/login`; its time is recorded for the
+   ages below), then a fresh **run_id**
    (`run-id.sh`: 8 characters, a letter first). The run no longer looks up
    the runner's public address (W5): one lookup did not match the address
    the Bastion saw later in the run.
@@ -196,8 +199,21 @@ names the piece):
    `<state>/hub/core/sensitive/azure-blob/`, which the core install turns into
    Versity Gateway's credential Secret.
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
-   for `bastion` and `ssh`): SSH and the Kubernetes API on every hub node, and
-   on an HA run also each hub's API address (`dmz-api`, `core-api`).
+   for `bastion` and `ssh`, on a login made just before, not the one from
+   before the 20-minute apply): SSH and the Kubernetes API on every hub node,
+   and on an HA run also each hub's API address (`dmz-api`, `core-api`).
+
+   **From here on every phase starts with `uat/access/session.sh phase`**
+   (W6). The run's az session is an OIDC login, which stops renewing about
+   an hour after it is made, and tunnels opened on it are suspected to hang
+   then: Run 2 hung 55 to 60 minutes after its login, a correlation in
+   timing, not a proven mechanism (`RUNBOOK.md`). So a phase logs in again
+   and reopens the tunnels (each on its old local port when that port is free;
+   a moved kube port is rewritten in the kubeconfigs) when either is 15
+   minutes old, then refuses to start if either is still older than 40
+   (that is, if no refresh happened), and prints `azure login age Xm,
+   tunnels age Ym`. A tunnel is never reopened while something
+   uses it.
 6. **k0s** on both hubs (`uat/k0s/bootstrap.sh --nodes <hub_nodes>`): one
    single-node cluster per hub, or on the HA run three controller+worker nodes
    per hub on etcd, waiting for every node Ready and every etcd member joined.
@@ -219,12 +235,18 @@ names the piece):
    because the bus needs core's trust (with the loader's JWT), the loader's
    seed and the accounts bucket (on core's object store, which the DMZ reads
    on port 9000) when it starts.
-8. **Tenants and enrolment** (`uat/enroll/enroll.sh`).
-9. **Test material** (`uat/scripts/material.sh`) and a second Azure login,
-   then **the tests** (`uat/tests/run.sh <tier> [ids]`).
+8. A fresh Azure login and fresh tunnels, each tunnel probed end to end
+   (`ssh-keyscan`, WinRM's `/wsman`, the API's `/version`), then **Tenants
+   and enrolment** (`uat/enroll/enroll.sh`), which refreshes again between
+   its Ansible runs when 15 minutes old.
+9. **Test material** (`uat/scripts/material.sh`), a fresh Azure login and
+   fresh, probed tunnels again, then **the tests** (`uat/tests/run.sh <tier>
+   [ids]`), each top-level test in its own process with a refresh between
+   them when 15 minutes old.
 10. Always: on an HA run, **start every hub VM** (`vmctl.sh start-vm` on each
     name of `ha_node_names.json`, so a node stop that failed half way leaves no
-    VM stopped), then **close the tunnels**, **collect and upload** the report and the
+    VM stopped); on a failure, **the login's and the tunnels' ages**, each
+    tunnel's process and the end of its log; then **close the tunnels**, **collect and upload** the report and the
     outputs, then, unless `keep_hours` is above 0, a third Azure login,
     **destroy** (`uat/tofu/destroy.sh`) and **verify teardown**
     (`verify-teardown.sh`), each of which fails the job when something is
@@ -379,7 +401,11 @@ its server at `https://127.0.0.1:<kube_port>`). The generated passwords (Keycloa
 RustFS, the BFF secret) are in Kubernetes Secrets on core (`uat/hub/core/README.md`);
 OpenBao's unseal keys and root token are in `imas-uat-openbao-unseal` and
 `imas-uat-openbao-root`. `uat/access/vmctl.sh` works from your machine with an
-`az login`. Close your tunnels with `uat/access/tunnels.sh close /tmp/uat-$RUN-access`
+`az login`. A tunnel opened on your own `az login` keeps working (an
+interactive login renews itself; the runner's OIDC login cannot). If one
+hangs, `uat/access/tunnels.sh reopen /tmp/uat-$RUN.json /tmp/uat-$RUN-access`
+reopens them all, each on its old port when that port is free (it names any
+port that changed). Close your tunnels with `uat/access/tunnels.sh close /tmp/uat-$RUN-access`
 and delete the key file when done.
 
 Changing the expiry: re-apply with another `keep_hours`, or set the group's tag

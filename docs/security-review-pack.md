@@ -263,9 +263,11 @@ Accepted, Fix needed (with a note) or Not applicable.
    `AllowHttpsInbound`, core 443 `AllowRunnerHttpsIn` for saasapi and
    Keycloak, DMZ Envoy `AllowRunnerEnvoyIn`) take their source from
    `uat/tofu`'s `public_ingress`, which defaults to the service tag
-   `Internet`. Before W5 they admitted one `/32` (`runner_cidr`); Run 2
-   showed that address does not follow the runner's egress, and the
-   Bastion's tunnels hung. What still guards each port: the Bastion's Entra
+   `Internet`. Before W5 they admitted one `/32` (`runner_cidr`), which
+   need not follow the runner's egress. (W5 named it as the cause of Run
+   2's hung tunnels; W6 found the hang matches the age of the run's Azure
+   login instead, so that cause is not established. The relaxation stands
+   on the owner's decision.) What still guards each port: the Bastion's Entra
    ID login and the run's RBAC, then the VM's SSH key or WinRM password;
    saasapi's and Keycloak's tokens; Envoy's `jwt_authn` gate and the
    enrolment key on `/v1/enroll`.

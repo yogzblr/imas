@@ -72,9 +72,20 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # The login's time: each group delete waits for the deletion, so a run
+      # with several groups can outlive the OIDC login (about an hour), and
+      # janitor.sh logs in again before a group when it is 15 minutes old
+      # (uat/access/session.sh, W6).
+      - name: Record the Azure login time
+        run: uat/access/session.sh mark-login
+
       - name: Delete expired UAT resource groups
         env:
           DRY_RUN: ${{ inputs.dry_run }}
+          UAT_SESSION_HOOK: ${{ github.workspace }}/uat/access/session.sh
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           if [ "$DRY_RUN" = true ]; then
             uat/scripts/janitor.sh run --dry-run

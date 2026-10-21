@@ -518,6 +518,23 @@ check "a failed deletion fails the run" test "$rc" -eq 1
 check "... names it" grep -q "::error::janitor.sh: could not delete imas-uat-offset1" <<<"$out"
 check "... and the others are still deleted" test "$(deleted_names)" = "imas-uat-abc123 imas-uat-edge0001 imas-uat-frac0001 imas-uat-offset1 "
 
+janitor_state hook
+# W6: the session hook (login only) runs before each group is read again.
+cat >"$STUB_STATE/hook" <<'HOOK'
+#!/usr/bin/env bash
+echo "hook $*" >>"$STUB_STATE/calls.log"
+[ "$*" != "phase janitor: imas-uat-edge0001 --no-tunnels" ] || exit 1
+HOOK
+chmod +x "$STUB_STATE/hook"
+UAT_SESSION_HOOK="$STUB_STATE/hook" jrun
+check "the session hook runs before each due group, login only" \
+  test "$(grep -c '^hook phase janitor: imas-uat-[a-z0-9]* --no-tunnels$' "$STUB_STATE/calls.log")" -eq 4
+check "... right before that group is read again" \
+  grep -A1 '^hook phase janitor: imas-uat-abc123 ' "$STUB_STATE/calls.log" | grep -q 'az group show --name imas-uat-abc123'
+check "a failed refresh fails the run and leaves that group, the others deleted" \
+  test "$rc" -eq 1 -a "$(deleted_names)" = "imas-uat-abc123 imas-uat-frac0001 imas-uat-offset1 "
+check "... and says why" grep -q "::error::janitor.sh: could not delete imas-uat-edge0001 (expired .*; the Azure login could not be refreshed)" <<<"$out"
+
 janitor_state listfail
 touch "$STUB_STATE/list_fail"
 jrun

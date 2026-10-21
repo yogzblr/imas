@@ -25,6 +25,14 @@
 #                         hubs were installed from (HA3's helm upgrade; the
 #                         core one defaults to the state directory's) and
 #                         uat/hub/core/check.sh (default; HA3 runs it)
+#   UAT_SESSION_HOOK      optional (W6): uat/access/session.sh. With it each
+#                         top-level test runs in its own test process, and
+#                         `$UAT_SESSION_HOOK phase "tests: <Test>"` runs
+#                         before each one, so the Azure login and the
+#                         Bastion tunnels are refreshed between tests, never
+#                         during one. IMAS_UAT_TIMEOUT is then the budget of
+#                         all of them together. A failed hook stops the run
+#                         (the rest are reported missing).
 #
 # It builds the report tool and one test binary per package under
 # uat/tests with the uat tag, runs them with the tier's -run pattern, and
@@ -105,6 +113,46 @@ if [ ${#pkgs[@]} -eq 0 ]; then
 	exit 2
 fi
 
+# dur_seconds 1h30m: a go duration of h, m and s, in seconds.
+dur_seconds() {
+	local d=$1 n=0 v u
+	[[ "$d" =~ ^([0-9]+[hms])+$ ]] || return 1
+	while [[ "$d" =~ ^([0-9]+)([hms])(.*)$ ]]; do
+		v=${BASH_REMATCH[1]} u=${BASH_REMATCH[2]} d=${BASH_REMATCH[3]}
+		case $u in h) n=$((n + 10#$v * 3600)) ;; m) n=$((n + 10#$v * 60)) ;; s) n=$((n + 10#$v)) ;; esac
+	done
+	echo "$n"
+}
+
+# fail_event PKG TEXT: a package-level failure in the events, so the
+# summary reports it.
+fail_event() {
+	jq -cn --arg p "$1" --arg o "$2"$'\n' '{Action: "output", Package: $p, Output: $o}, {Action: "fail", Package: $p}' >>"$events"
+}
+
+# run_bin PKG DIR BIN PATTERN TIMEOUT: one test process, its events into the
+# report.
+run_bin() {
+	(cd "$2" && go tool test2json -t -p "$1" "$3" -test.v=test2json \
+		-test.run "$4" -test.timeout "$5" -test.count=1) |
+		tee -a "$events" | "$uatreport" follow
+}
+
+if [ -n "${UAT_SESSION_HOOK:-}" ]; then
+	budget=$(dur_seconds "$timeout") || {
+		echo "run.sh: IMAS_UAT_TIMEOUT '$timeout' must be h, m and s (like 165m) with UAT_SESSION_HOOK" >&2
+		exit 2
+	}
+	# The top-level part of the pattern selects the tests; the rest (the
+	# ingredient ids after TestIngredients$/) goes along to each.
+	top=${pattern%%/*}
+	sub=""
+	[ "$top" = "$pattern" ] || sub=/${pattern#*/}
+	echo "run.sh: one test process per top-level test, the session refreshed between them (UAT_SESSION_HOOK)" >&2
+fi
+started=$SECONDS
+stopped=""
+
 status=0
 for entry in "${pkgs[@]}"; do
 	pkg=${entry%%|*}
@@ -119,11 +167,38 @@ for entry in "${pkgs[@]}"; do
 		continue
 	fi
 	echo "run.sh: running $pkg" >&2
-	if ! (cd "$dir" && go tool test2json -t -p "$pkg" "$bin" -test.v=test2json \
-		-test.run "$pattern" -test.timeout "$timeout" -test.count=1) |
-		tee -a "$events" | "$uatreport" follow; then
-		status=1
+	if [ -z "${UAT_SESSION_HOOK:-}" ]; then
+		run_bin "$pkg" "$dir" "$bin" "$pattern" "$timeout" || status=1
+		continue
 	fi
+	[ -z "$stopped" ] || continue
+	# -test.list runs TestMain too, which only reads (the tenants' claims).
+	if ! tests=$(cd "$dir" && "$bin" -test.list "$top" 2>"$report/list.log"); then
+		cat "$report/list.log" >&2
+		fail_event "$pkg" "listing the tests failed: $(tail -n 5 "$report/list.log")"
+		status=1
+		continue
+	fi
+	while IFS= read -r test; do
+		[[ "$test" =~ ^Test[A-Za-z0-9_]*$ ]] || continue
+		left=$((budget - (SECONDS - started)))
+		if [ "$left" -le 0 ]; then
+			stopped="the tests' time budget ($timeout) ran out before $test"
+		elif ! "$UAT_SESSION_HOOK" phase "tests: $test"; then
+			stopped="the session refresh before $test failed (see the log above)"
+		else
+			# A refresh can take minutes: the test gets what is left after it.
+			left=$((budget - (SECONDS - started)))
+			[ "$left" -gt 0 ] || stopped="the tests' time budget ($timeout) ran out before $test"
+		fi
+		if [ -n "$stopped" ]; then
+			echo "run.sh: $stopped; not running the rest" >&2
+			fail_event "$pkg" "$stopped; the tests after it did not run"
+			status=1
+			break
+		fi
+		run_bin "$pkg" "$dir" "$bin" "^$test\$$sub" "${left}s" || status=1
+	done <<<"$tests"
 done
 
 set +e
