@@ -186,6 +186,10 @@ for entry in "${pkgs[@]}"; do
 			stopped="the tests' time budget ($timeout) ran out before $test"
 		elif ! "$UAT_SESSION_HOOK" phase "tests: $test"; then
 			stopped="the session refresh before $test failed (see the log above)"
+		else
+			# A refresh can take minutes: the test gets what is left after it.
+			left=$((budget - (SECONDS - started)))
+			[ "$left" -gt 0 ] || stopped="the tests' time budget ($timeout) ran out before $test"
 		fi
 		if [ -n "$stopped" ]; then
 			echo "run.sh: $stopped; not running the rest" >&2

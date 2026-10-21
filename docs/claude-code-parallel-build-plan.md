@@ -2570,7 +2570,7 @@ run_id, and runs in order: tofu apply (uat/tofu), opening the Bastion tunnels wi
 open (after installing the Azure CLI bastion and ssh extensions), k0s bootstrap, core install, DMZ install, enrolment,
 the tests (since W6, owner 2026-10-21: every phase from the tunnels on starts with
 uat/access/session.sh phase, which logs in again and reopens the tunnels when either is 15 minutes
-old, refuses past 40, and prints both ages; enrolment and the tests always refresh and probe first,
+old, then refuses if either is still past 40, and prints both ages; enrolment and the tests always refresh and probe first,
 and refresh again between their own Ansible runs and top-level tests), then a step with if always() that closes the tunnels, and a final destroy step with if
 always() unless keep_hours is above zero; it uploads the
 test report and the sensitive-free outputs as artifacts and never the unseal keys or kubeconfigs. It

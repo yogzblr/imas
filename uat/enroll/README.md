@@ -146,7 +146,8 @@ the token.
 "enrolment: <step>"` before steps 3, 4, 5 and 6, between two Ansible runs
 and never during one, which logs in to Azure again and reopens the Bastion
 tunnels when either is 15 minutes old (the runner's OIDC login stops
-working after about an hour, and tunnels opened on it hang). The inventory
+renewing after about an hour, and tunnels opened on it are suspected to
+hang then; see `uat/RUNBOOK.md`). The inventory
 is written again after each boundary, so a tunnel moved to a new port is
 followed. A failed hook stops enrolment before the next Ansible run.
 Without the variable (the local rig) nothing changes.

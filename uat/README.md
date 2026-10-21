@@ -204,12 +204,14 @@ names the piece):
    and on an HA run also each hub's API address (`dmz-api`, `core-api`).
 
    **From here on every phase starts with `uat/access/session.sh phase`**
-   (W6). The run's az session is an OIDC login, which stops working about an
-   hour after it is made, and tunnels opened on it then hang (Run 2 failed
-   that way, 55 to 60 minutes after its login: `RUNBOOK.md`). So a phase
-   logs in again and reopens the tunnels (on the same local ports) when
-   either is 15 minutes old, refuses to start past 40, and prints `azure
-   login age Xm, tunnels age Ym`. A tunnel is never reopened while something
+   (W6). The run's az session is an OIDC login, which stops renewing about
+   an hour after it is made, and tunnels opened on it are suspected to hang
+   then: Run 2 hung 55 to 60 minutes after its login, a correlation in
+   timing, not a proven mechanism (`RUNBOOK.md`). So a phase logs in again
+   and reopens the tunnels (on the same local ports) when either is 15
+   minutes old, then refuses to start if either is still older than 40
+   (that is, if no refresh happened), and prints `azure login age Xm,
+   tunnels age Ym`. A tunnel is never reopened while something
    uses it.
 6. **k0s** on both hubs (`uat/k0s/bootstrap.sh --nodes <hub_nodes>`): one
    single-node cluster per hub, or on the HA run three controller+worker nodes

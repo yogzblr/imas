@@ -11,13 +11,14 @@ name: UAT gate
 #   and sprouts (uat/enroll) -> tests (uat/tests/run.sh) -> start any stopped
 #   HA hub VM (the ha tier stops them) -> close tunnels ->
 #   upload the report -> destroy (uat/tofu/destroy.sh) -> verify teardown.
-# The az session comes from a GitHub OIDC login, which stops working about
-# an hour after it is made, and tunnels opened on it then hang (W6; UAT Run 2
-# failed that way 55 to 60 minutes after its login). So every phase starts
-# with uat/access/session.sh phase: it logs in again and reopens the tunnels
-# when either is UAT_SESSION_REFRESH_AFTER_MIN (15) minutes old, refuses to
-# start past UAT_SESSION_MAX_AGE_MIN (40), and prints "azure login age Xm,
-# tunnels age Ym". Enrolment and the tests always refresh first and probe
+# The az session comes from a GitHub OIDC login, which stops renewing about
+# an hour after it is made; tunnels opened on it are suspected to hang then
+# (W6: UAT Run 2 hung 55 to 60 minutes after its login; inferred from that
+# timing, not proven). So every phase starts with uat/access/session.sh
+# phase: it logs in again and reopens the tunnels when either is
+# UAT_SESSION_REFRESH_AFTER_MIN (15) minutes old, then refuses to start if
+# either is still older than UAT_SESSION_MAX_AGE_MIN (40, so only when no
+# refresh happened), and prints "azure login age Xm, tunnels age Ym". Enrolment and the tests always refresh first and probe
 # every tunnel, and refresh again between their own steps (enroll.sh between
 # Ansible runs, run.sh between top-level tests), never during one.
 # Core is installed before the DMZ: the bus needs core's public NATS trust

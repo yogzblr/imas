@@ -269,9 +269,11 @@ timing; the mechanism is not proven.
 with `uat/access/session.sh phase`: it logs in again (`az-relogin.sh`, the
 same OIDC exchange as `azure/login`) and reopens every tunnel on its port
 when the login or the tunnels are 15 minutes old
-(`UAT_SESSION_REFRESH_AFTER_MIN`), refuses to start a phase past 40
-(`UAT_SESSION_MAX_AGE_MIN`), and logs `<phase>: azure login age Xm, tunnels
-age Ym`. Enrolment and the tests always start on a fresh login and fresh
+(`UAT_SESSION_REFRESH_AFTER_MIN`), then checks the ages that result: it
+refuses to start a phase if either is still older than 40
+(`UAT_SESSION_MAX_AGE_MIN`), which can only happen when no refresh was
+made (a 41-minute-old login is refreshed first and the phase starts), and
+logs `<phase>: azure login age Xm, tunnels age Ym`. Enrolment and the tests always start on a fresh login and fresh
 tunnels, each probed end to end, and refresh again between their own
 Ansible runs (`enroll.sh`) and top-level tests (`run.sh`), never during one.
 `imas_verify` checks the connection before its `no_log` read, so an
