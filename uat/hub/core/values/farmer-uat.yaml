@@ -178,6 +178,15 @@ farmer:
     jobLogTTL: "720h"
     recipeAuditDays: 1
     boxKeyGrace: "24h"
+  # A clean first install (W7): the first container's /health can stay 503
+  # while the DMZ bus loader takes up the Accounts farmer wrote before the
+  # bus was up (UAT Run 2: about five minutes), so it gets 120 x 5 s = 10
+  # minutes instead of the chart's 60 x 5 s before kubelet restarts it.
+  # install.sh raises the Deployment's progress deadline to 1200 s to match
+  # (lib/common.sh FIRST_START_SECONDS; the chart has no value for it).
+  # UAT only, until P30 makes farmer ready within seconds of the bus.
+  startupProbe:
+    failureThreshold: 120
 
 saasapi:
   enabled: true

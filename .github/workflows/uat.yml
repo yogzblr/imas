@@ -413,13 +413,17 @@ jobs:
       # farmer and saasapi need the DMZ bus, so core's install.sh does not wait
       # for them: this does, registers the sprout release (and fails unless
       # saasapi's operator API then holds it with its GPG-signed checksums.txt
-      # and signature) and runs core's check.
+      # and signature) and runs core's check. A clean first start of farmer
+      # takes about ten minutes (W7): each rollout gets 1200 s, and a timeout
+      # prints the core pods, describe with events, farmer's last log lines
+      # and the DMZ bus and loader tails (from DMZ_KUBECONFIG) first.
       - name: Core hub, second half (uat/hub/core/finish.sh)
         env:
           RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
         run: |
           uat/access/session.sh phase "core hub, second half"
-          uat/hub/core/finish.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
+          DMZ_KUBECONFIG="$STATE/k0s/dmz.kubeconfig" \
+            uat/hub/core/finish.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
             "$STATE/hub" "$RELEASE_TAG"
 
       # Before enrolment: its rate limit check empties /v1/enroll's bucket and

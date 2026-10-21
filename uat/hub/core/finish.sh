@@ -6,7 +6,11 @@
 # the DMZ's NATS bus: farmer's /ready latches only once it has connected to
 # it, saasapi exits at startup without it, and the sprout release
 # registration hook POSTs to saasapi. So here, in order:
-#    1. wait for the farmer and saasapi rollouts
+#    1. wait for the farmer and saasapi rollouts, FIRST_START_SECONDS
+#       (1200 s) each with their progress deadline raised to match; on a
+#       timeout print the core pods, `kubectl describe` with events, farmer's
+#       last 40 log lines and the DMZ bus and loader tails (DMZ_KUBECONFIG,
+#       default dmz.kubeconfig next to <kubeconfig>), then fail (W7)
 #    2. register the sprout release (P20 option C): `helm upgrade` of the
 #       same chart with sproutRelease.register=true (--reuse-values, so
 #       nothing else moves; the chart's post-upgrade hooks are idempotent,
@@ -53,8 +57,10 @@ job_logs() {
 }
 
 log "waiting for farmer and saasapi (they need the DMZ bus: run uat/hub/dmz/install.sh first)"
-rollout "deployment/$FARMER_FULLNAME" "$CORE_NS" 900s
-rollout "deployment/$SAASAPI_FULLNAME" "$CORE_NS" 900s
+# FIRST_START_SECONDS each, with the diagnostics on a timeout (W7,
+# lib/common.sh): a clean first start of farmer takes about ten minutes.
+first_start_rollout "$FARMER_FULLNAME"
+first_start_rollout "$SAASAPI_FULLNAME"
 
 # --- 2. register ---------------------------------------------------------------
 helm_log="$STATE_DIR/helm-register.log"
@@ -91,7 +97,7 @@ if ! registered=$("$here/operator-release.sh" "${common[@]}" verify "$release_ta
 	die "the operator API does not hold release $release_tag as the chart stamped it (see above)"
 fi
 log "registered: $registered"
-rollout "deployment/$SAASAPI_FULLNAME" "$CORE_NS" 300s
+first_start_rollout "$SAASAPI_FULLNAME"
 
 if [[ "${SKIP_CHECK:-}" != 1 ]]; then
 	"$here/check.sh" "${common[@]}"
