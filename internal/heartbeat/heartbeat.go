@@ -121,12 +121,29 @@ func acceptedKeyFor(tenant, sproutID string) string {
 	return acceptedPrefix + slotTag(tenant, sproutID)
 }
 
-// client is the shared Valkey client. Nil until SetClient is called.
-var client valkey.Client
+// sharedClient is the shared Valkey client. Nil until SetClient is
+// called. Atomic: cmd/farmer installs it from a background retry when
+// Valkey was unreachable at boot, while listeners and handlers run.
+var sharedClient atomic.Pointer[valkey.Client]
 
 // SetClient installs the Valkey client this package reads and writes
-// through. Call once at startup.
-func SetClient(c valkey.Client) { client = c }
+// through. Call once at startup, or once Valkey is first reachable; safe
+// while the package is in use.
+func SetClient(c valkey.Client) {
+	if c == nil {
+		sharedClient.Store(nil)
+		return
+	}
+	sharedClient.Store(&c)
+}
+
+// loadClient returns the installed client, or nil.
+func loadClient() valkey.Client {
+	if p := sharedClient.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // slotTag is the part of both keys inside the braces: Valkey hashes only
 // that part, so a sprout's presence key and acceptance marker share a slot
@@ -142,6 +159,7 @@ func keyFor(tenant, sproutID string) string {
 // IsOnline reports whether sproutID, within tenantID, currently holds a
 // live heartbeat key.
 func IsOnline(ctx context.Context, tenantID, sproutID string) bool {
+	client := loadClient()
 	if client == nil {
 		return false
 	}
@@ -235,6 +253,7 @@ func RegisterListener(nc *nats.Conn) error {
 // holding the new connection's ID: a plain write, so the newest
 // connection always owns the key, whatever the key held before.
 func handleConnect(data []byte) {
+	client := loadClient()
 	tenant, sproutID, connID, ok := sproutIDFromEvent(data, "CONNECT")
 	if !ok || client == nil {
 		return
@@ -251,6 +270,7 @@ func handleConnect(data []byte) {
 // without a connection ID deletes nothing: it cannot show that the key is
 // its connection's.
 func handleDisconnect(data []byte) {
+	client := loadClient()
 	tenant, sproutID, connID, ok := sproutIDFromEvent(data, "DISCONNECT")
 	if !ok || client == nil || connID == "" {
 		return
@@ -265,6 +285,7 @@ func handleDisconnect(data []byte) {
 // setPresence is CONNECT's write: the presence key holds connID, with
 // the presence TTL.
 func setPresence(ctx context.Context, tenant, sproutID, connID string) error {
+	client := loadClient()
 	return client.Do(ctx, client.B().Set().Key(keyFor(tenant, sproutID)).Value(connID).Ex(ttl).Build()).Error()
 }
 
@@ -281,6 +302,7 @@ return 0`)
 // deletePresenceIfOwner is DISCONNECT's compare-and-delete. It reports
 // whether it deleted the key.
 func deletePresenceIfOwner(ctx context.Context, tenant, sproutID, connID string) (bool, error) {
+	client := loadClient()
 	n, err := disconnectScript.Exec(ctx, client, []string{keyFor(tenant, sproutID)}, []string{connID}).ToInt64()
 	return n == 1, err
 }
@@ -288,6 +310,7 @@ func deletePresenceIfOwner(ctx context.Context, tenant, sproutID, connID string)
 // presenceOwner returns the connection ID the presence key holds, and
 // whether the key exists.
 func presenceOwner(ctx context.Context, tenant, sproutID string) (string, bool, error) {
+	client := loadClient()
 	v, err := client.Do(ctx, client.B().Get().Key(keyFor(tenant, sproutID)).Build()).ToString()
 	if valkey.IsValkeyNil(err) {
 		return "", false, nil
@@ -397,6 +420,7 @@ return 0`)
 // refreshPresence runs refreshScript for (tenant, sproutID). It reports
 // whether the marker was there (and so the presence key refreshed).
 func refreshPresence(ctx context.Context, tenant, sproutID, connID string) (bool, error) {
+	client := loadClient()
 	n, err := refreshScript.Exec(ctx, client,
 		[]string{acceptedKeyFor(tenant, sproutID), keyFor(tenant, sproutID)},
 		[]string{strconv.FormatInt(int64(ttl/time.Second), 10), connID}).ToInt64()
@@ -443,6 +467,7 @@ func markerLifetime() time.Duration {
 // is authority: commands are authorised by the NATS User JWT permissions,
 // and CONNECT/DISCONNECT does not use the marker.
 func handleHeartbeat(tenantID, subject string, body []byte) {
+	client := loadClient()
 	if client == nil {
 		return
 	}
@@ -491,6 +516,7 @@ func handleHeartbeat(tenantID, subject string, body []byte) {
 // refreshed and stops looking online at once, on every farmer replica
 // (the keys are shared).
 func Invalidate(tenantID, sproutID string) {
+	client := loadClient()
 	if client == nil {
 		return
 	}
@@ -592,6 +618,7 @@ func RunSprout(ctx context.Context, nc busConn, sproutID string, interval time.D
 // tenant ID contains, so no other tenant's key, even one for a sprout of
 // the same ID, matches.
 func PurgeTenant(ctx context.Context, tenantID string, batch int) (map[string]int64, error) {
+	client := loadClient()
 	counts := map[string]int64{}
 	if !tenantpurge.ValidTenantID(tenantID) {
 		return counts, tenantpurge.ErrInvalidTenantID

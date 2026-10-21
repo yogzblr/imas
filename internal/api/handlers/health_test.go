@@ -12,9 +12,9 @@ import (
 // the test.
 func withValkeyClient(t *testing.T) {
 	t.Helper()
-	orig := valkeyPing
-	t.Cleanup(func() { valkeyPing = orig })
-	valkeyPing = valkeyUp
+	orig := loadValkeyPing()
+	t.Cleanup(func() { setValkeyPing(orig) })
+	setValkeyPing(valkeyUp)
 }
 
 func TestGetHealth_StatusOK(t *testing.T) {
@@ -77,24 +77,58 @@ func TestGetHealth(t *testing.T) {
 	}
 }
 
-// With no Valkey client (initValkeyClient failed at boot and never
-// retries), liveness fails so kubelet restarts the pod.
+// With no Valkey client yet (farmer is still retrying the connection),
+// liveness stays 200: a restart would not connect any sooner, and GET
+// /ready keeps the replica out of the Service (P30).
 func TestGetHealth_NoValkeyClient(t *testing.T) {
-	orig := valkeyPing
-	t.Cleanup(func() { valkeyPing = orig })
+	orig := loadValkeyPing()
+	t.Cleanup(func() { setValkeyPing(orig) })
 	SetReadinessValkey(nil)
 
 	w := httptest.NewRecorder()
 	GetHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var body HealthResponse
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if body.Status != "unhealthy" || body.Valkey != "not configured" {
-		t.Errorf("status/valkey = %q/%q, want unhealthy/not configured", body.Status, body.Valkey)
+	if body.Status != "ok" || body.Valkey != "connecting" {
+		t.Errorf("status/valkey = %q/%q, want ok/connecting", body.Status, body.Valkey)
+	}
+}
+
+// A Valkey client installed after the server started (connectValkey's
+// background retry) is seen by the next /health and /ready, with no
+// restart; run with -race, this also checks the install is safe while
+// requests are served.
+func TestValkeyInstalledWhileServing(t *testing.T) {
+	setReadyDeps(t, openTestPXC(t), nil, allTenantsUp)
+
+	if code, body := getReady(t); code != http.StatusServiceUnavailable || body.Valkey != "connecting" {
+		t.Fatalf("before the client: /ready = %d %+v, want 503 with valkey connecting", code, body)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 50 {
+			GetHealth(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+		}
+	}()
+	setValkeyPing(valkeyUp)
+	<-done
+	if code, body := getReady(t); code != http.StatusOK || body.Valkey != "ok" {
+		t.Fatalf("after the client: /ready = %d %+v, want 200 with valkey ok", code, body)
+	}
+	w := httptest.NewRecorder()
+	GetHealth(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var body HealthResponse
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || body.Valkey != "ok" {
+		t.Fatalf("after the client: /health = %d %+v, want 200 with valkey ok", w.Code, body)
 	}
 }

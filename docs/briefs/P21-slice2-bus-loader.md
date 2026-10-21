@@ -99,6 +99,7 @@ Decode with nats-io/jwt/v2 `DecodeAccountClaims`; reject (log, count, skip, keep
 
 ### 4.3 Event
 Subject `imas.bus.accounts.changed`, published by farmer in the SYS account (needs `pub imas.bus.accounts.changed` in farmer's SYS-account user; loader's SYS user gets `sub imas.bus.accounts.changed`). Loader uses a plain `nc.Subscribe` (NOT QueueSubscribe), so every node's loader receives it. Core NATS delivery is at-most-once and not replayed; it is a hint.
+As built since P30 (`docs/briefs/W7-P30-first-install-startup-race.md`): an event farmer could not publish (no bus reachable, or the publish failed) is retried in the background with backoff (1s to 30s, jittered) until it reaches the bus; accounts queued while a retry waits are merged, newest iat per account. It stays a hint: during a node's initial load the loader does not process events at all (its worker starts after the load), so a first install relies on the initial poll (5.3), not on this event.
 Payload JSON: `{"v":1,"token":"<index token>","accounts":{"<pub>":<iat>,...}}`. `accounts` omitted or empty means "full reconcile". Max 64 KiB; farmer sends omitted-accounts when more than 500 entries.
 
 ### 4.4 Timer
@@ -164,6 +165,7 @@ Ready is false at process start. Algorithm `loadAll(ctx)`:
 2. List `accounts/` (paged, 1000). Target set T = all `*.jwt` keys. If the SYS account key (from trust ConfigMap `sys-account.pub`) is not in T: stay not-ready, status "bucket not initialised", retry after backoff. (The fence and the server need the SYS account; with a missing SYS object the cluster cannot form trust.)
 3. For each key in T not yet applied at that ETag, with concurrency IMAS_LOADER_PUSH_CONCURRENCY and rate IMAS_LOADER_PUSH_RATE: Get; validate (4.2); compare iat with `applied` (5.5); if newer, push (5.6).
 4. Re-list. If any key is new or has a changed ETag versus what this pass processed, repeat from step 3 (tenants added during start-up are picked up here, bounded by pass count 20 per run; after the 20th pass with keys still unprocessed or changed, the loader stays NOT ready, sets /status to "initial load incomplete", waits one backoff interval and starts a new run from step 2. It never becomes Ready with unprocessed keys).
+   As built since P30: every wait of the initial load (between runs, and between passes of a run) is the 5.7 backoff capped at `InitialPollInterval` (default 5s, ±20%; `accountloader.DefaultInitialPollInterval`, no environment variable). Before P30 it grew to 30s, so a loader that had waited a while on an empty bucket (the DMZ installed before the core hub) could take up to 30s to see farmer's first Accounts. The reconcile timer (4.4) is not involved during the initial load: it starts only once the load is complete, and keeps its interval.
 5. Own-node check: `ListIDs` (one `$SYS.REQ.CLAIMS.LIST` request, taking the reply whose server id equals `nc.ConnectedServerId()`) and verify every pub in T that the loader applied is present. A missing one is re-pushed once; still missing: not ready.
 6. Ready := true when step 4 finds no unprocessed or changed keys AND step 5 passes. "Loaded count matches" therefore means: every key in the final listing T has been fetched and validated, applied-or-held-at-equal-or-newer iat, pushed where needed, and confirmed present in the own node's CLAIMS.LIST reply. Keys that failed validation are excluded from T but are listed in /status and counted; if the SYS key is invalid, not ready.
 Once Ready, it stays Ready (section 5.7 for S3 outages). Ready is NOT cleared by new tenants; those are applied by event/timer.
@@ -187,7 +189,7 @@ Objects are not deleted by farmer, so there is no delete handling; a disappearin
 The loader never pushes an account it cannot decode and never pushes a JWT with iat lower than `applied`.
 
 ### 5.7 Retries, backoff, S3 outages
-- Backoff: exponential from 500ms to 30s with full jitter, reusing `objectstore.RetryPolicy` jitter; per-request timeout 15s.
+- Backoff: exponential from 500ms to 30s with full jitter, reusing `objectstore.RetryPolicy` jitter; per-request timeout 15s. As built since P30, capped at `InitialPollInterval` (5s ±20%) during the initial load (5.3).
 - S3 down at start: not ready, retry forever. No timeout-based give-up (kubelet's startupProbe failureThreshold set high, section 6). The pod then never becomes Ready and a rollout halts, which is intended (section 6.4).
 - S3 down while running: stay Ready, keep serving the node, log at warn once per minute, expose `loader_last_success_timestamp_seconds` and `loader_s3_errors_total`. No staleness cut-off by default (owner decision D-2).
 - Node connection lost: Ready false only if loadAll has not completed; after that, on reconnect the loader re-checks (ListIDs) and re-pushes anything missing before reporting any change.
@@ -252,7 +254,7 @@ New `pushToAllNodes(ctx, jwt)` in internal/pki/resolver.go replacing the single-
 ### 7.5 Failure policy
 - Bucket write fails (step 3 or 4): for lock-outs/revocations still push live (security first), then return an error to the caller so the API call reports failure and the operation is retried; for ordinary updates return the error without pushing. In both cases the periodic `ReconcileAll` repairs.
 - Push fails or partial: log, return nil (the bucket has it), with the log field `farmer_account_push_missing_nodes=N` (no metrics in this phase; the bucket write failures log `farmer_account_bucket_write_failed=N`; both documented in deploy/helm/farmer/README.md, "Account publisher log fields").
-- Event publish fails: log only.
+- Event publish fails: log, and retry in the background until it succeeds (as built since P30; see 4.3). Not the caller's error.
 - `ReconcileAll` runs at farmer start-up (after ReloadNKeys, cmd/farmer/main.go:120-230) and inside every PushAllAccounts: it lists the bucket and PUTs any farmer-state account whose object is missing or whose iat differs (farmer state wins, since it is the signer). This also repairs a bucket rollback or lost write.
 
 ### 7.6 Files

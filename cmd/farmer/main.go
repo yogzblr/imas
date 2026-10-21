@@ -27,6 +27,7 @@ import (
 
 	log "github.com/yogzblr/imas/internal/log"
 
+	"github.com/yogzblr/imas/internal/accountloader"
 	"github.com/yogzblr/imas/internal/api"
 	"github.com/yogzblr/imas/internal/api/handlers"
 	"github.com/yogzblr/imas/internal/audit"
@@ -219,7 +220,7 @@ func main() {
 	recipeStore := initRecipeStore()
 	jobStore := initJobStore()
 	initGatewaySigner()
-	initValkeyClient()
+	valkeyConnected := initValkeyClient()
 	props.LoadStaticProps(staticPropsWithoutFacts(config.StaticProps()))
 	// A reserved name an older farmer loaded from config stays until
 	// dropped: static props never expire on their own.
@@ -296,6 +297,9 @@ func main() {
 	relockInterval, err := pki.TenantRelockInterval()
 	if err != nil {
 		log.Fatalf("tenant relock: %v", err)
+	}
+	if !valkeyConnected {
+		go connectValkey(ctx, dialValkey, installValkeyClient, valkeyRetryBackoff)
 	}
 	tenantRegistry = newTenantRegistry(ctx, dialTenant)
 	installConnGetter(tenantRegistry)
@@ -616,27 +620,72 @@ func initGatewaySigner() {
 // heartbeats (internal/heartbeat) and the enrollment/refresh replay cache
 // (internal/pki's replaycache.go) read and write through. The $SYS event
 // listener itself is registered separately, by initSystemAccountListeners,
-// once the bus is reachable. Not fatal if Valkey is unreachable, but
-// POST /v1/enroll and /v1/refresh fail closed without it, and /health
-// reports the missing client. It authenticates with the password from
-// IMAS_VALKEY_PASSWORD_FILE and uses TLS with IMAS_VALKEY_TLS
-// (config.ValkeyOptions; LoadConfig already refused unusable settings),
-// then warns if Valkey may evict keys (valkeyconn.CheckEviction).
-func initValkeyClient() {
-	addrs := strings.Split(config.ValkeyAddrs, ",")
-	client, err := valkey.NewClient(config.ValkeyOptions.ClientOption(addrs))
-	if err != nil {
-		log.Errorf("failed to connect to Valkey at %v (%v; POST /v1/enroll and /v1/refresh will fail until it is reachable): %v", addrs, config.ValkeyOptions, err)
-		return
-	}
-	log.Infof("Valkey client connected to %v (%v)", addrs, config.ValkeyOptions)
-	valkeyconn.CheckEviction(context.Background(), client, log.Warnf)
-	heartbeat.SetClient(client)
+// once the bus is reachable. It tries once and reports whether it
+// connected; when it didn't (on a clean install Valkey can start after
+// farmer), main runs connectValkey, which keeps trying in the background.
+// Until a client is installed, POST /v1/enroll and /v1/refresh fail
+// closed and GET /ready reports Valkey as "connecting"; GET /health stays
+// 200, since a restart would not connect any sooner (P30). It
+// authenticates with the password from IMAS_VALKEY_PASSWORD_FILE and uses
+// TLS with IMAS_VALKEY_TLS (config.ValkeyOptions; LoadConfig already
+// refused unusable settings), then warns if Valkey may evict keys
+// (valkeyconn.CheckEviction).
+func initValkeyClient() bool {
 	// A sprout that is denied, rejected, unaccepted or deleted loses its
 	// Valkey acceptance marker and presence key at once, on every replica.
+	// Registered before the client exists: Invalidate does nothing until
+	// SetClient has installed one.
 	pki.OnSproutLeftAccepted(heartbeat.Invalidate)
+	client, err := dialValkey()
+	if err != nil {
+		log.Errorf("failed to connect to Valkey at %s (%v; retrying in the background, and until it connects POST /v1/enroll and /v1/refresh fail and GET /ready reports valkey connecting): %v", config.ValkeyAddrs, config.ValkeyOptions, err)
+		return false
+	}
+	installValkeyClient(client)
+	return true
+}
+
+// dialValkey creates the Valkey client; valkey-go connects while creating
+// it, so this fails while Valkey is unreachable.
+func dialValkey() (valkey.Client, error) {
+	return valkey.NewClient(config.ValkeyOptions.ClientOption(strings.Split(config.ValkeyAddrs, ",")))
+}
+
+// installValkeyClient hands client to everything that uses Valkey. Each
+// setter is safe while requests are served, so connectValkey can call it
+// late. Readiness goes last: a replica reports Valkey ok only once the
+// heartbeats and the replay cache have the client too.
+func installValkeyClient(client valkey.Client) {
+	log.Infof("Valkey client connected to %s (%v)", config.ValkeyAddrs, config.ValkeyOptions)
+	valkeyconn.CheckEviction(context.Background(), client, log.Warnf)
+	heartbeat.SetClient(client)
 	pki.SetReplayCacheClient(client)
 	handlers.SetReadinessValkey(client)
+}
+
+// valkeyRetryBackoff spaces connectValkey's attempts.
+var valkeyRetryBackoff = accountloader.Backoff{Min: time.Second, Max: 10 * time.Second}
+
+// connectValkey calls dial until it returns a client, then installs it,
+// or returns when ctx ends. It waits backoff (jittered) between attempts
+// and logs the first failure and then every tenth.
+func connectValkey(ctx context.Context, dial func() (valkey.Client, error), install func(valkey.Client), backoff accountloader.Backoff) {
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff.Jittered(attempt)):
+		}
+		client, err := dial()
+		if err == nil {
+			log.Infof("Valkey reachable after %d background attempts", attempt)
+			install(client)
+			return
+		}
+		if attempt == 1 || attempt%10 == 0 {
+			log.Warnf("still connecting to Valkey at %s (attempt %d): %v", config.ValkeyAddrs, attempt, err)
+		}
+	}
 }
 
 // farmerLogSubject is the SYS Account subject prefix farmer publishes its

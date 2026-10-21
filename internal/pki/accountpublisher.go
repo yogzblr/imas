@@ -137,6 +137,16 @@ type s3AccountPublisher struct {
 	// seen caches what an object held at an ETag, so ReconcileAll reads
 	// only objects that changed since it last looked.
 	seen map[string]seenObject
+
+	// unannounced holds the accounts (account -> newest issued-at) whose
+	// accounts-changed event did not reach the bus; retryAnnounce, which
+	// runs while announcing is set, publishes them until it succeeds.
+	unannounced map[string]int64
+	announcing  bool
+	// announceBackoff spaces retryAnnounce's attempts; announceStop ends
+	// it (tests; farmer's never ends).
+	announceBackoff accountloader.Backoff
+	announceStop    context.Context
 }
 
 type seenObject struct {
@@ -169,6 +179,10 @@ func newS3AccountPublisher(objects accountObjects, subject string, trusted []str
 		local:   localAccountJWTs,
 		locks:   map[string]*sync.Mutex{},
 		seen:    map[string]seenObject{},
+
+		unannounced:     map[string]int64{},
+		announceBackoff: accountloader.Backoff{Min: time.Second, Max: 30 * time.Second},
+		announceStop:    context.Background(),
 	}
 }
 
@@ -291,6 +305,9 @@ func (p *s3AccountPublisher) pushAndAnnounce(accountPub, accountJWT string, iat 
 	bus, err := p.openBus()
 	if err != nil {
 		log.Errorf("pushing Account %s: connecting to the bus: %v; the bus loaders will apply it from the accounts bucket", accountPub, err)
+		if announce {
+			p.queueAnnounce(map[string]int64{accountPub: iat})
+		}
 		return
 	}
 	defer bus.close()
@@ -306,9 +323,17 @@ func (p *s3AccountPublisher) pushAndAnnounce(accountPub, accountJWT string, iat 
 	}
 }
 
-// announce publishes the accounts-changed event (§4.3); a failure is
-// logged only, since the event is a hint.
+// announce publishes the accounts-changed event (§4.3). The event is a
+// hint, so a failure is logged only, and queued for retryAnnounce.
 func (p *s3AccountPublisher) announce(bus accountBus, accounts map[string]int64) {
+	if err := p.publishEvent(bus, accounts); err != nil {
+		log.Warnf("publishing %s: %v; retrying in the background (the bus loaders' timer also picks the change up)", p.subject, err)
+		p.queueAnnounce(accounts)
+	}
+}
+
+// publishEvent publishes one accounts-changed event naming accounts.
+func (p *s3AccountPublisher) publishEvent(bus accountBus, accounts map[string]int64) error {
 	ev := struct {
 		V        int              `json:"v"`
 		Accounts map[string]int64 `json:"accounts,omitempty"`
@@ -317,11 +342,76 @@ func (p *s3AccountPublisher) announce(bus accountBus, accounts map[string]int64)
 		ev.Accounts = accounts
 	}
 	b, err := json.Marshal(ev)
-	if err == nil {
-		err = bus.publish(p.subject, b)
-	}
 	if err != nil {
-		log.Warnf("publishing %s: %v; the bus loaders' timer picks the change up", p.subject, err)
+		return err
+	}
+	return bus.publish(p.subject, b)
+}
+
+// queueAnnounce records accounts whose event did not reach the bus and
+// starts retryAnnounce unless it is running. An account already queued
+// keeps the newer issued-at.
+func (p *s3AccountPublisher) queueAnnounce(accounts map[string]int64) {
+	p.mu.Lock()
+	for pub, iat := range accounts {
+		if iat > p.unannounced[pub] {
+			p.unannounced[pub] = iat
+		}
+	}
+	start := !p.announcing
+	p.announcing = true
+	p.mu.Unlock()
+	if start {
+		go p.retryAnnounce()
+	}
+}
+
+// retryAnnounce publishes the queued accounts-changed event, with
+// backoff, until it reaches the bus or announceStop ends. Before P30 a
+// failed event was not retried: farmer starting before the bus lost the
+// event for the Accounts it had just written, and nothing announced them
+// again (a later ReconcileAll finds the bucket current and announces
+// nothing). The loaders still reconcile on their own timer; this only
+// gets the hint to them once the bus is reachable.
+func (p *s3AccountPublisher) retryAnnounce() {
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-p.announceStop.Done():
+			p.mu.Lock()
+			p.announcing = false
+			p.mu.Unlock()
+			return
+		case <-time.After(p.announceBackoff.Jittered(attempt)):
+		}
+		p.mu.Lock()
+		accounts := maps.Clone(p.unannounced)
+		p.mu.Unlock()
+		bus, err := p.openBus()
+		if err == nil {
+			err = p.publishEvent(bus, accounts)
+			bus.close()
+		}
+		if err != nil {
+			if attempt%10 == 0 {
+				log.Warnf("publishing %s for %d Accounts, attempt %d: %v; still retrying", p.subject, len(accounts), attempt, err)
+			}
+			continue
+		}
+		p.mu.Lock()
+		for pub, iat := range accounts {
+			if p.unannounced[pub] == iat {
+				delete(p.unannounced, pub)
+			}
+		}
+		done := len(p.unannounced) == 0
+		if done {
+			p.announcing = false
+		}
+		p.mu.Unlock()
+		if done {
+			log.Infof("published %s for %d Accounts after %d retries", p.subject, len(accounts), attempt)
+			return
+		}
 	}
 }
 
@@ -520,7 +610,8 @@ func (p *s3AccountPublisher) ReconcileAll(ctx context.Context) error {
 			log.Infof("accounts bucket: wrote %d Account JWTs that were missing or older", len(changed))
 		}
 		if bus, err := p.openBus(); err != nil {
-			log.Warnf("announcing %d reconciled Accounts: connecting to the bus: %v; the bus loaders' timer picks them up", len(changed), err)
+			log.Warnf("announcing %d reconciled Accounts: connecting to the bus: %v; retrying in the background (the bus loaders' timer also picks them up)", len(changed), err)
+			p.queueAnnounce(changed)
 		} else {
 			p.announce(bus, changed)
 			bus.close()

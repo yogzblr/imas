@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/valkey-io/valkey-go"
@@ -42,15 +43,31 @@ const replayCacheClockMargin = time.Minute
 // that doesn't complete in time fails the request, like any other error.
 const replayCacheTimeout = time.Second
 
-// replayClient is the Valkey client claims are written through. Nil until
-// SetReplayCacheClient is called, and while it's nil every claim fails:
-// enrollment and refresh fail closed rather than run without replay
-// protection.
-var replayClient valkey.Client
+// replayClientPtr holds the Valkey client claims are written through. Nil
+// until SetReplayCacheClient is called, and while it's nil every claim
+// fails: enrollment and refresh fail closed rather than run without
+// replay protection. Atomic: cmd/farmer installs it from a background
+// retry when Valkey was unreachable at boot, while requests are served.
+var replayClientPtr atomic.Pointer[valkey.Client]
 
 // SetReplayCacheClient installs the Valkey client the replay cache writes
-// through. Call once at startup (cmd/farmer's initValkeyClient).
-func SetReplayCacheClient(c valkey.Client) { replayClient = c }
+// through. Call once at startup, or once Valkey is first reachable
+// (cmd/farmer's connectValkey); safe while requests are served.
+func SetReplayCacheClient(c valkey.Client) {
+	if c == nil {
+		replayClientPtr.Store(nil)
+		return
+	}
+	replayClientPtr.Store(&c)
+}
+
+// loadReplayClient returns the installed client, or nil.
+func loadReplayClient() valkey.Client {
+	if p := replayClientPtr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // errSignatureReplayed is claimSignedPayload's error for a payload that
 // has already been claimed. Logged locally only; callers collapse it to
@@ -94,6 +111,7 @@ func replayKey(payload, sig []byte) string {
 // at once, exactly one wins. The TTL is relative, computed from farmer's
 // own clock, so Valkey's clock doesn't need to agree with farmer's.
 func claimSignedPayload(ctx context.Context, payload, sig []byte, timestamp int64) error {
+	replayClient := loadReplayClient()
 	if replayClient == nil {
 		return errors.New("no replay cache configured (SetReplayCacheClient was never called)")
 	}
