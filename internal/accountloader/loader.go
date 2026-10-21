@@ -35,8 +35,11 @@ const (
 	DefaultEventSubject       = "imas.bus.accounts.changed"
 	DefaultReconcileInterval  = 30 * time.Second
 	DefaultFullResyncInterval = 5 * time.Minute
-	DefaultPushConcurrency    = 8
-	DefaultPushRate           = 200
+	// DefaultInitialPollInterval caps the wait between start-up runs and
+	// passes while the initial load is incomplete (P30).
+	DefaultInitialPollInterval = 5 * time.Second
+	DefaultPushConcurrency     = 8
+	DefaultPushRate            = 200
 
 	maxEventSize = 64 << 10
 )
@@ -72,15 +75,20 @@ type Config struct {
 	PushConcurrency    int           // DefaultPushConcurrency
 	PushRate           float64       // pushes per second, DefaultPushRate
 
-	Backoff        Backoff       // between failed start-up runs: 500ms to 30s
-	PushBackoff    Backoff       // between push attempts: 200ms to 5s
-	PushAttempts   int           // 5
-	RepushRounds   int           // re-read rounds after a push: 5
-	RequestTimeout time.Duration // one object store request: 15s
-	MaxPasses      int           // start-up passes per run: 20
-	EventWindow    time.Duration // how long an event fetch waits for the object: 30s
-	SampleSize     int           // accounts looked up per reconcile: 50
-	LookupWindow   time.Duration // how long a lookup collects answers: 1s
+	Backoff Backoff // between failed start-up runs: 500ms to 30s
+	// InitialPollInterval (DefaultInitialPollInterval, ±20%) caps every
+	// Backoff wait of the initial load, so a node waiting for farmer's
+	// first Accounts picks them up within seconds; its timers take over
+	// once the load is complete.
+	InitialPollInterval time.Duration
+	PushBackoff         Backoff       // between push attempts: 200ms to 5s
+	PushAttempts        int           // 5
+	RepushRounds        int           // re-read rounds after a push: 5
+	RequestTimeout      time.Duration // one object store request: 15s
+	MaxPasses           int           // start-up passes per run: 20
+	EventWindow         time.Duration // how long an event fetch waits for the object: 30s
+	SampleSize          int           // accounts looked up per reconcile: 50
+	LookupWindow        time.Duration // how long a lookup collects answers: 1s
 
 	// Sleep waits d or until ctx ends; tests replace it.
 	Sleep func(ctx context.Context, d time.Duration) error
@@ -103,6 +111,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.PushRate <= 0 {
 		c.PushRate = DefaultPushRate
+	}
+	if c.InitialPollInterval <= 0 {
+		c.InitialPollInterval = DefaultInitialPollInterval
 	}
 	if c.Backoff.Min <= 0 {
 		c.Backoff = Backoff{Min: 500 * time.Millisecond, Max: 30 * time.Second}
@@ -347,10 +358,19 @@ func (l *Loader) loadAll(ctx context.Context) {
 		}
 		l.setState(state)
 		log.Warnf("accountloader: not ready (%s): %v", state, err)
-		if l.cfg.Sleep(ctx, l.cfg.Backoff.Jittered(attempt)) != nil {
+		if l.cfg.Sleep(ctx, l.initialWait(attempt)) != nil {
 			return
 		}
 	}
+}
+
+// initialWait is the initial load's wait after a failed run or pass: the
+// start-up backoff, capped at InitialPollInterval (±20%). Before P30 it
+// grew to 30s, so a loader that had waited a while for an empty bucket
+// (the DMZ installed before the core hub) could take up to that long to
+// see farmer's first Accounts, and its bus node stayed unready meanwhile.
+func (l *Loader) initialWait(attempt int) time.Duration {
+	return min(l.cfg.Backoff.Jittered(attempt), jitter20(l.cfg.InitialPollInterval))
 }
 
 // loadOnce is one start-up run; on failure it returns the state to show.
@@ -379,7 +399,7 @@ func (l *Loader) loadOnce(ctx context.Context, sysKey string) (string, error) {
 			done = true
 			break
 		}
-		if !ok && l.cfg.Sleep(ctx, l.cfg.Backoff.Jittered(pass)) != nil {
+		if !ok && l.cfg.Sleep(ctx, l.initialWait(pass)) != nil {
 			return StateIncomplete, ctx.Err()
 		}
 	}

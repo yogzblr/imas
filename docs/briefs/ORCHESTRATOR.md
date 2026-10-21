@@ -78,6 +78,7 @@ A unit may start only when every unit in "Needs" is merged to main.
 | W5 | `W5-bastion-https-allowlist.md` (whole file) | none |
 | W6 | `W6-azure-auth-age-and-tunnels.md` (whole file) | none |
 | W7 | `W7-P30-first-install-startup-race.md` W7 | none |
+| P30 | `W7-P30-first-install-startup-race.md` section P30, items 1 to 4 | none |
 
 First wave of the original build (no needs): A1, B1, C1, D1, D2. Units A to D are all merged (C2 last, as PR 229; its leftovers are E6); the follow-up units E1 to E5 and Z are launched in the same way, E6 first by rule 10 (E3 waits for it). Why the order: P22 first (design D13);
 A2 and the P21 slice 1 chart work both edit the farmer bootstrap Job and policies, so
@@ -258,3 +259,4 @@ Paste this into a Claude Code session started in the yogzblr/imas repo on main.
 | W5 | UAT network: the Bastion 443 allowlist follows the caller (Run 2, rc.15) | W5-bastion-https-allowlist.md | W5 |
 | W6 | UAT session: refresh the Azure login and the Bastion tunnels at phase boundaries, age guard and probes (Run 2, rc.15) | W6-azure-auth-age-and-tunnels.md | W6 |
 | W7 | UAT core hub: tolerate a slow first start of farmer (20-minute waits and progress deadline, 10-minute startup probe, diagnostics on a timeout) (Run 2, rc.15) | W7-P30-first-install-startup-race.md | W7 |
+| P30 | Farmer ready after a late Valkey or bus without a restart (Valkey retried in the background, /health no longer 503 on it, failed accounts-changed event retried), and the bus loader's fast initial poll (Run 2, rc.15) | W7-P30-first-install-startup-race.md | P30 |

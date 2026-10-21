@@ -26,7 +26,7 @@ func withTestReplayCache(t *testing.T) *miniredis.Miniredis {
 		t.Fatalf("connecting to miniredis: %v", err)
 	}
 	t.Cleanup(client.Close)
-	orig := replayClient
+	orig := loadReplayClient()
 	SetReplayCacheClient(client)
 	t.Cleanup(func() { SetReplayCacheClient(orig) })
 	return mr

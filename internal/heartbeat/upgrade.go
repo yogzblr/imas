@@ -55,6 +55,7 @@ const valkeyTimeout = 2 * time.Second
 // message of kind, which farmer refused. Best effort: no Valkey client or
 // a Valkey error leaves the marker unset (the refusal is still logged).
 func MarkUpgradeRequired(tenantID, sproutID, kind string) {
+	client := loadClient()
 	if client == nil {
 		return
 	}
@@ -67,6 +68,7 @@ func MarkUpgradeRequired(tenantID, sproutID, kind string) {
 // ClearUpgradeRequired removes the marker: tenantID's sproutID sealed a
 // facts report that opened. Best effort, like MarkUpgradeRequired.
 func ClearUpgradeRequired(tenantID, sproutID string) {
+	client := loadClient()
 	if client == nil {
 		return
 	}
@@ -79,6 +81,7 @@ func ClearUpgradeRequired(tenantID, sproutID string) {
 // sproutID last sent and farmer refused, or "" if there is no marker
 // (or Valkey can't say).
 func UpgradeRequired(ctx context.Context, tenantID, sproutID string) string {
+	client := loadClient()
 	if client == nil {
 		return ""
 	}

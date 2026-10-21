@@ -2,6 +2,7 @@ package pki
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -222,6 +223,10 @@ func useReplicaBuckets(t testing.TB, accounts, sproutJWTs objectstore.Config) {
 	if err != nil {
 		t.Fatalf("NewAccountPublisher: %v", err)
 	}
+	// A background announce retry ends with the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p.(*s3AccountPublisher).announceStop = ctx
 	SetAccountPublisher(p)
 	t.Cleanup(func() { SetAccountPublisher(nil) })
 	ss, err := objectstore.Open(sproutJWTs)

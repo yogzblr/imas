@@ -108,6 +108,10 @@ type loaderEnv struct {
 	// chart mounts bus-loader-user.jwt and its seed.
 	userJWTFile, userSeedFile string
 	reconcile                 time.Duration
+	// startBackoff and initialPoll, when set, replace the loaders' short
+	// start-up backoff and leave InitialPollInterval at its value.
+	startBackoff accountloader.Backoff
+	initialPoll  time.Duration
 }
 
 // newLoaderEnv builds the trust (newTrust) with the loader's SYS user
@@ -199,17 +203,22 @@ func (e *loaderEnv) startLoaderEvery(t *testing.T, nodeURL string, reconcile tim
 		t.Fatal(err)
 	}
 	cfg := e.bucket.srv.Config()
+	backoff := accountloader.Backoff{Min: 20 * time.Millisecond, Max: 200 * time.Millisecond}
+	if e.startBackoff.Min > 0 {
+		backoff = e.startBackoff
+	}
 	l, err := accountloader.New(accountloader.Config{
-		Source:            accountloader.NewStoreSource(func() (*objectstore.Store, error) { return objectstore.Open(cfg) }),
-		Node:              node,
-		Trusted:           e.trusted,
-		SysAccount:        e.sysPub,
-		ReconcileInterval: reconcile,
-		Backoff:           accountloader.Backoff{Min: 20 * time.Millisecond, Max: 200 * time.Millisecond},
-		PushBackoff:       accountloader.Backoff{Min: 10 * time.Millisecond, Max: 100 * time.Millisecond},
-		RequestTimeout:    5 * time.Second,
-		EventWindow:       time.Second,
-		LookupWindow:      200 * time.Millisecond,
+		Source:              accountloader.NewStoreSource(func() (*objectstore.Store, error) { return objectstore.Open(cfg) }),
+		Node:                node,
+		Trusted:             e.trusted,
+		SysAccount:          e.sysPub,
+		ReconcileInterval:   reconcile,
+		Backoff:             backoff,
+		InitialPollInterval: e.initialPoll,
+		PushBackoff:         accountloader.Backoff{Min: 10 * time.Millisecond, Max: 100 * time.Millisecond},
+		RequestTimeout:      5 * time.Second,
+		EventWindow:         time.Second,
+		LookupWindow:        200 * time.Millisecond,
 	})
 	if err != nil {
 		node.Close()
@@ -505,6 +514,60 @@ func TestLoaderEmptyNodeReadyOnlyAfterLoadingEverything(t *testing.T) {
 		if !e.tr.admitted(tn, c.url(0)) {
 			t.Fatalf("a sprout of tenant %s was refused after the load", tn.sproutID)
 		}
+	}
+}
+
+// TestLoaderFarmerAccountsAfterLongEmptyWait (P30, the clean first
+// install): the bus node and its loader start long before farmer, so the
+// loader finds an empty bucket for a while and its start-up backoff
+// grows. Farmer then writes the Accounts while the bus is still not
+// ready, so its accounts-changed event cannot reach any node and none is
+// published. The loader must pick them up at its initial poll interval,
+// not after the backoff it had grown to (or its reconcile timer, which
+// only starts once loaded).
+func TestLoaderFarmerAccountsAfterLongEmptyWait(t *testing.T) {
+	const initialPoll = 200 * time.Millisecond
+	e := newLoaderEnv(t, time.Hour)
+	e.startBackoff = accountloader.Backoff{Min: 20 * time.Millisecond, Max: 30 * time.Second}
+	e.initialPoll = initialPoll
+	// The bucket as the DMZ sees it before the core hub is installed.
+	e.bucket.writing.Store(true)
+	for _, key := range []string{accountloader.AccountKey(e.sysPub), accountloader.IndexKey} {
+		if err := e.bucket.w.Delete(context.Background(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.bucket.writing.Store(false)
+
+	c := newTestCluster(t, e.tr, 1)
+	c.waitReady(0)
+	sys := e.sysConn(t, c.url(0))
+	events, err := sys.SubscribeSync(accountloader.DefaultEventSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys.Flush()
+	rl := e.startLoader(t, c.url(0))
+	// Uncapped, the backoff would be past 2.5s by now.
+	time.Sleep(3 * time.Second)
+	if rl.l.Ready() || readyzOK(rl.readyz) {
+		t.Fatal("ready with an empty bucket")
+	}
+	if st := rl.l.Status().State; st != accountloader.StateNotInitialised {
+		t.Fatalf("state %q, want %q", st, accountloader.StateNotInitialised)
+	}
+
+	tn := e.tr.newTenant(t, "web-01")
+	e.bucket.putAccount(t, e.sysPub, e.sysJWT)
+	e.bucket.putAccount(t, tn.pub, e.tr.accountJWT(t, tn, false))
+	e.bucket.bumpIndex(t)
+	written := time.Now()
+	waitAllBy(t, "/readyz after farmer wrote the Accounts", written.Add(5*initialPoll), func() bool { return readyzOK(rl.readyz) })
+	if !e.tr.admitted(tn, c.url(0)) {
+		t.Fatal("the tenant's sprout was refused after the load")
+	}
+	if m, err := events.NextMsg(10 * time.Millisecond); err == nil {
+		t.Fatalf("an accounts-changed event was published (%q); the test needs none", m.Data)
 	}
 }
 
