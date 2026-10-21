@@ -8,6 +8,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 tunnels="$here/../tunnels.sh"
 vmctl="$here/../vmctl.sh"
+session="$here/../session.sh"
 uat="$here/../testdata/uat.json"
 uat_ha="$here/../testdata/uat-ha.json"
 stubs="$here/stubs"
@@ -55,6 +56,9 @@ v() { # v <args>: vmctl.sh with the stubs; sets rc, out (stdout), err (stderr)
 }
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# running <pid>: alive and not a zombie (an exited tunnel can wait to be
+# reaped by whatever adopted it).
+running() { kill -0 "$1" 2>/dev/null && [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]; }
 
 # ---------------------------------------------------------------- tunnels.sh
 
@@ -125,7 +129,7 @@ t close "$state"
 if [ "$rc" -eq 0 ]; then ok "tunnels: close succeeds"; else nok "tunnels: close (rc=$rc)" "$out"; fi
 sleep 0.5
 dead=1
-for p in $pids; do kill -0 "$p" 2>/dev/null && dead=0; done
+for p in $pids; do running "$p" && dead=0; done
 if [ "$dead" = 1 ]; then ok "tunnels: close stops every tunnel"; else nok "tunnels: tunnels survive close" "$pids"; fi
 still=0
 for p in $ports; do listening "$p" && still=1; done
@@ -367,6 +371,236 @@ v "$uat" run t1-ubuntu 'echo x'
 if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q AADSTS700024; then
   ok "vmctl: without the hook an expired login fails (255) and says why"
 else nok "vmctl: expired login without hook (rc=$rc)" "$err"; fi
+
+# ------------------------------------------------------- tunnels.sh reopen
+
+port_map() { jq -r 'to_entries[] | .key as $k | .value | to_entries[] | select(.key | endswith("_port")) | "\($k)/\(.key)=\(.value)"' "$1" | sort; }
+
+new_case reopen
+t open "$uat" "$state"
+before_ports=$(port_map "$state/access.json")
+before_pids=$(jq -r '[.[].pids[]] | sort | .[]' "$state/access.json")
+if [ "$rc" -eq 0 ] && [ -s "$state/opened_at" ]; then ok "tunnels: open records opened_at"; else nok "tunnels: opened_at (rc=$rc)" "$(ls "$state")"; fi
+t reopen "$uat" "$state"
+after_pids=$(jq -r '[.[].pids[]] | sort | .[]' "$state/access.json" 2>/dev/null)
+if [ "$rc" -eq 0 ] && [ "$(port_map "$state/access.json")" = "$before_ports" ]; then
+  ok "tunnels: reopen keeps every tunnel on its port"
+else nok "tunnels: reopen ports (rc=$rc)" "$out"; fi
+gone=1
+for p in $before_pids; do running "$p" && gone=0; done
+if [ "$gone" = 1 ] && [ -n "$after_pids" ] && [ "$after_pids" != "$before_pids" ]; then
+  ok "tunnels: reopen stops the old processes and starts new ones"
+else nok "tunnels: reopen processes" "before $before_pids after $after_pids"; fi
+if [ "$(calls | grep -c 'network bastion tunnel')" -eq 20 ]; then ok "tunnels: reopen starts every tunnel again"; else nok "tunnels: reopen tunnel count" "$(calls)"; fi
+# One tunnel's first start fails (as when its old port was taken): it comes
+# back on a new port and reopen says so.
+core_id=$(jq -r '.core.id' "$uat")
+echo "$core_id:6443" >"$STUB_STATE/fail_once_keys"
+t reopen "$uat" "$state"
+changed=$(diff <(printf '%s\n' "$before_ports") <(port_map "$state/access.json") | grep -c '^>')
+if [ "$rc" -eq 0 ] && [ "$changed" -eq 1 ] && printf '%s' "$out" | grep -q "uat-core kube: port changed from" &&
+  ! printf '%s' "$out" | grep -q "uat-core ssh: port changed"; then
+  ok "tunnels: reopen moves a tunnel whose port is taken and names the change"
+else nok "tunnels: reopen with a taken port (rc=$rc, changed=$changed)" "$out"; fi
+t close "$state"
+if [ ! -e "$state/opened_at" ]; then ok "tunnels: close removes opened_at"; else nok "tunnels: opened_at after close" "$(ls "$state")"; fi
+
+# --------------------------------------------------------------- session.sh
+
+# The login stub: records whether the old tunnels were still open when it
+# ran, so the order login, close, open shows in calls.log.
+cat >"$work/srelogin" <<'RELOGIN'
+#!/usr/bin/env bash
+if [ -f "$STUB_STATE/relogin_fail" ]; then echo "stub login failure" >&2; exit 1; fi
+if [ -s "$UAT_SESSION_ACCESS/access.json" ]; then echo "relogin tunnels=open" >>"$STUB_STATE/calls.log"
+else echo "relogin tunnels=none" >>"$STUB_STATE/calls.log"; fi
+RELOGIN
+chmod +x "$work/srelogin"
+
+s() { # s <args>: session.sh with the stubs; sets rc, out
+  out=$(PATH="$stubs:$PATH" TUNNEL_PORT_BASE="$base" TUNNEL_WAIT_SECONDS=30 \
+    AZ_RELOGIN_DIR="$STUB_STATE/login" UAT_SESSION_UAT="${S_UAT:-$uat}" UAT_SESSION_ACCESS="$state" \
+    UAT_SESSION_RELOGIN="$work/srelogin" SSH_KEYSCAN="$stubs/ssh-keyscan" CURL="$stubs/curl" \
+    bash "$session" "$@" 2>&1)
+  rc=$?
+}
+login_minutes_ago() { mkdir -p "$STUB_STATE/login"; touch -d "-$1 minutes" "$STUB_STATE/login/az-relogin.stamp"; }
+tunnels_minutes_ago() { echo $(($(date +%s) - $1 * 60)) >"$state/opened_at"; }
+
+new_case sargs
+s
+if [ "$rc" -eq 2 ]; then ok "session: no arguments is a usage error (2)"; else nok "session: no args (rc=$rc)" "$out"; fi
+s phase x --bogus
+if [ "$rc" -eq 2 ]; then ok "session: an unknown option is a usage error"; else nok "session: bad option (rc=$rc)" "$out"; fi
+UAT_SESSION_MAX_AGE_MIN=0 s ages x
+if [ "$rc" -eq 2 ]; then ok "session: a bad age limit is a usage error"; else nok "session: bad limit (rc=$rc)" "$out"; fi
+s mark-login
+if [ "$rc" -eq 0 ] && [ -f "$STUB_STATE/login/az-relogin.stamp" ]; then ok "session: mark-login records the login"; else nok "session: mark-login (rc=$rc)" "$out"; fi
+
+new_case srefresh
+t open "$uat" "$state"
+before_ports=$(port_map "$state/access.json")
+login_minutes_ago 50
+tunnels_minutes_ago 30
+s refresh
+if [ "$rc" -eq 0 ] && [ "$(port_map "$state/access.json")" = "$before_ports" ]; then
+  ok "session: refresh reopens the tunnels on their ports"
+else nok "session: refresh (rc=$rc)" "$out"; fi
+first_new=$(calls | grep -n 'network bastion tunnel' | sed -n 11p | cut -d: -f1)
+relogin_at=$(calls | grep -n '^relogin' | cut -d: -f1)
+if calls | grep -qx 'relogin tunnels=open' && [ -n "$first_new" ] && [ "${relogin_at:-0}" -lt "$first_new" ] &&
+  [ "$(calls | grep -c 'network bastion tunnel')" -eq 20 ]; then
+  ok "session: refresh logs in first, then closes and opens the tunnels"
+else nok "session: refresh order" "$(calls)"; fi
+if printf '%s' "$out" | grep -q 'refresh: .*azure login age 50m, tunnels age 30m; logging in again' &&
+  printf '%s' "$out" | grep -q 'refresh: done; azure login age 0m, tunnels age 0m'; then
+  ok "session: refresh names both ages before and after"
+else nok "session: refresh messages" "$out"; fi
+
+# A kube port that changes is carried into the kubeconfigs.
+kc="$STUB_STATE/core.kubeconfig"
+old_kube=$(jq '.["uat-core"].kube_port' "$state/access.json")
+dmz_kube=$(jq '.["uat-dmz"].kube_port' "$state/access.json")
+printf 'apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:%s\n  name: core\n- cluster:\n    server: https://127.0.0.1:%s\n  name: dmz\n' "$old_kube" "$dmz_kube" >"$kc"
+echo "$core_id:6443" >"$STUB_STATE/fail_once_keys"
+rm -f "$STUB_STATE"/failed_once.*
+UAT_SESSION_KUBECONFIGS="$STUB_STATE/missing.kubeconfig:$kc" s refresh
+new_kube=$(jq '.["uat-core"].kube_port' "$state/access.json")
+if [ "$rc" -eq 0 ] && [ "$new_kube" != "$old_kube" ] && grep -qx "    server: https://127.0.0.1:$new_kube" "$kc" &&
+  grep -qx "    server: https://127.0.0.1:$dmz_kube" "$kc" && [ "$(stat -c %a "$kc")" = 600 ]; then
+  ok "session: a changed kube port is rewritten in the kubeconfigs, the others kept"
+else nok "session: kubeconfig remap (rc=$rc, $old_kube -> $new_kube)" "$out $(cat "$kc")"; fi
+rm -f "$STUB_STATE/fail_once_keys"
+
+# phase: refreshes when due, then the guard.
+: >"$STUB_STATE/calls.log"
+login_minutes_ago 5
+tunnels_minutes_ago 5
+s phase "core hub"
+if [ "$rc" -eq 0 ] && ! calls | grep -q relogin && printf '%s' "$out" | grep -q 'core hub: azure login age 5m, tunnels age 5m'; then
+  ok "session: phase logs both ages and does not refresh young ones"
+else nok "session: phase young (rc=$rc)" "$out $(calls)"; fi
+login_minutes_ago 20
+s phase "dmz hub"
+if [ "$rc" -eq 0 ] && calls | grep -qx 'relogin tunnels=open' && printf '%s' "$out" | grep -q 'dmz hub: azure login age 0m, tunnels age 0m'; then
+  ok "session: phase refreshes a login past UAT_SESSION_REFRESH_AFTER_MIN"
+else nok "session: phase refresh by login age (rc=$rc)" "$out"; fi
+: >"$STUB_STATE/calls.log"
+tunnels_minutes_ago 16
+s phase "finish"
+if [ "$rc" -eq 0 ] && calls | grep -q '^relogin' && [ "$(calls | grep -c 'network bastion tunnel')" -eq 10 ]; then
+  ok "session: phase refreshes tunnels past UAT_SESSION_REFRESH_AFTER_MIN"
+else nok "session: phase refresh by tunnel age (rc=$rc)" "$out"; fi
+: >"$STUB_STATE/calls.log"
+s phase "enrolment" --force
+if [ "$rc" -eq 0 ] && calls | grep -q '^relogin'; then ok "session: --force refreshes young ones too"; else nok "session: --force (rc=$rc)" "$out"; fi
+
+# The guard: with refresh out of reach (REFRESH_AFTER above the limit), a
+# phase at the limit starts and one past it is refused, naming both ages.
+login_minutes_ago 39
+tunnels_minutes_ago 20
+UAT_SESSION_REFRESH_AFTER_MIN=90 s phase "tests"
+if [ "$rc" -eq 0 ]; then ok "session: the guard lets a 39m login through (limit 40m)"; else nok "session: guard under limit (rc=$rc)" "$out"; fi
+login_minutes_ago 41
+UAT_SESSION_REFRESH_AFTER_MIN=90 s phase "tests"
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "tests: refusing to start: azure login age 41m, tunnels age 20m; the limit is 40m"; then
+  ok "session: the guard refuses a login past the limit and names both ages"
+else nok "session: guard login (rc=$rc)" "$out"; fi
+login_minutes_ago 1
+tunnels_minutes_ago 45
+UAT_SESSION_REFRESH_AFTER_MIN=90 s phase "tests"
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "tests: refusing to start: azure login age 1m, tunnels age 45m"; then
+  ok "session: the guard refuses tunnels past the limit"
+else nok "session: guard tunnels (rc=$rc)" "$out"; fi
+UAT_SESSION_MAX_AGE_MIN=30 UAT_SESSION_REFRESH_AFTER_MIN=90 s phase "tests"
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "the limit is 30m"; then ok "session: UAT_SESSION_MAX_AGE_MIN sets the limit"; else nok "session: limit env (rc=$rc)" "$out"; fi
+
+# A failed login fails the phase before any tunnel is touched.
+touch "$STUB_STATE/relogin_fail"
+pids_before=$(cat "$state/tunnels.pids")
+s phase "tests" --force
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "the Azure login failed" && [ "$(cat "$state/tunnels.pids")" = "$pids_before" ]; then
+  ok "session: a failed login fails the phase and leaves the tunnels alone"
+else nok "session: failed login (rc=$rc)" "$out"; fi
+rm -f "$STUB_STATE/relogin_fail"
+
+# probe
+tunnels_minutes_ago 3
+login_minutes_ago 3
+: >"$STUB_STATE/probes.log"
+s phase "enrolment" --probe
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "enrolment: probe: all 10 tunnels answer" &&
+  [ "$(grep -c '^ssh-keyscan -T 15 -p [0-9]* 127.0.0.1$' "$STUB_STATE/probes.log")" -eq 6 ] &&
+  grep -q -- "-sk -m 20 -o /dev/null -w %{http_code} https://127.0.0.1:$(jq '.["t1-win"].winrm_port' "$state/access.json")/wsman" "$STUB_STATE/probes.log" &&
+  grep -q "https://127.0.0.1:$(jq '.["uat-core"].kube_port' "$state/access.json")/version" "$STUB_STATE/probes.log"; then
+  ok "session: probe checks every tunnel (ssh-keyscan, /wsman, /version)"
+else nok "session: probe (rc=$rc)" "$out $(cat "$STUB_STATE/probes.log")"; fi
+win_port=$(jq '.["t1-win"].winrm_port' "$state/access.json")
+lin_port=$(jq '.["t2-alma"].ssh_port' "$state/access.json")
+printf '%s\n%s\n' "$win_port" "$lin_port" >"$STUB_STATE/dead_ports"
+s probe "tests"
+if [ "$rc" -eq 1 ] &&
+  printf '%s' "$out" | grep -q "tests: probe FAILED: t1-win winrm tunnel (127.0.0.1:$win_port) is stale or dead: no HTTPS answer on /wsman within 20s; tunnel age 3m, azure login age 3m, tunnels age 3m" &&
+  printf '%s' "$out" | grep -q "tests: probe FAILED: t2-alma ssh tunnel (127.0.0.1:$lin_port) is stale or dead: no SSH host key within 15s" &&
+  printf '%s' "$out" | grep -q "tests: 2 of 10 tunnels did not answer"; then
+  ok "session: a dead tunnel fails the probe, naming the tunnel, its port and both ages"
+else nok "session: probe failure (rc=$rc)" "$out"; fi
+rm -f "$STUB_STATE/dead_ports"
+echo 500 >"$STUB_STATE/wsman_code"
+s probe "tests"
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "HTTP 500 on /wsman (expected 401 or 405)"; then ok "session: a WinRM answer other than 401 or 405 fails"; else nok "session: wsman 500 (rc=$rc)" "$out"; fi
+echo 405 >"$STUB_STATE/wsman_code"
+s probe "tests"
+if [ "$rc" -eq 0 ]; then ok "session: HTTP 405 on /wsman is alive"; else nok "session: wsman 405 (rc=$rc)" "$out"; fi
+rm -f "$STUB_STATE/wsman_code"
+
+# ages: the failure-time diagnostic, never failing.
+s ages "failure"
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "failure: azure login age 3m, tunnels age 3m" &&
+  printf '%s' "$out" | grep -q "failure: tunnel t1-win winrm on 127.0.0.1:$win_port: process [0-9]* running" &&
+  printf '%s' "$out" | grep -q "Opening tunnel on port: $win_port"; then
+  ok "session: ages prints both ages, each tunnel's process and its log"
+else nok "session: ages (rc=$rc)" "$out"; fi
+t close "$state"
+s ages "failure"
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "failure: azure login age 3m, tunnels age unknown (not open)"; then
+  ok "session: ages after close says the tunnels are not open"
+else nok "session: ages after close (rc=$rc)" "$out"; fi
+s probe "tests"
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "the tunnels are not open"; then ok "session: probe without tunnels fails"; else nok "session: probe closed (rc=$rc)" "$out"; fi
+
+# --no-tunnels: the login only, no access directory needed.
+: >"$STUB_STATE/calls.log"
+login_minutes_ago 200
+out=$(PATH="$stubs:$PATH" AZ_RELOGIN_DIR="$STUB_STATE/login" UAT_SESSION_RELOGIN="$work/srelogin" UAT_SESSION_ACCESS="$state" \
+  bash "$session" phase destroy --no-tunnels 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && calls | grep -q '^relogin' && ! calls | grep -q 'bastion tunnel' &&
+  printf '%s' "$out" | grep -q "destroy: azure login age 0m, tunnels age unknown (not open)"; then
+  ok "session: --no-tunnels logs in again and opens no tunnel"
+else nok "session: --no-tunnels (rc=$rc)" "$out $(calls)"; fi
+out=$(PATH="$stubs:$PATH" AZ_RELOGIN_DIR="$STUB_STATE/login" UAT_SESSION_RELOGIN="$work/srelogin" \
+  bash "$session" phase kept --no-tunnels 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "session: --no-tunnels needs no UAT_SESSION_ACCESS"; else nok "session: --no-tunnels without access (rc=$rc)" "$out"; fi
+out=$(PATH="$stubs:$PATH" AZ_RELOGIN_DIR="$STUB_STATE/login" UAT_SESSION_RELOGIN="$work/srelogin" \
+  bash "$session" phase k0s 2>&1)
+rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q "UAT_SESSION_ACCESS is not set"; then ok "session: a tunnel phase needs UAT_SESSION_ACCESS"; else nok "session: missing access (rc=$rc)" "$out"; fi
+
+# An HA uat.json: the API tunnels by IP are probed and reopened too.
+new_case sha
+S_UAT=$uat_ha
+t open "$uat_ha" "$state"
+before_ports=$(port_map "$state/access.json")
+login_minutes_ago 1
+S_UAT=$uat_ha s phase "tests" --force --probe
+if [ "$rc" -eq 0 ] && [ "$(port_map "$state/access.json")" = "$before_ports" ] &&
+  printf '%s' "$out" | grep -q "tests: probe: core-api kube tunnel"; then
+  ok "session: an HA run's tunnels (API addresses too) reopen on their ports and are probed"
+else nok "session: HA (rc=$rc)" "$out"; fi
+t close "$state"
+unset S_UAT
 
 echo
 echo "access_test: $pass passed, $fail failed"

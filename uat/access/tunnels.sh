@@ -2,8 +2,9 @@
 # tunnels.sh: the management path of the UAT gate (UAT.1, Access interface of
 # the Shared contract in section 4h of docs/claude-code-parallel-build-plan.md).
 #
-#   tunnels.sh open  <uat.json> <state-dir>
-#   tunnels.sh close <state-dir>
+#   tunnels.sh open   <uat.json> <state-dir>
+#   tunnels.sh reopen <uat.json> <state-dir>
+#   tunnels.sh close  <state-dir>
 #
 # open starts one `az network bastion tunnel` in the background for
 #   SSH (22)            on every Linux VM (every hub node, and sprouts with
@@ -25,9 +26,20 @@
 # hub. Sprouts with connection docker (the local rig) are skipped. If any tunnel fails, open stops every tunnel it started,
 # writes no access.json and exits non zero.
 #
+# open also writes <state-dir>/opened_at, the time (seconds since the epoch)
+# the tunnels were ready: the tunnels' age that uat/access/session.sh reports
+# and guards (W6).
+#
+# reopen closes the tunnels of <state-dir> and opens them again, each on the
+# local port it had where that port is free, so access.json and the files
+# made from it (kubeconfigs, inventory) stay valid. A tunnel whose old port
+# is taken gets a new one, and reopen names it on stderr ("port changed").
+# The new az processes run with the az login as it is now: that is the
+# point (session.sh refresh, W6).
+#
 # close stops every tunnel listed in <state-dir>/tunnels.pids (only processes
-# that are still `az ... bastion tunnel` processes), removes tunnels.pids and
-# access.json, and is safe to repeat.
+# that are still `az ... bastion tunnel` processes), removes tunnels.pids,
+# access.json and opened_at, and is safe to repeat.
 #
 # All Azure calls of the UAT gate live here and in vmctl.sh.
 #
@@ -49,8 +61,9 @@ start_attempts=${TUNNEL_START_ATTEMPTS:-3}
 
 usage() {
   cat >&2 <<EOF
-usage: $prog open <uat.json> <state-dir>
-       $prog close <state-dir>
+usage: $prog open   <uat.json> <state-dir>
+       $prog reopen <uat.json> <state-dir>
+       $prog close  <state-dir>
 EOF
   exit 2
 }
@@ -67,6 +80,13 @@ port_in_use() {
 read_banner() {
   # shellcheck disable=SC2016 # $1 is expanded by the inner bash
   timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 4 <&3' _ "$1" 2>/dev/null || true
+}
+
+# Is pid $1 running? A zombie (exited, not yet reaped by whatever adopted
+# it) is not.
+alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]
 }
 
 # Is pid $1 alive and still a bastion tunnel (not a reused pid)?
@@ -90,7 +110,7 @@ stop_pid() {
     kill -TERM "$pid" 2>/dev/null || true
   fi
   for ((i = 0; i < 20; i++)); do
-    kill -0 "$pid" 2>/dev/null || return 0
+    alive "$pid" || return 0
     sleep 0.5
   done
   kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
@@ -104,7 +124,7 @@ close_tunnels() {
       stop_pid "$pid"
     done <"$dir/tunnels.pids"
   fi
-  rm -f "$dir/tunnels.pids" "$dir/tunnels.pids.tmp" "$dir/access.json" "$dir/access.json.tmp"
+  rm -f "$dir/tunnels.pids" "$dir/tunnels.pids.tmp" "$dir/access.json" "$dir/access.json.tmp" "$dir/opened_at"
 }
 
 cmd_close() {
@@ -113,6 +133,23 @@ cmd_close() {
   [ -d "$dir" ] || { log "no state directory $dir; nothing to close"; return 0; }
   close_tunnels "$dir"
   log "tunnels closed"
+}
+
+# The port each tunnel had before a reopen, by "<vm>/<kind>".
+declare -A PREFER=()
+
+cmd_reopen() {
+  [ $# -eq 2 ] || usage
+  local dir=$2 pid vm kind port
+  if [ -f "$dir/tunnels.pids" ]; then
+    while IFS=$'\t' read -r pid vm kind port; do
+      [ -n "${vm:-}" ] && [[ "${port:-}" =~ ^[0-9]+$ ]] || continue
+      PREFER["$vm/$kind"]=$port
+    done <"$dir/tunnels.pids"
+    close_tunnels "$dir"
+    log "tunnels closed; opening them again on the same ports"
+  fi
+  cmd_open "$@"
 }
 
 cmd_open() {
@@ -188,7 +225,10 @@ cmd_open() {
     vms+=("$vm") kinds+=("$kind") rports+=("$rport") ids+=("$id")
   done <<<"$targets"
 
-  local next_port=$port_base used=" "
+  # A port another tunnel had before a reopen is kept for it.
+  local next_port=$port_base used=" " reserved=" " key
+  for key in "${!PREFER[@]}"; do reserved="$reserved${PREFER[$key]} "; done
+  local -a tried_prefer=()
   write_pids() {
     local i
     : >"$dir/tunnels.pids.tmp"
@@ -199,14 +239,23 @@ cmd_open() {
   }
   # start i: start tunnel i on the next free port.
   start() {
-    local i=$1 log
-    while port_in_use "$next_port" || [[ "$used" == *" $next_port "* ]]; do
+    local i=$1 log want=${PREFER["${vms[$1]}/${kinds[$1]}"]:-}
+    # The tunnel's old port first, once; a restart takes a new port.
+    if [ -n "$want" ] && [ -z "${tried_prefer[$i]:-}" ] &&
+      ! port_in_use "$want" && [[ "$used" != *" $want "* ]]; then
+      tried_prefer[i]=1
+      used="$used$want "
+      ports[i]=$want
+    else
+      tried_prefer[i]=1
+      while port_in_use "$next_port" || [[ "$used" == *" $next_port "* ]] || [[ "$reserved" == *" $next_port "* ]]; do
+        next_port=$((next_port + 1))
+        [ "$next_port" -le 65535 ] || die "no free local port above $port_base"
+      done
+      used="$used$next_port "
+      ports[i]=$next_port
       next_port=$((next_port + 1))
-      [ "$next_port" -le 65535 ] || die "no free local port above $port_base"
-    done
-    used="$used$next_port "
-    ports[i]=$next_port
-    next_port=$((next_port + 1))
+    fi
     log="$dir/logs/${vms[$i]}-${kinds[$i]}.log"
     # A VM by its resource id; an HA hub's API address by IP (the Bastion's
     # IP-based connection, uat/tofu ip_connect_enabled).
@@ -268,6 +317,10 @@ cmd_open() {
       sleep 1
     done
     log "${vms[$i]} ${kinds[$i]} ready on 127.0.0.1:${ports[$i]}"
+    key="${vms[$i]}/${kinds[$i]}"
+    if [ -n "${PREFER[$key]:-}" ] && [ "${PREFER[$key]}" != "${ports[$i]}" ]; then
+      log "${vms[$i]} ${kinds[$i]}: port changed from ${PREFER[$key]} to ${ports[$i]} (the old port was taken)"
+    fi
   done
 
   jq -Rn '
@@ -279,6 +332,7 @@ cmd_open() {
         + {pids: map(.pid)})})
     | from_entries' <"$dir/tunnels.pids" >"$dir/access.json.tmp"
   mv "$dir/access.json.tmp" "$dir/access.json"
+  date +%s >"$dir/opened_at"
   OPENING_DIR=""
   trap - INT TERM EXIT
   log "wrote $dir/access.json"
@@ -289,6 +343,7 @@ action=$1
 shift
 case "$action" in
   open) cmd_open "$@" ;;
+  reopen) cmd_reopen "$@" ;;
   close) cmd_close "$@" ;;
   -h | --help | help) usage ;;
   *) log "unknown command '$action'"; usage ;;

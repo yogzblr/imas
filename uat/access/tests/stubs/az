@@ -48,6 +48,15 @@ case "$1 $2 $3" in
         exit 1
       fi
     fi
+    # fail_once_keys: the same, for one remote port of a VM ("<id>:<port>").
+    if grep -qxF "$id:$rport" "$STUB_STATE/fail_once_keys" 2>/dev/null; then
+      mark="$STUB_STATE/failed_once.$(printf '%s' "$id:$rport" | md5sum | cut -c1-12)"
+      if [ ! -e "$mark" ]; then
+        touch "$mark"
+        echo "ERROR: [Errno 98] Address already in use (stub)" >&2
+        exit 1
+      fi
+    fi
     banner=""
     [ "$rport" = 22 ] && [ ! -f "$STUB_STATE/no_banner" ] && banner="SSH-2.0-stub"
     # Like the real az (a shell wrapper around python), the listener is a

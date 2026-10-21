@@ -1,6 +1,6 @@
 # UAT access scripts (`uat/access`)
 
-**FLAG FOR SECURITY REVIEW** (part of UAT.1). These two scripts are the whole
+**FLAG FOR SECURITY REVIEW** (part of UAT.1). These scripts are the whole
 interface between the UAT gate and the VMs (Access interface, Shared contract,
 section 4h of `docs/claude-code-parallel-build-plan.md`). Every Azure call of
 the gate lives here; the hub, enrolment and test briefs call only these, so the
@@ -15,12 +15,15 @@ Requirements: bash, `jq`, coreutils (`timeout`, `base64`), `setsid` (util-linux;
 without it the tunnels are started with `nohup`), and the Azure CLI logged in to
 the subscription with the `bastion` extension (`az extension add --name
 bastion`). The input is the `tofu output -json uat` file from `uat/tofu`.
+`session.sh` also needs `curl`, `flock` and `ssh-keyscan` (OpenSSH), all on
+the hosted runner.
 
 ## tunnels.sh
 
 ```sh
-uat/access/tunnels.sh open  <uat.json> <state-dir>
-uat/access/tunnels.sh close <state-dir>
+uat/access/tunnels.sh open   <uat.json> <state-dir>
+uat/access/tunnels.sh reopen <uat.json> <state-dir>
+uat/access/tunnels.sh close  <state-dir>
 ```
 
 `open` starts one `az network bastion tunnel` in the background per VM and
@@ -88,9 +91,21 @@ tunnel it started, writes no `access.json` and exits 1. It refuses
 to start while tunnels from an earlier `open` of the same directory still run.
 Exit 2 is a usage error.
 
+`open` also writes `<state-dir>/opened_at`, the time the tunnels were ready
+(seconds since the epoch): the tunnels' age `session.sh` reports.
+
+`reopen` (W6) closes the tunnels of `<state-dir>` and opens them again,
+each on the local port it had when that port is free, so `access.json` and
+what was made from it (the hubs' kubeconfigs, the enrolment inventory) stay
+valid. A tunnel whose port is taken, or whose first start fails, gets a new
+port, and `reopen` says so (`<vm> <kind>: port changed from A to B`). The
+new `az` processes carry the az login as it is at that moment, which is the
+point: see [session.sh](#sessionsh). Without `tunnels.pids` it is `open`.
+
 `close` stops every tunnel in `tunnels.pids` (TERM to the tunnel's process
-group, so both the `az` wrapper and its Python child stop; KILL after 10 s),
-then removes `tunnels.pids` and `access.json`. It only signals a pid that is
+group, so both the `az` wrapper and its Python child stop; KILL after 10 s;
+a process that has exited but is not yet reaped counts as stopped),
+then removes `tunnels.pids`, `access.json` and `opened_at`. It only signals a pid that is
 still alive and still an `az ... bastion tunnel` process, so a pid reused by
 something else is left alone. It is safe to repeat and exits 0 when there is
 nothing to close.
@@ -115,6 +130,49 @@ things stop them:
 
 If `open` itself is interrupted (SIGINT or SIGTERM, as GitHub sends on cancel)
 or fails, its exit trap stops every tunnel it had started.
+
+## session.sh
+
+```sh
+uat/access/session.sh mark-login
+uat/access/session.sh phase <name> [--force] [--probe] [--no-tunnels]
+uat/access/session.sh refresh [--no-tunnels]
+uat/access/session.sh probe <name>
+uat/access/session.sh ages <name>
+```
+
+**Why (W6).** The workflow's az session is a GitHub OIDC login. It cannot
+renew itself once its access token expires (about an hour), and an `az
+network bastion tunnel` started on it then stops opening new connections:
+UAT Run 2 hung 55 to 60 minutes after its login, every host at once, while a
+fresh tunnel from a laptop worked (`uat/RUNBOOK.md`, "All tunnels hang or go
+UNREACHABLE after about an hour"). The cause is inferred from that timing,
+so every message names both ages, to confirm or refute it on the next run.
+
+| Command | What it does |
+|---|---|
+| `mark-login` | Records that az has just logged in (after the `azure/login` action, which cannot) |
+| `phase <name>` | Refreshes when `--force` is given or the login or the tunnels are `UAT_SESSION_REFRESH_AFTER_MIN` (15) minutes old or more (or unknown); then the **age guard**: exits 1 with `<name>: refusing to start: azure login age Xm, tunnels age Ym; the limit is 40m` when either is older than `UAT_SESSION_MAX_AGE_MIN` (40); then logs `<name>: azure login age Xm, tunnels age Ym`. `--probe` then probes. `--no-tunnels`: the login only (no access directory needed) |
+| `refresh` | Logs az in again (`az-relogin.sh`, with no minimum age), **then** closes and reopens the tunnels (`tunnels.sh reopen`), then rewrites every kubeconfig in `UAT_SESSION_KUBECONFIGS` whose `server: https://127.0.0.1:<port>` is a kube port that changed. A failed login leaves the tunnels as they were; a failed reopen leaves them closed. Both exit 1 naming the ages |
+| `probe <name>` | Every tunnel in `access.json`, at once: SSH by `ssh-keyscan -T 15` (a host key line is alive), WinRM by `curl -sk -m 20 https://127.0.0.1:<port>/wsman` (HTTP 401 or 405 is alive), the Kubernetes API by `/version` (any HTTP answer is alive). Each failure is logged as `<name>: probe FAILED: <vm> <kind> tunnel (127.0.0.1:<port>) is stale or dead: <why>; tunnel age Ym, azure login age Xm, tunnels age Ym`, and the command exits 1 |
+| `ages <name>` | Both ages, each tunnel's process (running or exited) and the last 5 lines of its log. Never fails: the workflow's failure-time diagnostic |
+
+Never refresh while something uses a tunnel: the workflow refreshes only at
+phase starts, `uat/enroll/enroll.sh` between its Ansible runs and
+`uat/tests/run.sh` between top-level tests (both through `UAT_SESSION_HOOK`).
+
+The login's time is the modification time of `az-relogin.sh`'s stamp,
+`$AZ_RELOGIN_DIR/az-relogin.stamp`, so a relogin by `vmctl.sh` during the
+tests counts too; the tunnels' time is `<access dir>/opened_at`.
+
+Environment: `UAT_SESSION_UAT` (the `uat.json`), `UAT_SESSION_ACCESS`
+(`tunnels.sh`'s state directory), `UAT_SESSION_KUBECONFIGS` (colon
+separated), `UAT_SESSION_REFRESH_AFTER_MIN`, `UAT_SESSION_MAX_AGE_MIN`,
+`AZ_RELOGIN_DIR`, and for the tests `UAT_SESSION_RELOGIN`,
+`UAT_SESSION_TUNNELS`, `SSH_KEYSCAN` and `CURL`. The login needs what
+`az-relogin.sh` needs: a job with `id-token: write` (each call fetches a new
+OIDC token, so any number of logins in one job work) and `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`.
 
 ## vmctl.sh
 
@@ -154,7 +212,7 @@ made); 255 means Azure could not run the command or returned no exit code.
 
 ## Tests
 
-`tests/access_test.sh` runs both scripts against `tests/stubs/az`: a tunnel
+`tests/access_test.sh` runs the scripts against `tests/stubs/az` (and `session.sh`'s probes against `tests/stubs/ssh-keyscan` and `tests/stubs/curl`): a tunnel
 becomes a local Python listener (with an SSH banner for port 22), a Linux
 run-command runs the generated script locally with a stub `systemctl`, and a
 Windows run-command checks the PowerShell wrapper and returns canned output.
@@ -166,7 +224,17 @@ per hub to its `api_address` by IP, and refusal of a bad or missing
 refusal of a second open, a tunnel restarted on a new port after an early
 exit, close stopping the tunnels and their children and
 removing the files, close being repeatable and never killing an unrelated pid,
-a failed tunnel, a tunnel without an SSH banner, docker sprouts, and for
+a failed tunnel, a tunnel without an SSH banner, docker sprouts, `reopen`
+(every tunnel back on its port with new processes, `opened_at`, a tunnel
+whose port is taken moved and named), `session.sh` (the order login, close,
+open; both ages before and after; a changed kube port rewritten in a
+kubeconfig and the others kept; refresh by login age, by tunnel age and by
+`--force`; the guard letting 39 minutes through and refusing 41, for the
+login and for the tunnels, with both ages in the message; a failed login
+leaving the tunnels alone; the probe's tools and arguments, a dead SSH and
+a dead WinRM tunnel named with their ports and ages, a WinRM answer other
+than 401 or 405; `ages` with and without tunnels; `--no-tunnels`; an HA
+uat.json), and for
 `vmctl.sh` the exit codes, stdout and stderr, quoting, the service commands on
 both OSes, the hub refusal, restart and its failures, `stop-vm` and `start-vm`
 (waiting for the power state and the guest, a VM that never stops, a failed

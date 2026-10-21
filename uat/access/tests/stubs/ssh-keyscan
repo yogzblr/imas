@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stub ssh-keyscan for access_test.sh: prints a host key line for the port
+# after -p, unless the port is listed in $STUB_STATE/dead_ports.
+set -u
+printf 'ssh-keyscan %s\n' "$*" >>"$STUB_STATE/probes.log"
+port=22
+while [ $# -gt 0 ]; do
+  case $1 in
+    -p) port=$2; shift 2 ;;
+    -T) shift 2 ;;
+    *) host=$1; shift ;;
+  esac
+done
+grep -qxF "$port" "$STUB_STATE/dead_ports" 2>/dev/null && exit 0
+echo "[${host:-127.0.0.1}]:$port ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIStub"
