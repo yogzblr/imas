@@ -175,11 +175,13 @@ type pubEnv struct {
 	p      *s3AccountPublisher
 	events [][]byte
 	mu     sync.Mutex
+	// stop ends the publishers' background announce retries with the test.
+	stop context.Context
 }
 
 func newPubEnv(t *testing.T) *pubEnv {
 	t.Helper()
-	e := &pubEnv{srv: objectstoretest.NewServer(t), tr: newPubTrust(t), seq: &seq{}}
+	e := &pubEnv{srv: objectstoretest.NewServer(t), tr: newPubTrust(t), seq: &seq{}, stop: t.Context()}
 	st, err := objectstore.Open(e.srv.Config())
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +197,7 @@ func (e *pubEnv) newPublisher() *s3AccountPublisher {
 	p := newS3AccountPublisher(e.objs, "", []string{e.tr.pub})
 	p.openBus = func() (accountBus, error) { return fakeBus{seq: e.seq, events: &e.events, mu: &e.mu}, nil }
 	p.local = func() ([]string, error) { return nil, nil }
+	p.announceStop = e.stop
 	return p
 }
 

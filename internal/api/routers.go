@@ -77,8 +77,8 @@ func NewRouter(certificate string) *http.ServeMux {
 	// jwt_authn remote_jwks (deploy/envoy/envoy.yaml) fetches.
 	mux.Handle("GET /v1/.well-known/jwks.json", Logger(http.HandlerFunc(handlers.JWKS), "JWKS"))
 
-	// Health checks (unauthenticated): /health is liveness (process up and
-	// holding a Valkey client, no network calls — see handlers.GetHealth);
+	// Health checks (unauthenticated): /health is liveness (process up, no
+	// network calls — see handlers.GetHealth);
 	// /ready is readiness (PXC, Valkey, and NATS tenant connection state —
 	// see handlers.GetReady for what gates it).
 	mux.Handle("GET /health", Logger(http.HandlerFunc(handlers.GetHealth), "GetHealth"))

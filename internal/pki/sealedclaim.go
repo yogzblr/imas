@@ -79,6 +79,7 @@ func ClaimSealedMessage(ctx context.Context, tenantID, principal, msgID string) 
 	if !claimComponentOK(tenantID) || !claimComponentOK(principal) || !claimComponentOK(msgID) {
 		return fmt.Errorf("%w: malformed claim", ErrSealedClaimUnavailable)
 	}
+	replayClient := loadReplayClient()
 	if replayClient == nil {
 		return fmt.Errorf("%w: no Valkey client configured", ErrSealedClaimUnavailable)
 	}
@@ -109,6 +110,7 @@ func ReleaseSealedMessage(ctx context.Context, tenantID, principal, msgID string
 	if !claimComponentOK(tenantID) || !claimComponentOK(principal) || !claimComponentOK(msgID) {
 		return fmt.Errorf("%w: malformed claim", ErrSealedClaimUnavailable)
 	}
+	replayClient := loadReplayClient()
 	if replayClient == nil {
 		return fmt.Errorf("%w: no Valkey client configured", ErrSealedClaimUnavailable)
 	}

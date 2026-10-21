@@ -276,7 +276,9 @@ until you remove them (`sudo apt-get purge imas-sprout`, then the
    credential that core's install left; the loader reads core's RustFS on
    the core node's port 9000),
    then `uat/hub/core/finish.sh` (same arguments as core's install.sh; farmer
-   and saasapi need the DMZ bus), then `uat/hub/dmz/check.sh --connect <the DMZ node or 127.0.0.1>`. A
+   and saasapi need the DMZ bus; the DMZ bus is not Ready until farmer has
+   written its Accounts to the accounts bucket, and since P30 the loader
+   picks them up within about 5 s of the write, without an event), then `uat/hub/dmz/check.sh --connect <the DMZ node or 127.0.0.1>`. A
    release already installed is not installed again (`--reinstall`).
 9. **Enrolment**: first each sprout's package index is refreshed
    (`apt-get update`, or `dnf clean all` and `dnf makecache`), so a release

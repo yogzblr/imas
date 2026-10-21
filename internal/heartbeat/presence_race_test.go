@@ -277,7 +277,7 @@ func TestPresence_DisconnectNeedsTheSameConnection(t *testing.T) {
 func TestPresence_ScriptsShareOneSlot(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, b backend, tenant string) {
 		ctx := context.Background()
-		c := client
+		c := loadClient()
 		const sprouts = 60
 		shards := map[string]bool{}
 		for i := range sprouts {
@@ -382,7 +382,7 @@ func TestPresence_LifecycleThroughHandlers(t *testing.T) {
 		handleConnect(connEventJSON(t, accountPub, "UHBLIFE01", testServerID, 1))
 		handleHeartbeat(tenant, subj, []byte(testServerID+"/1"))
 		handleHeartbeat(tenant, subj, []byte(testServerID+"/1"))
-		if n, _ := client.Do(ctx, client.B().Exists().Key(acceptedKeyFor(tenant, "web-01")).Build()).AsInt64(); n != 1 {
+		if n, _ := loadClient().Do(ctx, loadClient().B().Exists().Key(acceptedKeyFor(tenant, "web-01")).Build()).AsInt64(); n != 1 {
 			t.Fatal("no acceptance marker after a verified heartbeat")
 		}
 		handleConnect(connEventJSON(t, accountPub, "UHBLIFE01", testServerID, 2))

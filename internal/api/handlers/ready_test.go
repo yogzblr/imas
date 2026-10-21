@@ -39,10 +39,10 @@ func openTestPXC(t *testing.T) *gorm.DB {
 // the comment on the readiness vars in ready.go.
 func setReadyDeps(t *testing.T, db *gorm.DB, valkey func(context.Context) error, stats func() TenantConnStats) {
 	t.Helper()
-	origPXC, origValkey, origStats := pxcPing, valkeyPing, tenantStats
-	t.Cleanup(func() { pxcPing, valkeyPing, tenantStats = origPXC, origValkey, origStats })
+	origPXC, origValkey, origStats := pxcPing, loadValkeyPing(), tenantStats
+	t.Cleanup(func() { pxcPing, tenantStats = origPXC, origStats; setValkeyPing(origValkey) })
 	SetReadinessDB(db)
-	valkeyPing = valkey
+	setValkeyPing(valkey)
 	SetTenantConnStats(stats)
 }
 
@@ -171,7 +171,7 @@ func TestGetReady_NotConfigured(t *testing.T) {
 
 	code, body := getReady(t)
 	want := ReadyResponse{
-		Status: "not_ready", PXC: "not configured", Valkey: "not configured",
+		Status: "not_ready", PXC: "not configured", Valkey: "connecting",
 		LegacyTenant: "not configured",
 	}
 	if code != http.StatusServiceUnavailable {
