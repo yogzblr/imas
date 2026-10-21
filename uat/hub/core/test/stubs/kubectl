@@ -6,7 +6,8 @@
 # STUB_BAO_PORTS ("<pod>=<port> ...") stands in for several OpenBao pods:
 # an exec in a pod it names talks to 127.0.0.1:<port> instead of :8200.
 # StatefulSets are JSON files too (get statefulset, -o json or
-# -o jsonpath={.spec.replicas}).
+# -o jsonpath={.spec.replicas}), and so are Deployments (get deployment,
+# patch deployment --type=merge).
 set -euo pipefail
 : "${STUB_STATE:?}"
 mkdir -p "$STUB_STATE"
@@ -80,6 +81,7 @@ get)
 	secret) kind=Secret ;;
 	configmap) kind=ConfigMap ;;
 	statefulset) kind=StatefulSet ;;
+	deployment) kind=Deployment ;;
 	clusterissuer) exit 0 ;;
 	*) echo "stub kubectl: get $kind unsupported" >&2; exit 2 ;;
 	esac
@@ -94,6 +96,15 @@ get)
 	"") cat "$f" >/dev/null ;;
 	*) echo "stub kubectl: get output $* unsupported" >&2; exit 2 ;;
 	esac
+	;;
+patch)
+	# patch deployment <name> --type=merge -p <json>: merges into the stored
+	# Deployment (raise_progress_deadline, W7).
+	[[ "$2" == deployment && "$4" == --type=merge && "$5" == -p ]] || { echo "stub kubectl: patch $* unsupported" >&2; exit 2; }
+	f=$(store "$ns" Deployment "$3")
+	[[ -f "$f" ]] || { echo "Error from server (NotFound): deployments.apps \"$3\" not found" >&2; exit 1; }
+	jq --argjson p "$6" '. * $p' "$f" >"$f.new" && mv "$f.new" "$f"
+	echo "deployment.apps/$3 patched"
 	;;
 port-forward)
 	# Stands in for the tunnel kubectl opens on a port it picks: says where,

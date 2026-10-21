@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -191,6 +192,17 @@ func TestRealmMatchesSaaSAPI(t *testing.T) {
 	}
 	if !org {
 		t.Errorf("client %s does not map organization_id to organization.id (docs/api/saasapi.md)", lib["TESTS_CLIENT"])
+	}
+}
+
+// TestDMZNamesMatchLib keeps lib/common.sh's DMZ names (first_start_diagnostics,
+// W7) equal to uat/hub/dmz/lib.sh's.
+func TestDMZNamesMatchLib(t *testing.T) {
+	requireTools(t, "bash")
+	lib := libConstants(t)
+	got := strings.Fields(string(run(t, "bash", "-c", `. ../dmz/lib.sh; printf '%s %s' "$DMZ_NAMESPACE" "$DMZ_BUS_NAME"`)))
+	if len(got) != 2 || got[0] != lib["DMZ_NS"] || got[1] != lib["DMZ_BUS_STS"] {
+		t.Errorf("uat/hub/dmz/lib.sh DMZ_NAMESPACE, DMZ_BUS_NAME = %v; lib/common.sh DMZ_NS %q, DMZ_BUS_STS %q", got, lib["DMZ_NS"], lib["DMZ_BUS_STS"])
 	}
 }
 
@@ -699,6 +711,17 @@ func TestFarmerChartRender(t *testing.T) {
 		if fe[k] != want {
 			t.Errorf("farmer %s = %q, want %q", k, fe[k], want)
 		}
+	}
+	// W7: the first container gets 10 minutes (120 x 5 s) to answer /health,
+	// the chart's probe otherwise unchanged; install.sh raises the
+	// Deployment's progress deadline (the chart renders none).
+	sp := dig(container(t, farmer, "farmer"), "startupProbe")
+	if fmt.Sprint(dig(sp, "failureThreshold")) != "120" || fmt.Sprint(dig(sp, "periodSeconds")) != "5" ||
+		str(sp, "httpGet", "path") != "/health" {
+		t.Errorf("farmer startupProbe = %v, want /health every 5 s, failureThreshold 120", sp)
+	}
+	if p := dig(farmer, "spec", "progressDeadlineSeconds"); p != nil {
+		t.Errorf("farmer progressDeadlineSeconds rendered (%v): the chart had no value for it, install.sh patches the live Deployment (W7); revisit raise_progress_deadline", p)
 	}
 	// Unit S5: both Valkey clients read the password from Secret
 	// imas-valkey-auth (saasapi-secrets.sh), as a file.

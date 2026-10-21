@@ -214,7 +214,9 @@ failure").
    (a tag without a published release or `checksums.txt.sig`), `tofu
    apply` (quota, with the numbers), `Core hub` (a chart without the
    stamped sprout release; `validate-object-store.sh`; on Run 3 the Versity
-   bucket Job or OpenBao's three voters) and `Core hub, second half` (the
+   bucket Job or OpenBao's three voters) and `Core hub, second half` (farmer
+   or saasapi not Ready within 1200 s: "The first core install takes up to
+   about 10 minutes" below; or the
    registration Job failed, or the operator API does not hold the release
    with its signature).
 2. **`summary.txt`**: one line per scenario, OS and tenant, `PASS`, `FAIL`
@@ -238,6 +240,61 @@ failure").
    `uat.json`, `ha_node_names.json` and `object_store.json` (Run 3), the
    endpoints file, `core.json` (with Run 3's `topology`) and the enrolment
    files; no credential is ever uploaded.
+
+### The first core install takes up to about 10 minutes until P30 lands
+
+**Symptom.** `Core hub, second half` fails with `deployment
+"imas-core-farmer" exceeded its progress deadline` (0 of 2 available), or
+with `deployment/imas-core-farmer in imas-core did not become ready within
+1200s`, on a clean first install; the farmer pods may turn Ready seconds
+later.
+
+**Evidence (UAT Run 2 #5, 2026-10-21, rc.15).** The farmer Deployment had
+the API's default progress deadline (600 s) and the chart's startup probe
+(`/health` every 5 s, 60 failures: 300 s). The first farmer container
+(started about 05:14:28Z) wrote the two Account JWTs at 05:14:30, could not
+announce them (`nats: no servers available`: the DMZ bus turns Ready only
+once its loader holds every Account), logged nothing more until 05:16:39
+(the SYS listener connected; the bus loader's `initial load complete, 2
+accounts` was at 05:16:29), and still answered 503 on `/health` until
+kubelet killed it at 05:19:28. The second container was Ready 5 s after it
+started (05:19:34), seconds after the workflow gave up. The DMZ side was
+healthy; Envoy's JWKS fetch from farmer failed until farmer's API was up,
+then recovered. The bus's `TLS handshake error: EOF` every 20 s from
+10.244.0.1 is a TCP probe on the TLS port: noise.
+
+**What the UAT does now (W7).** Only UAT files, no product code (P30 is the
+product fix: farmer ready within seconds of reaching the bus, and the bus
+loader polling fast during its initial load). `values/farmer-uat.yaml`
+gives farmer's startup probe 120 failures (10 minutes);
+`uat/hub/core/install.sh` raises farmer's and saasapi's
+`progressDeadlineSeconds` to 3600 as soon as helm creates them (the chart
+has no value for it; the deadline runs from then, through the DMZ install,
+before farmer can reach the bus); `finish.sh` and `acceptance.sh restart`
+wait 1200 s for each rollout, and `uat/hub/dmz/install.sh` waits up to 20 minutes
+(`--timeout`, default `20m`). Worst case expected: the first container
+killed after 10 minutes and its successor Ready in seconds, inside
+`finish.sh`'s 20.
+
+**Reading the next run.** On a timeout `finish.sh` prints, before failing,
+in this order: `kubectl get pods -o wide` of `imas-core`; `kubectl describe`
+of both Deployments and their pods (the events are at the end of each:
+startup probe failures, restarts, image pulls); the last 40 lines of each
+farmer and saasapi container, and of its run before a restart; the DMZ pods and the
+last 40 lines of each bus pod's `farmerbus` and `loader` containers.
+
+- Farmer logs stop after `announcing ... reconciled Accounts: ... no servers
+  available`, the loader shows `initial load complete` a few minutes later,
+  and the startup probe events count to 120: the slow first start this
+  entry is about; with P30 not yet in the release, re-run.
+- A restarted farmer whose second run is Ready in seconds, but the rollout
+  still failed: the progress deadline was not raised (`install.sh` logs
+  `deployment/imas-core-farmer: progressDeadlineSeconds 3600 (W7)`; check
+  `kubectl -n imas-core get deploy imas-core-farmer -o
+  jsonpath='{.spec.progressDeadlineSeconds}'`).
+- The loader never reports its initial load, or farmer never connects:
+  not this entry. Read the loader's lines (accounts bucket credential,
+  object store reach) and the DMZ check.
 
 ### All tunnels hang or go UNREACHABLE after about an hour
 

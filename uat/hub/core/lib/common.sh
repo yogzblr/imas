@@ -65,6 +65,8 @@ FARMER_TLS_SECRET=imas-farmer-tls             # tls.secretName
 RUSTFS_SVC=imas-uat-rustfs
 KEYCLOAK_DEPLOY=imas-uat-keycloak
 EDGE_DEPLOY=imas-uat-edge
+DMZ_NS=imas-dmz                               # uat/hub/dmz/lib.sh DMZ_NAMESPACE (first_start_diagnostics reads the DMZ)
+DMZ_BUS_STS=imas-dmz-nats-bus                 # uat/hub/dmz/lib.sh DMZ_BUS_NAME: containers farmerbus and loader
 RECIPE_BUCKET=imas-recipes                    # objectStore.bucket
 JOB_BUCKET=imas-jobs                          # objectStore.jobBucket
 SPROUT_JWT_BUCKET=imas-sprout-jwts            # objectStore.sproutJWTBucket
@@ -405,6 +407,108 @@ wait_for() {
 rollout() {
 	kc -n "$2" rollout status "$1" --timeout="${3:-600s}" >&2 ||
 		die "$1 in $2 did not become ready"
+}
+
+# --- a slow first start of farmer and saasapi (W7) ----------------------------
+# On a clean first install farmer can take about ten minutes to turn Ready:
+# it writes the Accounts before the DMZ bus is up, the bus loader picks them
+# up on its timer, and /health can stay 503 until the container restarts
+# (UAT Run 2, 2026-10-21: Ready 05:19:34Z, seconds after a 600 s progress
+# deadline; docs/briefs/W7-P30-first-install-startup-race.md, P30 fixes the
+# product). Until then every UAT wait on farmer and saasapi gets
+# FIRST_START_SECONDS, and their Deployments get PROGRESS_DEADLINE_SECONDS.
+# The deadline runs from when helm creates them, early in install.sh, and
+# farmer cannot turn Ready before the DMZ install (up to 20 minutes a wait)
+# has brought up the bus; so it covers the rest of install.sh and the DMZ
+# install as well as the first start, and finish.sh's own wait
+# (FIRST_START_SECONDS, from its start) is the bound that matters. UAT only:
+# the chart's defaults are unchanged.
+FIRST_START_SECONDS=1200
+PROGRESS_DEADLINE_SECONDS=3600
+
+# raise_progress_deadline <deployment>: sets the Deployment's
+# progressDeadlineSeconds to PROGRESS_DEADLINE_SECONDS. The farmer chart has no
+# value for it (the API default, 600 s, applies), so the UAT patches the
+# live object; helm's three-way merge keeps a field its manifests never set,
+# so finish.sh's `helm upgrade --reuse-values` leaves it.
+raise_progress_deadline() {
+	kc -n "$CORE_NS" patch deployment "$1" --type=merge \
+		-p "{\"spec\":{\"progressDeadlineSeconds\":$PROGRESS_DEADLINE_SECONDS}}" >/dev/null
+}
+
+# raise_progress_deadlines_as_created <seconds>: raises farmer's and
+# saasapi's progress deadline as soon as helm creates each Deployment
+# (before its 600 s run out), polling for up to <seconds>. install.sh runs
+# it alongside the farmer install.
+raise_progress_deadlines_as_created() {
+	local start=$SECONDS d left pending=("$FARMER_FULLNAME" "$SAASAPI_FULLNAME")
+	while ((${#pending[@]})); do
+		left=()
+		for d in "${pending[@]}"; do
+			if kc -n "$CORE_NS" get deployment "$d" >/dev/null 2>&1 && raise_progress_deadline "$d"; then
+				log "deployment/$d: progressDeadlineSeconds $PROGRESS_DEADLINE_SECONDS (W7)"
+			else
+				left+=("$d")
+			fi
+		done
+		pending=("${left[@]}")
+		((${#pending[@]})) || return 0
+		((SECONDS - start < $1)) || die "deployment(s) ${pending[*]} not created within $1s: progress deadline not raised"
+		sleep 2
+	done
+}
+
+# first_start_diagnostics: printed before a farmer or saasapi wait fails, so
+# the log alone says why: the core pods' status, `kubectl describe` (with
+# events) of both Deployments and their pods, the last 40 log lines of each
+# farmer and saasapi container (and of its previous run after a restart), and the DMZ
+# bus and loader tails (DMZ_KUBECONFIG, default dmz.kubeconfig next to the
+# core kubeconfig, as the workflow and uat/lite lay them out). Never fails.
+first_start_diagnostics() {
+	local d c p i dmz_kc
+	log "diagnostics: pods in $CORE_NS"
+	kc -n "$CORE_NS" get pods -o wide >&2 || true
+	for c in farmer saasapi; do
+		d=$FARMER_FULLNAME
+		[[ $c == saasapi ]] && d=$SAASAPI_FULLNAME
+		log "diagnostics: kubectl describe deployment/$d and its pods (events last)"
+		kc -n "$CORE_NS" describe deployment "$d" >&2 || true
+		kc -n "$CORE_NS" describe pods -l "app.kubernetes.io/instance=$CORE_RELEASE,app.kubernetes.io/component=$c" >&2 || true
+	done
+	for c in farmer saasapi; do
+		for p in $(kc -n "$CORE_NS" get pods -l "app.kubernetes.io/instance=$CORE_RELEASE,app.kubernetes.io/component=$c" -o name 2>/dev/null); do
+			log "diagnostics: the last 40 log lines of $p"
+			kc -n "$CORE_NS" logs "$p" -c "$c" --tail=40 >&2 || true
+			if kc -n "$CORE_NS" logs "$p" -c "$c" --previous --tail=40 >/dev/null 2>&1; then
+				log "diagnostics: the last 40 log lines of $p before its restart"
+				kc -n "$CORE_NS" logs "$p" -c "$c" --previous --tail=40 >&2 || true
+			fi
+		done
+	done
+	dmz_kc=${DMZ_KUBECONFIG:-$(dirname "$KUBECONFIG_PATH")/dmz.kubeconfig}
+	if [[ ! -f "$dmz_kc" ]]; then
+		log "diagnostics: no DMZ kubeconfig at $dmz_kc (set DMZ_KUBECONFIG): no DMZ bus or loader tail"
+		return 0
+	fi
+	log "diagnostics: pods in $DMZ_NS (DMZ cluster)"
+	kubectl --kubeconfig "$dmz_kc" -n "$DMZ_NS" get pods -o wide >&2 || true
+	for ((i = 0; i < DMZ_NODE_COUNT; i++)); do
+		for c in farmerbus loader; do
+			log "diagnostics: the last 40 log lines of $DMZ_BUS_STS-$i, container $c"
+			kubectl --kubeconfig "$dmz_kc" -n "$DMZ_NS" logs "$DMZ_BUS_STS-$i" -c "$c" --tail=40 >&2 || true
+		done
+	done
+}
+
+# first_start_rollout <deployment>: waits FIRST_START_SECONDS for farmer or
+# saasapi to roll out; on a timeout (or a passed progress deadline) prints
+# first_start_diagnostics, then fails.
+first_start_rollout() {
+	raise_progress_deadline "$1" || log "could not raise the progress deadline of deployment/$1"
+	if ! kc -n "$CORE_NS" rollout status "deployment/$1" --timeout="${FIRST_START_SECONDS}s" >&2; then
+		first_start_diagnostics
+		die "deployment/$1 in $CORE_NS did not become ready within ${FIRST_START_SECONDS}s (diagnostics above)"
+	fi
 }
 
 # sts_ready <name> <ns>: every replica of a StatefulSet is Ready. (kubectl

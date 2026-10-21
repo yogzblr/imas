@@ -64,7 +64,7 @@ scenario() {
 	export FS_STATE="$state"
 	: >"$state/calls.log"
 	export FS_REQUEST="$tmp/request.json" FS_RESPONSE="$tmp/held.json" FS_STATUS=200
-	export FS_HELM_RC=0 FS_JOB_STATE=absent FS_WAIT_RC=0 FS_NO_HOOK=""
+	export FS_HELM_RC=0 FS_JOB_STATE=absent FS_WAIT_RC=0 FS_NO_HOOK="" FS_ROLLOUT_RC=0
 }
 finish() { SKIP_CHECK=1 "$core/finish.sh" "$kubeconfig" "$ep" "$state" "$tag" >"$state/out" 2>&1; }
 says() { grep -qF -- "$1" "$state/out"; }
@@ -79,6 +79,38 @@ else bad "a failed registration Job: wrong message"; show; fi
 [[ ! -e "$state/curl.log" ]] && ok "... and the operator API is not asked" || bad "the operator API was asked after a failed Job"
 grep -q -- '--reuse-values' "$state/calls.log" && grep -q -- '--set sproutRelease.register=true' "$state/calls.log" &&
 	ok "the registration is helm upgrade --reuse-values --set sproutRelease.register=true" || bad "the helm upgrade's arguments"
+
+# W7: farmer and saasapi each get 1200 s, their progress deadline raised to
+# 3600 s (it runs from install.sh, before the DMZ install); a timeout prints
+# the diagnostics, then fails before registering.
+scenario first-start-waits
+finish && grep -qF 'patch deployment imas-core-farmer --type=merge -p {"spec":{"progressDeadlineSeconds":3600}}' "$state/calls.log" &&
+	grep -qF 'patch deployment imas-core-farmer-saasapi --type=merge -p {"spec":{"progressDeadlineSeconds":3600}}' "$state/calls.log" &&
+	grep -qF 'rollout status deployment/imas-core-farmer --timeout=1200s' "$state/calls.log" &&
+	[[ $(grep -c 'rollout status deployment/imas-core-farmer-saasapi --timeout=1200s' "$state/calls.log") -eq 2 ]] &&
+	! grep -q 'rollout status .*--timeout=\(300\|600\|900\)s' "$state/calls.log" &&
+	ok "farmer and saasapi: progress deadline 3600 s, rollout waits 1200 s (W7)" || { bad "the first start waits"; show; }
+
+scenario first-start-timeout
+export FS_ROLLOUT_RC=1
+echo "apiVersion: v1" >"$tmp/dmz.kubeconfig"
+if finish; then bad "a farmer that does not roll out passes"; show
+elif says "deployment/imas-core-farmer in imas-core did not become ready within 1200s" &&
+	says "(stub pods)" && says "Events: (stub describe deployment imas-core-farmer)" &&
+	says "Events: (stub describe deployment imas-core-farmer-saasapi)" &&
+	says "Events: (stub describe pods -l app.kubernetes.io/instance=imas-core,app.kubernetes.io/component=farmer)" &&
+	says "farmer-a: announcing 2 reconciled Accounts" && says "farmer-b: current run" && says "farmer-b: before its restart" &&
+	says "saasapi-a: nats: no servers available for connection" && says "saasapi-a: before its restart" &&
+	says "bus-0 farmerbus: TLS handshake error" && says "bus-0 loader: accountloader: initial load complete"; then
+	ok "a farmer rollout timeout prints pods, describe with events, farmer's and saasapi's last 40 lines and the DMZ bus and loader tails, then fails"
+else bad "a farmer rollout timeout: wrong output"; sed 's/^/      /' "$state/out"; fi
+grep -qF "kubectl --kubeconfig $tmp/dmz.kubeconfig -n imas-dmz logs imas-dmz-nats-bus-0 -c loader --tail=40" "$state/calls.log" &&
+	ok "... the DMZ tails come from dmz.kubeconfig next to the core kubeconfig" || bad "the DMZ tails' kubeconfig"
+! grep -q 'helm upgrade' "$state/calls.log" 2>/dev/null && ok "... and nothing is registered" || bad "registered after a failed rollout"
+rm -f "$tmp/dmz.kubeconfig"
+finish && bad "a timeout without a DMZ kubeconfig passes" ||
+	{ says "no DMZ kubeconfig at $tmp/dmz.kubeconfig" && says "did not become ready within 1200s" &&
+		ok "no DMZ kubeconfig: the core diagnostics still print, and it fails" || { bad "no DMZ kubeconfig: wrong output"; show; }; }
 
 scenario no-hook
 export FS_NO_HOOK=1

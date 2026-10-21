@@ -72,7 +72,9 @@
 #                         file's dmz.envoy_service_type, else nodeport. The
 #                         bus is a NodePort on dmz.ports.bus (default 8442)
 #                         either way. README.md, "Exposure"
-# --timeout               how long each wait may take (default 10m)
+# --timeout               how long each wait may take (default 20m: the
+#                         bus turns Ready only once its loader holds the
+#                         Accounts a first core install writes, W7)
 # --chart-registry        OCI base the chart is pulled from, default
 #                         oci://ghcr.io/yogzblr/charts (the chart is
 #                         <base>/nats). Replaces --chart-repo-url, which is
@@ -116,7 +118,7 @@ usage() {
 }
 
 kubeconfig="" endpoints="" release_tag="" trust_dir="" seeds_kubeconfig=""
-seeds_namespace=imas-core workdir="" expose="" timeout=10m
+seeds_namespace=imas-core workdir="" expose="" timeout=20m
 chart_registry="" render_only="" chart="" reader_dir="" loader_seed="" fence_seed=""
 
 while (($#)); do

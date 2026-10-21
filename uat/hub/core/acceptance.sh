@@ -245,7 +245,8 @@ restart() {
 	local name
 	name=$(workload "$1")
 	kc -n "$CORE_NS" rollout restart "deployment/$name" >&2 || die "kubectl rollout restart deployment/$name failed"
-	kc -n "$CORE_NS" rollout status "deployment/$name" --timeout=600s >&2 || die "deployment/$name did not roll out within 600s"
+	# FIRST_START_SECONDS, as for the install (W7, lib/common.sh).
+	first_start_rollout "$name"
 	printf '%s' "$name"
 }
 # env_of <deployment> <container>: the container's literal env as a JSON object.
