@@ -486,7 +486,7 @@ HELM_STUB_FAIL=1 refuse "helm_pull_chart: a failed pull says the package may sti
 
 # --- 7d. the first start's progress deadline (W7) --------------------------------
 # raise_progress_deadlines_as_created patches farmer's and saasapi's
-# Deployments to 1200 s as soon as each exists (helm creates them while
+# Deployments to 3600 s as soon as each exists (helm creates them while
 # install.sh waits), and fails when they never appear.
 deadlines() {
 	(
@@ -507,9 +507,9 @@ rm -f "$(dep_file imas-core-farmer)" "$(dep_file imas-core-farmer-saasapi)"
 ) &
 expect "progress deadlines: raised as helm creates the Deployments" deadlines 30
 wait
-[[ "$(jq '.spec.progressDeadlineSeconds' "$(dep_file imas-core-farmer)")" == 1200 &&
-	"$(jq '.spec.progressDeadlineSeconds' "$(dep_file imas-core-farmer-saasapi)")" == 1200 ]] &&
-	ok "progress deadlines: farmer and saasapi at 1200 s" || bad "progress deadlines: $(cat "$(dep_file imas-core-farmer)" "$(dep_file imas-core-farmer-saasapi)")"
+[[ "$(jq '.spec.progressDeadlineSeconds' "$(dep_file imas-core-farmer)")" == 3600 &&
+	"$(jq '.spec.progressDeadlineSeconds' "$(dep_file imas-core-farmer-saasapi)")" == 3600 ]] &&
+	ok "progress deadlines: farmer and saasapi at 3600 s" || bad "progress deadlines: $(cat "$(dep_file imas-core-farmer)" "$(dep_file imas-core-farmer-saasapi)")"
 rm -f "$(dep_file imas-core-farmer-saasapi)"
 refuse "progress deadlines: a Deployment that never appears fails, naming it" \
 	'imas-core-farmer-saasapi not created within 3s' deadlines 3

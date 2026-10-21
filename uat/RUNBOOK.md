@@ -268,17 +268,19 @@ product fix: farmer ready within seconds of reaching the bus, and the bus
 loader polling fast during its initial load). `values/farmer-uat.yaml`
 gives farmer's startup probe 120 failures (10 minutes);
 `uat/hub/core/install.sh` raises farmer's and saasapi's
-`progressDeadlineSeconds` to 1200 as soon as helm creates them (the chart
-has no value for it); `finish.sh` and `acceptance.sh restart` wait 1200 s
-for each rollout, and `uat/hub/dmz/install.sh` waits up to 20 minutes
+`progressDeadlineSeconds` to 3600 as soon as helm creates them (the chart
+has no value for it; the deadline runs from then, through the DMZ install,
+before farmer can reach the bus); `finish.sh` and `acceptance.sh restart`
+wait 1200 s for each rollout, and `uat/hub/dmz/install.sh` waits up to 20 minutes
 (`--timeout`, default `20m`). Worst case expected: the first container
-killed after 10 minutes and its successor Ready in seconds, inside the 20.
+killed after 10 minutes and its successor Ready in seconds, inside
+`finish.sh`'s 20.
 
 **Reading the next run.** On a timeout `finish.sh` prints, before failing,
 in this order: `kubectl get pods -o wide` of `imas-core`; `kubectl describe`
 of both Deployments and their pods (the events are at the end of each:
 startup probe failures, restarts, image pulls); the last 40 lines of each
-farmer container, and of its run before a restart; the DMZ pods and the
+farmer and saasapi container, and of its run before a restart; the DMZ pods and the
 last 40 lines of each bus pod's `farmerbus` and `loader` containers.
 
 - Farmer logs stop after `announcing ... reconciled Accounts: ... no servers
@@ -287,7 +289,7 @@ last 40 lines of each bus pod's `farmerbus` and `loader` containers.
   entry is about; with P30 not yet in the release, re-run.
 - A restarted farmer whose second run is Ready in seconds, but the rollout
   still failed: the progress deadline was not raised (`install.sh` logs
-  `deployment/imas-core-farmer: progressDeadlineSeconds 1200 (W7)`; check
+  `deployment/imas-core-farmer: progressDeadlineSeconds 3600 (W7)`; check
   `kubectl -n imas-core get deploy imas-core-farmer -o
   jsonpath='{.spec.progressDeadlineSeconds}'`).
 - The loader never reports its initial load, or farmer never connects:

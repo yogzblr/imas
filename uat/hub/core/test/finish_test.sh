@@ -81,14 +81,15 @@ grep -q -- '--reuse-values' "$state/calls.log" && grep -q -- '--set sproutReleas
 	ok "the registration is helm upgrade --reuse-values --set sproutRelease.register=true" || bad "the helm upgrade's arguments"
 
 # W7: farmer and saasapi each get 1200 s, their progress deadline raised to
-# match; a timeout prints the diagnostics, then fails before registering.
+# 3600 s (it runs from install.sh, before the DMZ install); a timeout prints
+# the diagnostics, then fails before registering.
 scenario first-start-waits
-finish && grep -qF 'patch deployment imas-core-farmer --type=merge -p {"spec":{"progressDeadlineSeconds":1200}}' "$state/calls.log" &&
-	grep -qF 'patch deployment imas-core-farmer-saasapi --type=merge -p {"spec":{"progressDeadlineSeconds":1200}}' "$state/calls.log" &&
+finish && grep -qF 'patch deployment imas-core-farmer --type=merge -p {"spec":{"progressDeadlineSeconds":3600}}' "$state/calls.log" &&
+	grep -qF 'patch deployment imas-core-farmer-saasapi --type=merge -p {"spec":{"progressDeadlineSeconds":3600}}' "$state/calls.log" &&
 	grep -qF 'rollout status deployment/imas-core-farmer --timeout=1200s' "$state/calls.log" &&
 	[[ $(grep -c 'rollout status deployment/imas-core-farmer-saasapi --timeout=1200s' "$state/calls.log") -eq 2 ]] &&
 	! grep -q 'rollout status .*--timeout=\(300\|600\|900\)s' "$state/calls.log" &&
-	ok "farmer and saasapi: progress deadline 1200 s, rollout waits 1200 s (W7)" || { bad "the first start waits"; show; }
+	ok "farmer and saasapi: progress deadline 3600 s, rollout waits 1200 s (W7)" || { bad "the first start waits"; show; }
 
 scenario first-start-timeout
 export FS_ROLLOUT_RC=1
@@ -99,8 +100,9 @@ elif says "deployment/imas-core-farmer in imas-core did not become ready within 
 	says "Events: (stub describe deployment imas-core-farmer-saasapi)" &&
 	says "Events: (stub describe pods -l app.kubernetes.io/instance=imas-core,app.kubernetes.io/component=farmer)" &&
 	says "farmer-a: announcing 2 reconciled Accounts" && says "farmer-b: current run" && says "farmer-b: before its restart" &&
+	says "saasapi-a: nats: no servers available for connection" && says "saasapi-a: before its restart" &&
 	says "bus-0 farmerbus: TLS handshake error" && says "bus-0 loader: accountloader: initial load complete"; then
-	ok "a farmer rollout timeout prints pods, describe with events, farmer's last 40 lines and the DMZ bus and loader tails, then fails"
+	ok "a farmer rollout timeout prints pods, describe with events, farmer's and saasapi's last 40 lines and the DMZ bus and loader tails, then fails"
 else bad "a farmer rollout timeout: wrong output"; sed 's/^/      /' "$state/out"; fi
 grep -qF "kubectl --kubeconfig $tmp/dmz.kubeconfig -n imas-dmz logs imas-dmz-nats-bus-0 -c loader --tail=40" "$state/calls.log" &&
 	ok "... the DMZ tails come from dmz.kubeconfig next to the core kubeconfig" || bad "the DMZ tails' kubeconfig"

@@ -47,9 +47,9 @@
 # check.sh: farmer's /ready and saasapi's startup both need the DMZ's NATS bus,
 # which the DMZ install (uat/hub/dmz/install.sh) creates after this script.
 # finish.sh does those three things once the DMZ is up. It does raise both
-# Deployments' progress deadline to FIRST_START_SECONDS (1200 s) as helm
-# creates them, as a clean first start of farmer takes about ten minutes
-# (W7; lib/common.sh).
+# Deployments' progress deadline to PROGRESS_DEADLINE_SECONDS (3600 s) as
+# helm creates them, as a clean first start of farmer takes about ten minutes
+# and cannot finish before the DMZ install (W7; lib/common.sh).
 # IMAS_UAT_DISPATCH_FLAGS (on or off, default off; the workflow input
 # dispatch_flags) sets the fleet update flags in the chart values
 # (gen-values.sh) and is recorded in core.json, which check.sh compares.
@@ -255,9 +255,10 @@ hc upgrade --install "$CORE_RELEASE" "$chart_tgz" -n "$CORE_NS" --timeout "$HELM
 	--set sproutRelease.register=false \
 	"${farmer_values[@]}" -f "$STATE_DIR/values-run.json" >"$helm_log" 2>&1 &
 helm_pid=$!
-# farmer's and saasapi's progress deadline, raised to FIRST_START_SECONDS as
-# soon as helm creates them (W7, lib/common.sh): a clean first start of
-# farmer takes about ten minutes, past the API default of 600 s.
+# farmer's and saasapi's progress deadline, raised to PROGRESS_DEADLINE_SECONDS
+# as soon as helm creates them (W7, lib/common.sh): a clean first start of
+# farmer takes about ten minutes, past the API default of 600 s, and needs
+# the DMZ bus, which comes after this script.
 raise_progress_deadlines_as_created "$FIRST_START_SECONDS" &
 deadline_pid=$!
 trap 'kill "$helm_pid" "$deadline_pid" 2>/dev/null || true' EXIT

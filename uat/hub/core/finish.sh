@@ -7,9 +7,10 @@
 # it, saasapi exits at startup without it, and the sprout release
 # registration hook POSTs to saasapi. So here, in order:
 #    1. wait for the farmer and saasapi rollouts, FIRST_START_SECONDS
-#       (1200 s) each with their progress deadline raised to match; on a
-#       timeout print the core pods, `kubectl describe` with events, farmer's
-#       last 40 log lines and the DMZ bus and loader tails (DMZ_KUBECONFIG,
+#       (1200 s) each, their progress deadline raised above it
+#       (PROGRESS_DEADLINE_SECONDS, 3600 s); on a timeout print the core
+#       pods, `kubectl describe` with events, farmer's and saasapi's last 40
+#       log lines and the DMZ bus and loader tails (DMZ_KUBECONFIG,
 #       default dmz.kubeconfig next to <kubeconfig>), then fail (W7)
 #    2. register the sprout release (P20 option C): `helm upgrade` of the
 #       same chart with sproutRelease.register=true (--reuse-values, so

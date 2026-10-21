@@ -121,7 +121,7 @@ ACC_PURGE_STATUS=409 ACC_PURGE_BODY='{"error":"not_offboarded","message":"x"}' a
 # --- restart, the log retention Job, retention, log-count ---------------------------------
 out=$(acc restart saasapi 2>/dev/null) && [[ "$(jq -r .restarted <<<"$out")" == imas-core-farmer-saasapi ]] &&
 	grep -q "rollout restart deployment/imas-core-farmer-saasapi" "$ACC_STATE/calls.log" &&
-	grep -q "patch deployment imas-core-farmer-saasapi --type=merge -p {\"spec\":{\"progressDeadlineSeconds\":1200}}" "$ACC_STATE/calls.log" &&
+	grep -q "patch deployment imas-core-farmer-saasapi --type=merge -p {\"spec\":{\"progressDeadlineSeconds\":3600}}" "$ACC_STATE/calls.log" &&
 	grep -q "rollout status deployment/imas-core-farmer-saasapi --timeout=1200s" "$ACC_STATE/calls.log" &&
 	ok "restart saasapi: rollout restart, then waits 1200 s (W7)" || bad "restart saasapi: $out"
 ACC_ROLLOUT_RC=1 refused "restart fails when the rollout doesn't finish" "did not become ready within 1200s" acc restart farmer

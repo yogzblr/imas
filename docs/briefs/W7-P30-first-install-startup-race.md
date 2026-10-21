@@ -55,16 +55,23 @@ way. No product code or chart default changed; rc.15 stays under test.
   chart has no value for it (its Deployment templates render none, so the
   API default of 600 s applies), and adding one is a chart change, outside
   W7. Instead `install.sh` patches farmer's and saasapi's live Deployments
-  to 1200 as soon as helm creates them (`raise_progress_deadlines_as_created`,
+  as soon as helm creates them (`raise_progress_deadlines_as_created`,
   run alongside the farmer install, as the Deployments exist minutes before
   helm returns), and `first_start_rollout` patches again before each wait.
   Helm's three-way merge keeps a field neither manifest sets, so
-  `finish.sh`'s `helm upgrade --reuse-values` leaves it.
+  `finish.sh`'s `helm upgrade --reuse-values` leaves it. The value is 3600,
+  not the brief's 1200 (review of PR 305): the deadline runs from when
+  helm creates the Deployment, early in `install.sh`, and farmer cannot
+  turn Ready before the rest of `install.sh` and the DMZ install (up to 20
+  minutes a wait) have brought up the bus, so 1200 could run out before
+  `finish.sh` starts its own 1200 s wait. With 3600
+  (`PROGRESS_DEADLINE_SECONDS`), `finish.sh`'s wait is the bound.
   `TestFarmerChartRender` fails if the chart ever renders the field, so the
   patch is revisited then.
 - **saasapi's progress deadline too.** The brief names farmer only;
   saasapi's Deployment has the same 600 s default and also waits on the bus
-  (it exits at startup without it), so it gets the same 1200 s.
+  (it exits at startup without it), so it gets the same deadline and wait,
+  and the timeout diagnostics include its containers' logs too.
 - **The startup probe at 120 failures and the 20 minutes.** If P30's
   suspicion 2 holds (`/health` clears only on a restart), 10 minutes of
   probe delays that restart rather than avoiding it. Built as the brief
@@ -73,8 +80,8 @@ way. No product code or chart default changed; rc.15 stays under test.
   started (inferred: the 600 s deadline ran out at about 05:19:30, the
   container started at 05:14:28), so a first container killed after 10
   minutes and a successor Ready in seconds (as at 05:19:34) is Ready about
-  15 minutes after the ReplicaSet, inside the 1200 s deadline and the 1200 s
-  wait. Only `failureThreshold` is set in `values/farmer-uat.yaml`; helm
+  15 minutes after the ReplicaSet, inside the deadline and, with the DMZ
+  up by then, inside `finish.sh`'s 1200 s wait. Only `failureThreshold` is set in `values/farmer-uat.yaml`; helm
   merges it into the chart's probe (`/health`, HTTPS, every 5 s).
 - **The DMZ bus and loader tail.** `finish.sh` had only the core
   kubeconfig. It now reads `DMZ_KUBECONFIG`, by default `dmz.kubeconfig`
@@ -97,7 +104,7 @@ way. No product code or chart default changed; rc.15 stays under test.
   - changed: `finish.sh` farmer and saasapi rollouts 900 s -> 1200 s,
     saasapi after the registration 300 s -> 1200 s; `acceptance.sh restart`
     600 s -> 1200 s; `uat/hub/dmz/install.sh --timeout` default 10m -> 20m;
-    farmer's and saasapi's progress deadline 600 s -> 1200 s; farmer's
+    farmer's and saasapi's progress deadline 600 s -> 3600 s; farmer's
     startup probe 60 -> 120 failures.
   - kept, not on the bus path: `install.sh` the UAT-only chart's `helm
     --wait` (already 20m), its three certificate waits (300 s; cert-manager

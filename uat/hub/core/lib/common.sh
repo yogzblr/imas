@@ -415,18 +415,25 @@ rollout() {
 # up on its timer, and /health can stay 503 until the container restarts
 # (UAT Run 2, 2026-10-21: Ready 05:19:34Z, seconds after a 600 s progress
 # deadline; docs/briefs/W7-P30-first-install-startup-race.md, P30 fixes the
-# product). Until then the UAT gives both Deployments, and every wait on
-# them, FIRST_START_SECONDS. UAT only: the chart's defaults are unchanged.
+# product). Until then every UAT wait on farmer and saasapi gets
+# FIRST_START_SECONDS, and their Deployments get PROGRESS_DEADLINE_SECONDS.
+# The deadline runs from when helm creates them, early in install.sh, and
+# farmer cannot turn Ready before the DMZ install (up to 20 minutes a wait)
+# has brought up the bus; so it covers the rest of install.sh and the DMZ
+# install as well as the first start, and finish.sh's own wait
+# (FIRST_START_SECONDS, from its start) is the bound that matters. UAT only:
+# the chart's defaults are unchanged.
 FIRST_START_SECONDS=1200
+PROGRESS_DEADLINE_SECONDS=3600
 
 # raise_progress_deadline <deployment>: sets the Deployment's
-# progressDeadlineSeconds to FIRST_START_SECONDS. The farmer chart has no
+# progressDeadlineSeconds to PROGRESS_DEADLINE_SECONDS. The farmer chart has no
 # value for it (the API default, 600 s, applies), so the UAT patches the
 # live object; helm's three-way merge keeps a field its manifests never set,
 # so finish.sh's `helm upgrade --reuse-values` leaves it.
 raise_progress_deadline() {
 	kc -n "$CORE_NS" patch deployment "$1" --type=merge \
-		-p "{\"spec\":{\"progressDeadlineSeconds\":$FIRST_START_SECONDS}}" >/dev/null
+		-p "{\"spec\":{\"progressDeadlineSeconds\":$PROGRESS_DEADLINE_SECONDS}}" >/dev/null
 }
 
 # raise_progress_deadlines_as_created <seconds>: raises farmer's and
@@ -439,7 +446,7 @@ raise_progress_deadlines_as_created() {
 		left=()
 		for d in "${pending[@]}"; do
 			if kc -n "$CORE_NS" get deployment "$d" >/dev/null 2>&1 && raise_progress_deadline "$d"; then
-				log "deployment/$d: progressDeadlineSeconds $FIRST_START_SECONDS (W7)"
+				log "deployment/$d: progressDeadlineSeconds $PROGRESS_DEADLINE_SECONDS (W7)"
 			else
 				left+=("$d")
 			fi
@@ -454,7 +461,7 @@ raise_progress_deadlines_as_created() {
 # first_start_diagnostics: printed before a farmer or saasapi wait fails, so
 # the log alone says why: the core pods' status, `kubectl describe` (with
 # events) of both Deployments and their pods, the last 40 log lines of each
-# farmer container (and of its previous run after a restart), and the DMZ
+# farmer and saasapi container (and of its previous run after a restart), and the DMZ
 # bus and loader tails (DMZ_KUBECONFIG, default dmz.kubeconfig next to the
 # core kubeconfig, as the workflow and uat/lite lay them out). Never fails.
 first_start_diagnostics() {
@@ -468,13 +475,15 @@ first_start_diagnostics() {
 		kc -n "$CORE_NS" describe deployment "$d" >&2 || true
 		kc -n "$CORE_NS" describe pods -l "app.kubernetes.io/instance=$CORE_RELEASE,app.kubernetes.io/component=$c" >&2 || true
 	done
-	for p in $(kc -n "$CORE_NS" get pods -l "app.kubernetes.io/instance=$CORE_RELEASE,app.kubernetes.io/component=farmer" -o name 2>/dev/null); do
-		log "diagnostics: the last 40 log lines of $p"
-		kc -n "$CORE_NS" logs "$p" -c farmer --tail=40 >&2 || true
-		if kc -n "$CORE_NS" logs "$p" -c farmer --previous --tail=40 >/dev/null 2>&1; then
-			log "diagnostics: the last 40 log lines of $p before its restart"
-			kc -n "$CORE_NS" logs "$p" -c farmer --previous --tail=40 >&2 || true
-		fi
+	for c in farmer saasapi; do
+		for p in $(kc -n "$CORE_NS" get pods -l "app.kubernetes.io/instance=$CORE_RELEASE,app.kubernetes.io/component=$c" -o name 2>/dev/null); do
+			log "diagnostics: the last 40 log lines of $p"
+			kc -n "$CORE_NS" logs "$p" -c "$c" --tail=40 >&2 || true
+			if kc -n "$CORE_NS" logs "$p" -c "$c" --previous --tail=40 >/dev/null 2>&1; then
+				log "diagnostics: the last 40 log lines of $p before its restart"
+				kc -n "$CORE_NS" logs "$p" -c "$c" --previous --tail=40 >&2 || true
+			fi
+		done
 	done
 	dmz_kc=${DMZ_KUBECONFIG:-$(dirname "$KUBECONFIG_PATH")/dmz.kubeconfig}
 	if [[ ! -f "$dmz_kc" ]]; then

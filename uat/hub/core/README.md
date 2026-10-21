@@ -267,13 +267,16 @@ P30 fixes the product). Until then the UAT allows for it, in the UAT's own
 files only (the chart's defaults are unchanged): `values/farmer-uat.yaml`
 gives farmer's startup probe 120 failures (10 minutes at 5 s, the chart's is
 60); `install.sh` raises both Deployments' `progressDeadlineSeconds` to
-1200 as soon as helm creates them (`lib/common.sh` `FIRST_START_SECONDS`;
-the chart has no value for it, so the live object is patched, and helm's
+3600 as soon as helm creates them (`lib/common.sh`
+`PROGRESS_DEADLINE_SECONDS`: the deadline runs from then, through the rest
+of `install.sh` and the DMZ install, before farmer can reach the bus; the
+chart has no value for it, so the live object is patched, and helm's
 three-way merge keeps it through `finish.sh`'s upgrade); `finish.sh` and
-`acceptance.sh restart` wait 1200 s for each rollout. On a timeout, before
-failing, `finish.sh` prints the core pods, `kubectl describe` (with events)
-of both Deployments and their pods, the last 40 lines of each farmer
-container and of its run before a restart, and the last 40 lines of each
+`acceptance.sh restart` wait 1200 s for each rollout (`FIRST_START_SECONDS`,
+the bound that matters). On a timeout, before failing, `finish.sh` prints
+the core pods, `kubectl describe` (with events) of both Deployments and
+their pods, the last 40 lines of each farmer and saasapi container and of
+its run before a restart, and the last 40 lines of each
 DMZ bus pod's `farmerbus` and `loader` containers.
 The upgrade re-runs the OpenBao bootstrap Job without a token, so it only
 checks the trust ConfigMap; `check.sh` then confirms it is unchanged
@@ -564,7 +567,8 @@ kubectl, helm and curl (a failed registration Job fails it with the Job's
 logs and without asking the operator API; no hook, a Job left failed or
 unfinished, a 201, a 409, another release's chart or a missing package fail
 it; the token never in argv; `post-altered`'s body; W7: the 1200 s
-rollouts with the progress deadline raised, and a timeout's diagnostics);
+rollouts with the progress deadline raised to 3600 s, and a timeout's
+diagnostics);
 `test/object_store_test.sh`: `validate-object-store.sh` against a curl
 answering with the UAT policies, for RustFS (in its pod) and for Versity
 Gateway (through the port-forward), and the deliberate policy holes it must
