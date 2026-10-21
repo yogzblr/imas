@@ -328,6 +328,39 @@ er --no-seed-sproutid >/dev/null 2>&1 || rc=$?
 check "--no-seed-sproutid skips the seed and relaxes the check" \
 	bash -c '[ "$1" -eq 0 ] && ! grep -q "^seed-sproutid.yml" "$2" && grep -q "uat_skip_sprout_id_check=true" "$2"' _ "$rc" "$FAKE_DIR/ansible.log"
 
+fresh enrollhook
+# W6: the session hook runs between the Ansible runs, never during one, and
+# the inventory follows a tunnel port that changed at a boundary.
+cp "$testdata/access.json" "$work/access-hook.json"
+cat >"$work/session-hook" <<'HOOK'
+#!/usr/bin/env bash
+echo "hook $*" >>"$FAKE_DIR/ansible.log"
+[ "$*" != "phase enrolment: $HOOK_FAIL_AT" ] || exit 1
+if [ "$*" = "phase enrolment: 4/6 ansible/site.yml" ]; then
+	jq '.["t1-ubuntu"].ssh_port = 29999' "$HOOK_ACCESS" >"$HOOK_ACCESS.tmp" && mv "$HOOK_ACCESS.tmp" "$HOOK_ACCESS"
+fi
+HOOK
+chmod +x "$work/session-hook"
+rc=0
+UAT_SESSION_HOOK="$work/session-hook" HOOK_ACCESS="$work/access-hook.json" HOOK_FAIL_AT=none \
+	"$enroll/enroll.sh" --uat "$testdata/uat.json" --access "$work/access-hook.json" --state "$state" \
+	--release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" --ssh-key "$work/id_uat" \
+	--winrm-password-file "$work/winrm" --internal-auth-file "$work/internal-auth" \
+	--token-cmd "$tests/fake/token-cmd" --saasapi-url https://saas.uat.test >/dev/null 2>"$work/err" || rc=$?
+check "with UAT_SESSION_HOOK the run exits 0" [ "$rc" -eq 0 ]
+check "the hook runs before each Ansible run and before farmer's view, in order" \
+	bash -c '[ "$(awk "/^hook /{print; next} {print \$1}" "$1" | tr "\n" "|")" = "hook phase enrolment: 3/6 seed the sprout IDs|seed-sproutid.yml|hook phase enrolment: 4/6 ansible/site.yml|site.yml|hook phase enrolment: 5/6 imas_verify and the enrolled sprout IDs|collect.yml|hook phase enrolment: 6/6 farmer'"'"'s view|" ]' _ "$FAKE_DIR/ansible.log"
+check "the inventory is written again after a boundary (new SSH port)" grep -q 'ansible_port: 29999' "$state/inventory/hosts.yml"
+fresh enrollhookfail
+rc=0
+UAT_SESSION_HOOK="$work/session-hook" HOOK_ACCESS="$work/access-hook.json" HOOK_FAIL_AT="4/6 ansible/site.yml" \
+	"$enroll/enroll.sh" --uat "$testdata/uat.json" --access "$work/access-hook.json" --state "$state" \
+	--release-tag v0.1.0-rc.4 --ca-file "$testdata/uat-ca.pem" --ssh-key "$work/id_uat" \
+	--winrm-password-file "$work/winrm" --internal-auth-file "$work/internal-auth" \
+	--token-cmd "$tests/fake/token-cmd" --saasapi-url https://saas.uat.test >/dev/null 2>"$work/err" || rc=$?
+check "a failed session refresh stops enrolment before the next Ansible run, saying why" \
+	bash -c '[ "$1" -ne 0 ] && ! grep -q "^site.yml" "$2" && grep -q "the session refresh before .4/6 ansible/site.yml. failed" "$3"' _ "$rc" "$FAKE_DIR/ansible.log" "$work/err"
+
 fresh enrollargs
 rc=0; er --release-tag latest >/dev/null 2>"$work/err" || rc=$?
 check "release tag latest refused" bash -c '[ "$1" -ne 0 ] && grep -q "never latest" "$2"' _ "$rc" "$work/err"

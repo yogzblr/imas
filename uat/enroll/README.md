@@ -141,6 +141,16 @@ the token.
 | `winrm` (Windows) | `https://127.0.0.1:<winrm_port>`, NTLM, the admin user and password | **Certificate validation is ignored** (`ansible_winrm_server_cert_validation: ignore`). Through a tunnel the name we connect to is always 127.0.0.1, which never matches the certificate's name, and the WinRM listener's certificate is self-signed per VM. TLS still encrypts, and NTLM authenticates the user. This assumes UAT.1 gives Windows a WinRM HTTPS listener and makes the admin user the built-in Administrator, which Azure does for its admin account; any other local administrator is filtered by UAC over the network. Read timeout 300 s, operation timeout 240 s: the first calls on a fresh VM took over 120 s in UAT Run 2, and a read timeout is reported as unreachable |
 | `docker` | refused | **Owner decision (2026-10-06):** the local rig connects over SSH, its containers running sshd, so it writes `connection: ssh` and its own `access.json`. There is no docker connection plugin, and `community.docker` is not used |
 
+**Stale tunnels (W6).** In the UAT workflow `UAT_SESSION_HOOK` is
+`uat/access/session.sh`: `enroll.sh` runs `$UAT_SESSION_HOOK phase
+"enrolment: <step>"` before steps 3, 4, 5 and 6, between two Ansible runs
+and never during one, which logs in to Azure again and reopens the Bastion
+tunnels when either is 15 minutes old (the runner's OIDC login stops
+working after about an hour, and tunnels opened on it hang). The inventory
+is written again after each boundary, so a tunnel moved to a new port is
+followed. A failed hook stops enrolment before the next Ansible run.
+Without the variable (the local rig) nothing changes.
+
 ## What the inventory sets
 
 - `sprouts` (every host): `imas_farmer_host` is Envoy's private DNS name,
@@ -369,7 +379,10 @@ the same sprout ID per OS while IDs stay unique within a tenant, check the
 pins and connections, and check that no secret reaches the inventory. When
 `ansible-inventory` is installed, it also loads the result. The script tests
 use a stand-in for curl that answers as saasapi and Keycloak's token endpoint
-do, and a stand-in `bind-tenant.sh`. When the real
+do, and a stand-in `bind-tenant.sh`, and with a stand-in session hook
+check that it runs before each Ansible run and before farmer's view, that
+the inventory follows a port changed at a boundary, and that a failed hook
+stops the run before the next playbook. When the real
 `ansible-playbook` is installed and the tests run as root, they also run
 `seed-sproutid.yml` and `collect.yml` against localhost with temporary
 paths.

@@ -50,7 +50,8 @@ Tiers: `smoke`, `core` (includes the smoke scenarios), `resilience`,
 | `IMAS_UAT_DIR` | required: the material directory below |
 | `IMAS_UAT_VMCTL` | the `vmctl.sh` to use; else harness.json's `vmctl`; else `uat/access/vmctl.sh` |
 | `IMAS_UAT_REPORT_DIR` | where the report goes (default `$IMAS_UAT_DIR/report`) |
-| `IMAS_UAT_TIMEOUT` | `go test -timeout` (default: smoke 45m, core 4h, resilience and ha 3h, others 8h) |
+| `IMAS_UAT_TIMEOUT` | `go test -timeout` (default: smoke 45m, core 4h, resilience and ha 3h, others 8h); with `UAT_SESSION_HOOK`, the budget of all the test processes together (h, m and s only, like `165m`) |
+| `UAT_SESSION_HOOK` | optional (W6; the UAT workflow sets `uat/access/session.sh`): each top-level test then runs in its own test process, and `$UAT_SESSION_HOOK phase "tests: <Test>"` runs before each, refreshing the Azure login and the Bastion tunnels when 15 minutes old, between tests and never during one. A failed hook stops the run, and the tests after it are reported missing. Unset (the local rig): one process per package, as before |
 | `IMAS_UAT_DMZ_KUBECONFIG` | the ha tier: the DMZ cluster's kubeconfig (the core one is `IMAS_UAT_CORE_KUBECONFIG`, below) |
 | `IMAS_UAT_DMZ_CHART`, `IMAS_UAT_CORE_CHART` | the ha tier (HA3's `helm upgrade`): the nats chart uat/hub/dmz installed, and the farmer chart uat/hub/core installed (default `<state>/core/chart/farmer-<version>.tgz`) |
 | `IMAS_UAT_CORE_CHECK` | the ha tier: `uat/hub/core/check.sh`, which HA3 runs after the upgrade (run.sh's default) |
@@ -183,7 +184,9 @@ What the suite assumes of the realm (UAT.3b):
   audience, for X1's wrong-audience case; without it that case skips.
 - An expired token for X1 is the tenant 1 admin token minted when the run
   starts; X1 waits for it to expire if it hasn't (up to 7 minutes, so keep
-  the realm's access token lifespan at its default 5 minutes or less).
+  the realm's access token lifespan at its default 5 minutes or less). With
+  `UAT_SESSION_HOOK` the token is minted when X1's own test process starts,
+  so X1 waits out the lifespan.
 
 `harness.json` (all optional):
 
