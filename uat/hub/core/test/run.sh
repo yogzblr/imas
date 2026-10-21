@@ -14,7 +14,9 @@
 #   6. admin-keys.sh against a stub curl and a fake imas CLI (checksum
 #      check, key reuse, file modes)
 #   7. bind-tenant.sh, token.sh and install.sh argument checks
-#      (7c: helm_pull_chart, the oci:// chart pull, against a stub helm)
+#      (7c: helm_pull_chart, the oci:// chart pull, against a stub helm;
+#      7d: farmer's and saasapi's progress deadline raised as helm creates
+#      them, W7)
 #   8. openbao-bootstrap.sh, saasapi-secrets.sh (with Valkey's password)
 #      and the T4 probe
 #      (openbao_t4) against a real local OpenBao server, when a bao binary
@@ -481,6 +483,36 @@ grep -qF "helm pull oci://registry.example/x/charts/farmer --version 0.1.0-rc.5 
 IMAS_HELM_OCI_BASE=https://packages.buildkite.com/yogzblr/imashelm/helm refuse "helm_pull_chart: a non-OCI base is refused" 'must be oci://' pull
 HELM_STUB_FAIL=1 refuse "helm_pull_chart: a failed pull says the package may still be private" \
 	'may still be private.*owner makes each chart package public.*GHCR package settings' pull
+
+# --- 7d. the first start's progress deadline (W7) --------------------------------
+# raise_progress_deadlines_as_created patches farmer's and saasapi's
+# Deployments to 1200 s as soon as each exists (helm creates them while
+# install.sh waits), and fails when they never appear.
+deadlines() {
+	(
+		# shellcheck source=../lib/common.sh
+		. "$core/lib/common.sh"
+		KUBECONFIG_PATH="$kubeconfig"
+		PATH="$stubs:$PATH" raise_progress_deadlines_as_created "$1"
+	)
+}
+dep_file() { printf '%s/imas-core/Deployment/%s.json' "$STUB_STATE" "$1"; }
+mkdir -p "$STUB_STATE/imas-core/Deployment"
+rm -f "$(dep_file imas-core-farmer)" "$(dep_file imas-core-farmer-saasapi)"
+(
+	sleep 1
+	echo '{"kind":"Deployment","metadata":{"name":"imas-core-farmer"},"spec":{"progressDeadlineSeconds":600}}' >"$(dep_file imas-core-farmer)"
+	sleep 2
+	echo '{"kind":"Deployment","metadata":{"name":"imas-core-farmer-saasapi"},"spec":{"progressDeadlineSeconds":600}}' >"$(dep_file imas-core-farmer-saasapi)"
+) &
+expect "progress deadlines: raised as helm creates the Deployments" deadlines 30
+wait
+[[ "$(jq '.spec.progressDeadlineSeconds' "$(dep_file imas-core-farmer)")" == 1200 &&
+	"$(jq '.spec.progressDeadlineSeconds' "$(dep_file imas-core-farmer-saasapi)")" == 1200 ]] &&
+	ok "progress deadlines: farmer and saasapi at 1200 s" || bad "progress deadlines: $(cat "$(dep_file imas-core-farmer)" "$(dep_file imas-core-farmer-saasapi)")"
+rm -f "$(dep_file imas-core-farmer-saasapi)"
+refuse "progress deadlines: a Deployment that never appears fails, naming it" \
+	'imas-core-farmer-saasapi not created within 3s' deadlines 3
 
 # --- 8. OpenBao ------------------------------------------------------------------------
 bao_bin="${BAO_BIN:-$(command -v bao || true)}"

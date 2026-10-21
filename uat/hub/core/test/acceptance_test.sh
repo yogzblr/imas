@@ -121,9 +121,10 @@ ACC_PURGE_STATUS=409 ACC_PURGE_BODY='{"error":"not_offboarded","message":"x"}' a
 # --- restart, the log retention Job, retention, log-count ---------------------------------
 out=$(acc restart saasapi 2>/dev/null) && [[ "$(jq -r .restarted <<<"$out")" == imas-core-farmer-saasapi ]] &&
 	grep -q "rollout restart deployment/imas-core-farmer-saasapi" "$ACC_STATE/calls.log" &&
-	grep -q "rollout status deployment/imas-core-farmer-saasapi --timeout=600s" "$ACC_STATE/calls.log" &&
-	ok "restart saasapi: rollout restart, then waits" || bad "restart saasapi: $out"
-ACC_ROLLOUT_RC=1 refused "restart fails when the rollout doesn't finish" "did not roll out" acc restart farmer
+	grep -q "patch deployment imas-core-farmer-saasapi --type=merge -p {\"spec\":{\"progressDeadlineSeconds\":1200}}" "$ACC_STATE/calls.log" &&
+	grep -q "rollout status deployment/imas-core-farmer-saasapi --timeout=1200s" "$ACC_STATE/calls.log" &&
+	ok "restart saasapi: rollout restart, then waits 1200 s (W7)" || bad "restart saasapi: $out"
+ACC_ROLLOUT_RC=1 refused "restart fails when the rollout doesn't finish" "did not become ready within 1200s" acc restart farmer
 out=$(acc sweep log-retention 2>/dev/null) && jq -e '.sweep == "log-retention" and .succeeded == true' <<<"$out" >/dev/null &&
 	grep -q "create job imas-uat-log-retention-[0-9]* --from=cronjob/imas-core-farmer-log-retention" "$ACC_STATE/calls.log" &&
 	ok "sweep log-retention: a Job from the CronJob, waited for" || bad "sweep log-retention: $out"

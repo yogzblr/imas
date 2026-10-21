@@ -16,7 +16,20 @@ set -- "${args[@]}"
 job=imas-core-farmer-sprout-release-register
 case "$*" in
 "get deployment "*) exit 0 ;;
+"patch deployment "*) exit 0 ;;
 "rollout status "*) exit "${FS_ROLLOUT_RC:-0}" ;;
+# first_start_diagnostics (W7): the core pods, describe, farmer's logs (a
+# restarted pod has a previous run), and the DMZ bus pods' tails.
+"get pods -o wide") echo "NAME READY STATUS RESTARTS (stub pods)" ;;
+"describe "*) echo "Events: (stub describe ${*:2})" ;;
+"get pods -l app.kubernetes.io/instance=imas-core,app.kubernetes.io/component=farmer -o name")
+	printf 'pod/imas-core-farmer-a\npod/imas-core-farmer-b\n' ;;
+"logs pod/imas-core-farmer-a -c farmer --tail=40") echo "farmer-a: announcing 2 reconciled Accounts: no servers available" ;;
+"logs pod/imas-core-farmer-b -c farmer --tail=40") echo "farmer-b: current run" ;;
+"logs pod/imas-core-farmer-a -c farmer --previous --tail=40") exit 1 ;;
+"logs pod/imas-core-farmer-b -c farmer --previous --tail=40") echo "farmer-b: before its restart" ;;
+"logs imas-dmz-nats-bus-0 -c farmerbus --tail=40") echo "bus-0 farmerbus: TLS handshake error" ;;
+"logs imas-dmz-nats-bus-0 -c loader --tail=40") echo "bus-0 loader: accountloader: initial load complete, 2 accounts" ;;
 "get jobs -o name") [[ "${FS_JOB_STATE:-absent}" == absent ]] || echo "job.batch/$job" ;;
 "get job $job -o json")
 	case "${FS_JOB_STATE:-absent}" in

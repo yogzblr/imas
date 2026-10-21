@@ -61,6 +61,7 @@ create)
 	[[ "$2" == job ]] || exit 2
 	;;
 wait) exit "${ACC_JOB_RC:-0}" ;;
+patch) exit 0 ;;
 delete) exit 0 ;;
 logs)
 	[[ -f "$ACC_STATE/logs.txt" ]] && cat "$ACC_STATE/logs.txt"
