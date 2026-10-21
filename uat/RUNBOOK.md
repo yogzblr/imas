@@ -239,6 +239,84 @@ failure").
    endpoints file, `core.json` (with Run 3's `topology`) and the enrolment
    files; no credential is ever uploaded.
 
+### All tunnels hang or go UNREACHABLE after about an hour
+
+**Symptom.** Everything over the tunnels works for a long while, then every
+host fails at once: Windows tasks hit WinRM read timeouts (300 s), Linux
+tasks go UNREACHABLE, `kubectl` hangs. Most likely cause: **a stale Azure
+login and the tunnels opened on it** (W6). The runner's az session is a
+GitHub OIDC login, which cannot renew itself once its access token expires
+(about an hour); an `az network bastion tunnel` started earlier then stops
+opening new connections (a hang, not a refusal), while connections already
+open keep working.
+
+**Evidence (UAT Run 2, 2026-10-20).** Azure login (OIDC) 17:23:54Z; tofu
+apply 17:24:02 for 20 minutes; tunnels opened 17:44:24; k0s 17:44:46;
+"Tenants and enrolment" 18:13:58. The Linux hosts had completed 26 tasks
+over the tunnels when, at about 18:19 (login about 55 minutes old, tunnels
+about 35), both Windows hosts read-timed-out after 300 s on "Download the
+imas-sprout installer" and all four Linux hosts went UNREACHABLE on the
+next SSH task (`imas_verify`'s config file read, behind `no_log`). The
+earlier failed run broke the same way, at the same age of its login. The
+workflow logged in again before the tests and the destroy, but not before
+enrolment. Ruled out on the live environment: the VMs (idle, WinRM and
+imas-sprout running), the network (github.com and the exact MSI fetched in
+about a second from the VM), the feed, the module and the Terraform (no
+difference), and the allowlist of W5. The cause is inferred from the
+timing; the mechanism is not proven.
+
+**What the workflow does now (W6).** Every phase from the tunnels on starts
+with `uat/access/session.sh phase`: it logs in again (`az-relogin.sh`, the
+same OIDC exchange as `azure/login`) and reopens every tunnel on its port
+when the login or the tunnels are 15 minutes old
+(`UAT_SESSION_REFRESH_AFTER_MIN`), refuses to start a phase past 40
+(`UAT_SESSION_MAX_AGE_MIN`), and logs `<phase>: azure login age Xm, tunnels
+age Ym`. Enrolment and the tests always start on a fresh login and fresh
+tunnels, each probed end to end, and refresh again between their own
+Ansible runs (`enroll.sh`) and top-level tests (`run.sh`), never during one.
+`imas_verify` checks the connection before its `no_log` read, so an
+unreachable host is named with its error. On a failure the step "Azure
+login and tunnel ages (on failure)" prints both ages, whether each
+tunnel's process still runs, and the end of each tunnel's log.
+
+**Maximum safe phase length.** About 40 minutes for one uninterrupted
+unit of work (a workflow step between two boundaries, one Ansible run, one
+top-level test): the observed failure came 55 to 60 minutes after the
+login, and a unit can start on a login up to 15 minutes old. For scale: in
+Run 2, k0s, both hubs, core's second half and the DMZ check took 29 minutes
+together. A single unit that runs longer and opens tunnel connections late
+is not covered; the per-test times in `events.json` and the step times show
+whether one does.
+
+**Reading the next run.**
+
+- The failing step's log has `azure login age Xm, tunnels age Ym` at its
+  start and, from the probe, `probe FAILED: <vm> <kind> tunnel
+  (127.0.0.1:<port>) is stale or dead ... tunnel age Ym`. A failure with
+  both ages well under 40 minutes refutes the stale-login cause; look at
+  the tunnel logs the failure step printed (an az error there names the
+  real one).
+- `refusing to start: azure login age ...` means a phase began on an old
+  login without a refresh: a bug in the wiring
+  (`uat/scripts/workflow_test.go` checks it).
+- `refresh: the Azure login failed` or `reopening the tunnels failed`:
+  the OIDC exchange or the Bastion refused; the step's log has az's error.
+
+**Checking by hand on a live (kept) environment.** From a laptop with a
+normal `az login` (it renews itself), open a fresh tunnel and test it the
+way the probe does:
+
+```sh
+uat/access/tunnels.sh open /tmp/uat-$RUN.json /tmp/uat-$RUN-access
+jq . /tmp/uat-$RUN-access/access.json
+ssh-keyscan -T 15 -p <ssh_port of a Linux sprout> 127.0.0.1           # a host key line: alive
+curl -sk -m 20 -o /dev/null -w '%{http_code}\n' https://127.0.0.1:<winrm_port>/wsman   # 401 or 405: alive
+```
+
+Both answering on a fresh tunnel while the runner's tunnels hung points at
+the runner's login and tunnels, not the VMs (in Run 2 a fresh laptop tunnel
+ran the same `win_get_url` in 6 s).
+
 ## 5. After the runs
 
 Record each run in a status fragment (`docs/status/README.md`): the run id,

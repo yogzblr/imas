@@ -58,7 +58,7 @@ From the Shared contract, plus what the brief makes a variable.
 | `run_id` | required | 6 to 10 lowercase letters and digits |
 | `release_tag` | required | `vX.Y.Z` or `vX.Y.Z-rc.N`. Recorded as a tag only; the hub and enrolment briefs install from it |
 | `region` | `centralindia` | The owner confirms sizes and quota there |
-| `public_ingress` | `internet` | The source of the three rules that let the internet in: Envoy on the DMZ (`AllowRunnerEnvoyIn`), 443 on core (`AllowRunnerHttpsIn`) and 443 on the Bastion (`AllowHttpsInbound`). `internet`: the service tag `Internet`, so the rules follow whatever egress address the caller uses (owner, 2026-10-20, W5; the UAT gate's default). `cidrs`: only `public_ingress_cidrs`, the hardened mode. Replaces `runner_cidr` (one `/32`), which Run 2 proved does not follow the caller. UAT only; recorded in the P3 security review (`docs/security-review-pack.md` 3.7) |
+| `public_ingress` | `internet` | The source of the three rules that let the internet in: Envoy on the DMZ (`AllowRunnerEnvoyIn`), 443 on core (`AllowRunnerHttpsIn`) and 443 on the Bastion (`AllowHttpsInbound`). `internet`: the service tag `Internet`, so the rules follow whatever egress address the caller uses (owner, 2026-10-20, W5; the UAT gate's default). `cidrs`: only `public_ingress_cidrs`, the hardened mode. Replaces `runner_cidr` (one `/32`), which need not follow the caller. UAT only; recorded in the P3 security review (`docs/security-review-pack.md` 3.7) |
 | `public_ingress_cidrs` | `[]` | With `public_ingress = "cidrs"`: 1 to 50 public IPv4 ranges, each `a.b.c.d/N` with N from 8 to 32 and no host bits set, none repeated. Must be empty with `internet`. They must cover every egress address of every caller (the runner, and you for a kept environment) |
 | `keep_hours` | `0` | 0 to 168. Above 0 the workflow skips the final destroy and the janitor deletes the group after `expires_at` |
 | `run_budget_hours` | `4` | `expires_at` = time of the first apply + `run_budget_hours` + `keep_hours`, so even a run whose destroy never ran is collected by the janitor |
@@ -268,11 +268,15 @@ owner: "Bastion NSG stays fail-closed").
 
 **Why Internet by default (W5, owner 2026-10-20).** Until W5 this rule, the
 core 443 rule and the Envoy rule admitted one `/32`, `runner_cidr`, the
-address an echo service saw at the start of the run. UAT Run 2 (rc.15) failed
-at "Tenants and enrolment": the Bastion's 443 admitted only that `/32`, the
-runner's connections to it came from another egress address, and an NSG
-drop is silent, so the tunnels hung (Windows WinRM read timeouts, Linux
-UNREACHABLE). An allowlist of one address does not follow the caller. The
+address an echo service saw at the start of the run. An allowlist of one
+address does not follow a caller whose egress address changes, and an NSG
+drop is silent, so a tunnel through it would hang. W5 took that as the cause
+of UAT Run 2's failure at "Tenants and enrolment" (Windows WinRM read
+timeouts, Linux UNREACHABLE); W6 then found the hang matches the age of the
+run's Azure login and tunnels, 55 to 60 minutes after the login in both
+failed runs, so the allowlist is not the established cause (see
+`uat/RUNBOOK.md`, "All tunnels hang or go UNREACHABLE after about an
+hour"). The change to `public_ingress` stands on its own. The
 Bastion's own authentication (Entra ID and the run's RBAC) and saasapi's,
 Keycloak's and Envoy's credentials still guard all three ports; the WinRM,
 firewall, tenants NSG and Bastion outbound rules are unchanged, and so is
