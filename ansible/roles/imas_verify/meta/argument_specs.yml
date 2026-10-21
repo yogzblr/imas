@@ -18,6 +18,9 @@ argument_specs:
       imas_verify_hold:
         type: int
         description: Seconds the bus connection must stay established to count.
+      imas_verify_connection_timeout:
+        type: int
+        description: Seconds the host has to answer before the config file is read; a host that does not is failed with the connection error.
       imas_verify_service_name:
         type: str
         description: Service name of the sprout.

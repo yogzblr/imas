@@ -16,7 +16,7 @@ STUB = os.path.join(HERE, "windows_stub")
 ROLES = os.path.join(HERE, "..", "..", "roles")
 
 
-def run_verify(tmp_path, scenario, timeout=4, interval=1):
+def run_verify(tmp_path, scenario, timeout=4, interval=1, host="win ansible_connection=local", extra=None):
     ansible_playbook = shutil.which("ansible-playbook")
     assert ansible_playbook, "ansible-playbook is not on PATH (pip install ansible-core)"
     scenario_file = tmp_path / "scenario.json"
@@ -24,7 +24,7 @@ def run_verify(tmp_path, scenario, timeout=4, interval=1):
     calls = tmp_path / "calls"
     outcome = tmp_path / "outcome.json"
     inventory = tmp_path / "hosts"
-    inventory.write_text("win ansible_connection=local\n")
+    inventory.write_text(host + "\n")
     # Not ansible/ansible.cfg: nothing but what is set here.
     config = tmp_path / "ansible.cfg"
     config.write_text("[defaults]\n")
@@ -42,7 +42,7 @@ def run_verify(tmp_path, scenario, timeout=4, interval=1):
     p = subprocess.run(
         [
             ansible_playbook, "-i", str(inventory), os.path.join(STUB, "verify.yml"),
-            "-e", json.dumps({"imas_verify_timeout": timeout, "imas_verify_interval": interval, "imas_verify_hold": 0}),
+            "-e", json.dumps({"imas_verify_timeout": timeout, "imas_verify_interval": interval, "imas_verify_hold": 0, **(extra or {})}),
         ],
         env=env, capture_output=True, text=True, timeout=120,
     )
@@ -108,3 +108,19 @@ def test_slow_checks_stop_at_the_deadline(tmp_path):
     out, calls, _ = run_verify(tmp_path, {"check": ["enrolled"], "check_seconds": 3}, timeout=2)
     assert not out["passed"], out
     assert calls.count("check") == 1, calls
+
+
+def test_no_connection_is_named_before_the_masked_read(tmp_path):
+    # W6: UAT Run 2's Linux hosts went UNREACHABLE on the no_log read of the
+    # config file, the reason hidden. The connection is checked first, in
+    # the open, and its failure names the host, the address and the error.
+    out, calls, stdout = run_verify(
+        tmp_path, {"check": ["connected"]},
+        host="win ansible_connection=ssh ansible_host=127.0.0.1 ansible_port=1 ansible_ssh_args='-o ConnectTimeout=1'",
+        extra={"imas_verify_connection_timeout": 3},
+    )
+    assert not out["passed"], out
+    assert out["task"] == "Fail with the connection error"
+    assert out["msg"].startswith("No ssh connection to win (127.0.0.1:1) within 3s, so the sprout's config file cannot be read: "), out
+    assert "Read the sprout's config file" not in stdout
+    assert calls == []
