@@ -143,7 +143,7 @@ cmd_reopen() {
   local dir=$2 pid vm kind port
   if [ -f "$dir/tunnels.pids" ]; then
     while IFS=$'\t' read -r pid vm kind port; do
-      [ -n "${vm:-}" ] && [[ "${port:-}" =~ ^[0-9]+$ ]] || continue
+      if [ -z "${vm:-}" ] || ! [[ "${port:-}" =~ ^[0-9]+$ ]]; then continue; fi
       PREFER["$vm/$kind"]=$port
     done <"$dir/tunnels.pids"
     close_tunnels "$dir"

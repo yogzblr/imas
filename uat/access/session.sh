@@ -105,7 +105,7 @@ login_age_s() {
 # Seconds since the tunnels were opened, or empty when they are not open.
 tunnel_age_s() {
   local d=${UAT_SESSION_ACCESS:-} t
-  [ -n "$d" ] && [ -s "$d/opened_at" ] && [ -s "$d/access.json" ] || return 0
+  if [ -z "$d" ] || [ ! -s "$d/opened_at" ] || [ ! -s "$d/access.json" ]; then return 0; fi
   t=$(cat "$d/opened_at")
   [[ "$t" =~ ^[0-9]+$ ]] || return 0
   echo $(($(date +%s) - t))
@@ -292,7 +292,7 @@ cmd_ages() {
   local name=$1 dir pid vm kind port state f
   log "$name: $(ages_line)"
   dir=${UAT_SESSION_ACCESS:-}
-  [ -n "$dir" ] && [ -f "$dir/tunnels.pids" ] || return 0
+  if [ -z "$dir" ] || [ ! -f "$dir/tunnels.pids" ]; then return 0; fi
   while IFS=$'\t' read -r pid vm kind port; do
     [ -n "${vm:-}" ] || continue
     if kill -0 "$pid" 2>/dev/null && [[ "$(ps -o stat= -p "$pid" 2>/dev/null)" != Z* ]]; then
