@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/ingredients"
@@ -37,12 +38,13 @@ func (f File) contains(ctx context.Context, test bool) (cook.Result, bytes.Buffe
 		}, content, ErrModifyRoot
 	}
 
-	// Collect text content.
+	// Collect text content, one line per list item: writing the items
+	// back to back would join them into one line.
 	if text, ok := f.params["text"].(string); ok && text != "" {
-		content.WriteString(text)
+		writeLine(&content, text)
 	} else if texti, ok := f.params["text"].([]interface{}); ok {
 		for _, v := range texti {
-			content.WriteString(fmt.Sprintf("%v", v))
+			writeLine(&content, fmt.Sprintf("%v", v))
 		}
 	}
 
@@ -85,14 +87,17 @@ func (f File) contains(ctx context.Context, test bool) (cook.Result, bytes.Buffe
 	file.Close()
 	sort.Strings(currentContents)
 
-	shouldContents := []string{}
-	scanner = bufio.NewScanner(&content)
+	// Scan a copy: scanning content itself would drain it, and the
+	// missing lines are returned to the caller to write.
+	wantLines := []string{}
+	scanner = bufio.NewScanner(bytes.NewReader(content.Bytes()))
 	for scanner.Scan() {
-		shouldContents = append(shouldContents, scanner.Text())
+		wantLines = append(wantLines, scanner.Text())
 	}
+	shouldContents := append([]string(nil), wantLines...)
 	sort.Strings(shouldContents)
 
-	isSubset, _ := stringSliceIsSubset(shouldContents, currentContents)
+	isSubset, missingLines := stringSliceIsSubset(shouldContents, currentContents)
 	if isSubset {
 		return cook.Result{
 			Succeeded: true, Failed: false, Notes: notes,
@@ -102,7 +107,33 @@ func (f File) contains(ctx context.Context, test bool) (cook.Result, bytes.Buffe
 	return cook.Result{
 		Succeeded: false, Failed: true,
 		Changed: false, Notes: notes,
-	}, content, ErrMissingContent
+	}, missingInOrder(wantLines, missingLines), ErrMissingContent
+}
+
+// writeLine writes s to buf as one or more whole lines.
+func writeLine(buf *bytes.Buffer, s string) {
+	buf.WriteString(s)
+	if !strings.HasSuffix(s, "\n") {
+		buf.WriteByte('\n')
+	}
+}
+
+// missingInOrder returns the lines of want that are in missing, in want's
+// order, one per line. missing is a multiset: a line listed twice is
+// returned twice.
+func missingInOrder(want, missing []string) bytes.Buffer {
+	left := map[string]int{}
+	for _, m := range missing {
+		left[m]++
+	}
+	var buf bytes.Buffer
+	for _, w := range want {
+		if left[w] > 0 {
+			left[w]--
+			buf.WriteString(w + "\n")
+		}
+	}
+	return buf
 }
 
 // gatherSourceBuf collects content from a single "source"/"source_hash" param pair into buf.

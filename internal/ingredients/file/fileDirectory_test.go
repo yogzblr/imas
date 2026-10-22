@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -67,15 +68,17 @@ func TestDirectory(t *testing.T) {
 			error: nil,
 		},
 		{
+			// sampleDir is 0755: a different mode is a real chmod.
 			name: "DirectoryChangeMode",
 			params: map[string]interface{}{
 				"name":     sampleDir,
-				"dir_mode": "755",
+				"dir_mode": "750",
 			},
 			expected: cook.Result{
 				Succeeded: true,
 				Failed:    false,
-				Notes:     []fmt.Stringer{cook.Snprintf("directory %s already exists", sampleDir), cook.Snprintf("chmod %s to 755", sampleDir)},
+				Changed:   true,
+				Notes:     []fmt.Stringer{cook.Snprintf("directory %s already exists", sampleDir), cook.Snprintf("chmod %s to 750", sampleDir)},
 			},
 			error: nil,
 		},
@@ -89,6 +92,7 @@ func TestDirectory(t *testing.T) {
 			expected: cook.Result{
 				Succeeded: true,
 				Failed:    false,
+				Changed:   true,
 				Notes:     []fmt.Stringer{cook.Snprintf("directory %s already exists", sampleDir), cook.Snprintf("would chmod %s to 755", sampleDir)},
 			},
 			test:  true,
@@ -118,6 +122,7 @@ func TestDirectory(t *testing.T) {
 			expected: cook.Result{
 				Succeeded: true,
 				Failed:    false,
+				Changed:   true,
 				Notes:     []fmt.Stringer{cook.Snprintf("directory %s already exists", sampleDir), cook.Snprintf("would chmod %s to 755", sampleDir)},
 			},
 			test:  true,
@@ -146,6 +151,9 @@ func TestDirectory(t *testing.T) {
 				params: test.params,
 			}
 			result, err := f.directory(context.Background(), test.test)
+			if result.Changed != test.expected.Changed {
+				t.Errorf("expected changed %v, got %v", test.expected.Changed, result.Changed)
+			}
 			if err != nil || test.error != nil {
 				if (err == nil && test.error != nil) || (err != nil && test.error == nil) {
 					t.Errorf("expected error `%v`, got `%v`", test.error, err)
@@ -185,9 +193,12 @@ func TestDirectoryApplyUserChown(t *testing.T) {
 			Failed:    false,
 			Notes: []fmt.Stringer{
 				cook.Snprintf("directory %s already exists", targetDir),
-				cook.Snprintf("chown %s to %s", targetDir, currentUser.Username),
+				cook.Snprintf("%s is already owned by %s", targetDir, currentUser.Username),
 			},
 		})
+		if result.Changed {
+			t.Error("the current user already owns the directory: want no change")
+		}
 		stat, statErr := os.Stat(targetDir)
 		if statErr != nil {
 			t.Fatalf("failed to stat directory: %v", statErr)
@@ -215,7 +226,7 @@ func TestDirectoryApplyUserChown(t *testing.T) {
 			Failed:    false,
 			Notes: []fmt.Stringer{
 				cook.Snprintf("directory %s already exists", targetDir),
-				cook.Snprintf("would chown %s to %s", targetDir, currentUser.Username),
+				cook.Snprintf("%s is already owned by %s", targetDir, currentUser.Username),
 			},
 		})
 	})
@@ -268,7 +279,7 @@ func TestDirectoryApplyGroupChown(t *testing.T) {
 			Failed:    false,
 			Notes: []fmt.Stringer{
 				cook.Snprintf("directory %s already exists", targetDir),
-				cook.Snprintf("chown %s to %s", targetDir, currentGroup.Name),
+				cook.Snprintf("%s is already owned by group %s", targetDir, currentGroup.Name),
 			},
 		})
 		stat, statErr := os.Stat(targetDir)
@@ -298,7 +309,7 @@ func TestDirectoryApplyGroupChown(t *testing.T) {
 			Failed:    false,
 			Notes: []fmt.Stringer{
 				cook.Snprintf("directory %s already exists", targetDir),
-				cook.Snprintf("would chown %s to %s", targetDir, currentGroup.Name),
+				cook.Snprintf("%s is already owned by group %s", targetDir, currentGroup.Name),
 			},
 		})
 	})
@@ -534,15 +545,14 @@ func TestDirectoryApplyRecurse(t *testing.T) {
 		if !result.Succeeded || result.Failed {
 			t.Errorf("expected successful result")
 		}
-		foundWouldChown := false
-		for _, note := range result.Notes {
-			if note.String() == fmt.Sprintf("would chown %s to %s", targetDir, currentGroup.Name) {
-				foundWouldChown = true
-				break
-			}
+		// Everything is already in the current group: nothing to do.
+		if result.Changed {
+			t.Errorf("want no change, got notes: %v", result.Notes)
 		}
-		if !foundWouldChown {
-			t.Errorf("expected 'would chown' note in test mode, got notes: %v", result.Notes)
+		for _, note := range result.Notes {
+			if strings.HasPrefix(note.String(), "would chown") {
+				t.Errorf("unexpected note %q: everything is already in the group", note)
+			}
 		}
 	})
 
@@ -764,5 +774,46 @@ func TestDirectoryApplyAllParams(t *testing.T) {
 	}
 	if !stat.IsDir() {
 		t.Error("expected a directory")
+	}
+}
+
+// TestDirectoryReportsChanges mirrors UAT I.file.directory: creating a
+// directory used to report no change, and chown/chmod ran on every run.
+func TestDirectoryReportsChanges(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "imas-uat-dir")
+	f := File{method: "directory", params: map[string]interface{}{"name": name, "dir_mode": "750"}}
+
+	res, err := f.directory(context.Background(), true)
+	if err != nil || !res.Changed {
+		t.Fatalf("test mode: %+v, %v; want a pending change", res, err)
+	}
+	if _, err := os.Stat(name); !os.IsNotExist(err) {
+		t.Fatalf("test mode created the directory (stat: %v)", err)
+	}
+
+	res, err = f.directory(context.Background(), false)
+	if err != nil || !res.Succeeded || !res.Changed {
+		t.Fatalf("first run: %+v, %v; want a change", res, err)
+	}
+	st, err := os.Stat(name)
+	if err != nil || !st.IsDir() || st.Mode().Perm() != 0o750 {
+		t.Fatalf("after the first run: %v, %v; want a 0750 directory", st, err)
+	}
+
+	res, err = f.directory(context.Background(), false)
+	if err != nil || !res.Succeeded || res.Changed {
+		t.Fatalf("second run: %+v, %v; want no change", res, err)
+	}
+
+	// Drift is put back, and reported.
+	if err := os.Chmod(name, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res, err = f.directory(context.Background(), false)
+	if err != nil || !res.Changed {
+		t.Fatalf("after drift: %+v, %v; want a change", res, err)
+	}
+	if st, _ := os.Stat(name); st.Mode().Perm() != 0o750 {
+		t.Fatalf("mode %o after drift, want 0750", st.Mode().Perm())
 	}
 }

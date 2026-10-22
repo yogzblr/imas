@@ -129,24 +129,24 @@ func (f File) dest() (string, error) {
 	return filepath.Join(config.CacheDir, hash), nil
 }
 
+// stringSliceIsSubset reports whether every element of the sorted slice a
+// is in the sorted slice b, counting repeats, and returns those that are
+// not.
 func stringSliceIsSubset(a, b []string) (bool, []string) {
 	missing := []string{}
 	for len(a) > 0 {
 		switch {
 		case len(b) == 0:
 			missing = append(missing, a...)
-			return len(missing) == 0, missing
+			a = nil
 		case a[0] == b[0]:
-			a = a[1:]
-			b = b[1:]
+			a, b = a[1:], b[1:]
 		case a[0] < b[0]:
+			// a[0] sorts before everything left in b, so b can't hold it;
+			// b[0] may still match a later element of a.
 			missing = append(missing, a[0])
-			if len(a) == 1 {
-				return len(missing) == 0, missing
-			}
 			a = a[1:]
-			b = b[1:]
-		case a[0] > b[0]:
+		default:
 			b = b[1:]
 		}
 	}

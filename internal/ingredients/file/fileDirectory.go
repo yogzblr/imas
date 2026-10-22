@@ -41,6 +41,9 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 		}, ErrDeleteRoot
 	}
 	d := dir{}
+	// changed is set by every step that alters the directory, so a run
+	// that finds it as wanted reports no change.
+	changed := false
 	// create the directory if it doesn't exist
 	{
 		st, statErr := os.Stat(name)
@@ -53,6 +56,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					notes = append(notes, cook.Snprintf("directory %s already exists", name))
 				} else {
 					notes = append(notes, cook.Snprintf("would create directory %s", name))
+					changed = true
 				}
 			} else {
 				if dirExists {
@@ -66,6 +70,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 						}, errCreate
 					}
 					notes = append(notes, cook.Snprintf("created directory %s", name))
+					changed = true
 				}
 			}
 		} else if !dirExists {
@@ -91,24 +96,36 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 				}, parseErr
 			}
 
-			if test {
-				notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.user))
+			if ownedBy(name, int(uid), -1) {
+				notes = append(notes, cook.Snprintf("%s is already owned by %s", name, d.user))
 			} else {
-				chownErr := os.Chown(name, int(uint32(uid)), -1)
-				if chownErr != nil {
-					return cook.Result{
-						Succeeded: false, Failed: true, Notes: notes,
-					}, chownErr
+				changed = true
+				if test {
+					notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.user))
+				} else {
+					chownErr := os.Chown(name, int(uint32(uid)), -1)
+					if chownErr != nil {
+						return cook.Result{
+							Succeeded: false, Failed: true, Notes: notes,
+						}, chownErr
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", name, d.user))
 				}
-				notes = append(notes, cook.Snprintf("chown %s to %s", name, d.user))
 			}
 			if val, ok := f.params["recurse"].(bool); ok && val {
 				walkErr := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
-					if test {
-						notes = append(notes, cook.Snprintf("would chown %s to %s", name, val))
+					if err != nil {
+						return err
+					}
+					if ownedBy(path, int(uid), -1) {
 						return nil
 					}
-					notes = append(notes, cook.Snprintf("chown %s to %s", name, val))
+					changed = true
+					if test {
+						notes = append(notes, cook.Snprintf("would chown %s to %s", path, val))
+						return nil
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", path, val))
 					return os.Chown(path, int(uint32(uid)), -1)
 				})
 				if walkErr != nil {
@@ -135,24 +152,36 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, parseErr
 			}
-			if test {
-				notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.group))
+			if ownedBy(name, -1, int(gid)) {
+				notes = append(notes, cook.Snprintf("%s is already owned by group %s", name, d.group))
 			} else {
-				chownErr := os.Chown(name, -1, int(uint32(gid)))
-				if chownErr != nil {
-					return cook.Result{
-						Succeeded: false, Failed: true, Notes: notes,
-					}, chownErr
+				changed = true
+				if test {
+					notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.group))
+				} else {
+					chownErr := os.Chown(name, -1, int(uint32(gid)))
+					if chownErr != nil {
+						return cook.Result{
+							Succeeded: false, Failed: true, Notes: notes,
+						}, chownErr
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", name, d.group))
 				}
-				notes = append(notes, cook.Snprintf("chown %s to %s", name, d.group))
 			}
 			if val, ok := f.params["recurse"].(bool); ok && val {
 				walkErr := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
-					if test {
-						notes = append(notes, cook.Snprintf("would chown %s to %s", name, val))
+					if err != nil {
+						return err
+					}
+					if ownedBy(path, -1, int(gid)) {
 						return nil
 					}
-					notes = append(notes, cook.Snprintf("chown %s to %s", name, val))
+					changed = true
+					if test {
+						notes = append(notes, cook.Snprintf("would chown %s to %s", path, val))
+						return nil
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", path, val))
 					return os.Chown(path, -1, int(uint32(gid)))
 				})
 				if walkErr != nil {
@@ -173,9 +202,13 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, fmt.Errorf("invalid dir_mode %q: %w", d.dirMode, parseErr)
 			}
-			if test {
+			if hasPerm(name, os.FileMode(modeVal)) {
+				notes = append(notes, cook.Snprintf("%s already has mode %s", name, val))
+			} else if test {
+				changed = true
 				notes = append(notes, cook.Snprintf("would chmod %s to %s", name, val))
 			} else {
+				changed = true
 				err := os.Chmod(name, os.FileMode(modeVal))
 				if err != nil {
 					return cook.Result{
@@ -196,9 +229,13 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, fmt.Errorf("invalid file_mode %q: %w", d.fileMode, parseErr)
 			}
-			if test {
+			if hasPerm(name, os.FileMode(modeVal)) {
+				notes = append(notes, cook.Snprintf("%s already has mode %s", name, val))
+			} else if test {
+				changed = true
 				notes = append(notes, cook.Snprintf("would chmod %s to %s", name, val))
 			} else {
+				changed = true
 				err := os.Chmod(name, os.FileMode(modeVal))
 				if err != nil {
 					return cook.Result{
@@ -210,6 +247,13 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 	}
 
 	return cook.Result{
-		Succeeded: true, Failed: false, Notes: notes,
+		Succeeded: true, Failed: false, Changed: changed, Notes: notes,
 	}, nil
+}
+
+// hasPerm reports whether name exists with exactly the permission bits of
+// mode. A missing name (test mode, before it is created) has none.
+func hasPerm(name string, mode os.FileMode) bool {
+	st, err := os.Stat(name)
+	return err == nil && st.Mode().Perm() == mode.Perm()
 }

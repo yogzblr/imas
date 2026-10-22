@@ -113,6 +113,15 @@ func (f File) append(ctx context.Context, test bool) (cook.Result, error) {
 			}, fmt.Errorf("failed to open %s for appending: %w", name, openErr)
 		}
 		defer appendFile.Close()
+		// Start on a line of its own: appended to a last line with no
+		// newline, the text would join that line and never match.
+		if endsMidLine(name) {
+			if _, writeErr := appendFile.WriteString("\n"); writeErr != nil {
+				return cook.Result{
+					Succeeded: false, Failed: true, Notes: notes,
+				}, writeErr
+			}
+		}
 		scanner := bufio.NewScanner(&missing)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -134,4 +143,23 @@ func (f File) append(ctx context.Context, test bool) (cook.Result, error) {
 		Succeeded: false, Failed: true,
 		Changed: false, Notes: notes,
 	}, err
+}
+
+// endsMidLine reports whether the file name is not empty and its last
+// byte is not a newline.
+func endsMidLine(name string) bool {
+	f, err := os.Open(name)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return false
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, st.Size()-1); err != nil {
+		return false
+	}
+	return last[0] != '\n'
 }
