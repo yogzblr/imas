@@ -3,7 +3,6 @@
 package wintaskscheduler
 
 import (
-	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -24,25 +23,6 @@ const (
 
 	runLevelHighestConst = 1 // TASK_RUNLEVEL_HIGHEST
 )
-
-// ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND, the HRESULTs
-// GetFolder/GetTask/DeleteTask surface when the folder or task doesn't
-// exist.
-const (
-	hrFileNotFound = 0x80070002
-	hrPathNotFound = 0x80070003
-)
-
-func isNotFoundErr(err error) bool {
-	var oleErr *ole.OleError
-	if errors.As(err, &oleErr) {
-		switch oleErr.Code() {
-		case hrFileNotFound, hrPathNotFound:
-			return true
-		}
-	}
-	return false
-}
 
 // oleTaskBackend implements taskBackend against the real Task
 // Scheduler 2.0 COM service (Schedule.Service), the same object Salt's
