@@ -436,13 +436,15 @@ sweep)
 			logs=$(kc -n "$CORE_NS" logs "job/$job" --tail=20 2>&1 || true)
 			# The object store's side, so a failure says whether it was down
 			# (D1 on Azure, run 2: connection refused for ten minutes, and
-			# nothing to tell a restart from a Service with no endpoint).
+			# nothing to tell a restart from a Service with no endpoint). Each
+			# request is bounded, so a stalled API server can't hold up the
+			# cleanup and the error below.
 			store=""
 			if [[ "$S3_MODE" == rustfs ]]; then
 				store=$(
-					kc -n "$UAT_NS" get pods -l "app.kubernetes.io/name=$RUSTFS_SVC" -o \
+					kc -n "$UAT_NS" get pods -l "app.kubernetes.io/name=$RUSTFS_SVC" --request-timeout=30s -o \
 						jsonpath='{range .items[*]}pod {.metadata.name}: ready {.status.containerStatuses[0].ready}, restarts {.status.containerStatuses[0].restartCount}, last {.status.containerStatuses[0].lastState.terminated.reason}{"\n"}{end}' 2>&1 || true
-					kc -n "$UAT_NS" get endpoints "$RUSTFS_SVC" -o \
+					kc -n "$UAT_NS" get endpoints "$RUSTFS_SVC" --request-timeout=30s -o \
 						jsonpath='endpoints ready [{.subsets[*].addresses[*].ip}] not ready [{.subsets[*].notReadyAddresses[*].ip}]' 2>&1 || true
 				)
 			fi
