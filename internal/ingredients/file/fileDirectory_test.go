@@ -884,3 +884,28 @@ func TestDirectoryRecurseChownsLinksNotTargets(t *testing.T) {
 		t.Error("the link itself was not chowned")
 	}
 }
+
+// TestDirectoryTestModeRecurseOnAMissingDirectory: in test mode a directory
+// that would be created doesn't exist yet; the recursive ownership walk must
+// not fail on it.
+func TestDirectoryTestModeRecurseOnAMissingDirectory(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grp, err := user.LookupGroupId(me.Gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(t.TempDir(), "not-yet")
+	f := File{method: "directory", params: map[string]interface{}{
+		"name": name, "user": me.Username, "group": grp.Name, "recurse": true,
+	}}
+	res, err := f.directory(context.Background(), true)
+	if err != nil || !res.Succeeded || !res.Changed {
+		t.Fatalf("test mode: %+v, %v; want a planned change", res, err)
+	}
+	if _, err := os.Stat(name); !os.IsNotExist(err) {
+		t.Fatalf("test mode created %s", name)
+	}
+}

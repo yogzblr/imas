@@ -112,7 +112,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					notes = append(notes, cook.Snprintf("chown %s to %s", name, d.user))
 				}
 			}
-			if val, ok := f.params["recurse"].(bool); ok && val {
+			if val, ok := f.params["recurse"].(bool); ok && val && pathExists(name) {
 				walkErr := filepath.WalkDir(name, func(path string, _ fs.DirEntry, err error) error {
 					if err != nil {
 						return err
@@ -170,7 +170,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					notes = append(notes, cook.Snprintf("chown %s to %s", name, d.group))
 				}
 			}
-			if val, ok := f.params["recurse"].(bool); ok && val {
+			if val, ok := f.params["recurse"].(bool); ok && val && pathExists(name) {
 				walkErr := filepath.WalkDir(name, func(path string, _ fs.DirEntry, err error) error {
 					if err != nil {
 						return err
@@ -265,6 +265,13 @@ func parseID(s string) (int, error) {
 		return 0, fmt.Errorf("invalid id %q", s)
 	}
 	return id, nil
+}
+
+// pathExists reports whether name exists. In test mode a directory that
+// would be created doesn't yet, and has no children to walk.
+func pathExists(name string) bool {
+	_, err := os.Lstat(name)
+	return err == nil
 }
 
 // hasPerm reports whether name exists with exactly the permission bits of
