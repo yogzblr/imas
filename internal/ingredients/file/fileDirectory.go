@@ -113,7 +113,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 				}
 			}
 			if val, ok := f.params["recurse"].(bool); ok && val {
-				walkErr := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
+				walkErr := filepath.WalkDir(name, func(path string, _ fs.DirEntry, err error) error {
 					if err != nil {
 						return err
 					}
@@ -122,11 +122,13 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					}
 					changed = true
 					if test {
-						notes = append(notes, cook.Snprintf("would chown %s to %s", path, val))
+						notes = append(notes, cook.Snprintf("would chown %s to %s", path, d.user))
 						return nil
 					}
-					notes = append(notes, cook.Snprintf("chown %s to %s", path, val))
-					return os.Chown(path, uid, -1)
+					notes = append(notes, cook.Snprintf("chown %s to %s", path, d.user))
+					// Lchown: ownedBy reads a link itself, so changing its
+					// target instead would never converge.
+					return os.Lchown(path, uid, -1)
 				})
 				if walkErr != nil {
 					return cook.Result{
@@ -169,7 +171,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 				}
 			}
 			if val, ok := f.params["recurse"].(bool); ok && val {
-				walkErr := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
+				walkErr := filepath.WalkDir(name, func(path string, _ fs.DirEntry, err error) error {
 					if err != nil {
 						return err
 					}
@@ -178,11 +180,11 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					}
 					changed = true
 					if test {
-						notes = append(notes, cook.Snprintf("would chown %s to %s", path, val))
+						notes = append(notes, cook.Snprintf("would chown %s to %s", path, d.group))
 						return nil
 					}
-					notes = append(notes, cook.Snprintf("chown %s to %s", path, val))
-					return os.Chown(path, -1, gid)
+					notes = append(notes, cook.Snprintf("chown %s to %s", path, d.group))
+					return os.Lchown(path, -1, gid)
 				})
 				if walkErr != nil {
 					return cook.Result{

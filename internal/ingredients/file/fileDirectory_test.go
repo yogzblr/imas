@@ -836,3 +836,51 @@ func TestParseID(t *testing.T) {
 		}
 	}
 }
+
+// TestDirectoryRecurseChownsLinksNotTargets: the recursive chown checks a
+// symlink itself (Lstat), so it must change the link itself (Lchown).
+// Chowning through the link changed its target, possibly outside the tree,
+// reported a change on every run, and failed on a dangling link.
+func TestDirectoryRecurseChownsLinksNotTargets(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown to another user needs root")
+	}
+	nobody, err := user.LookupId("65534")
+	if err != nil {
+		t.Skipf("no uid 65534: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "tree")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "missing"), filepath.Join(dir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	f := File{method: "directory", params: map[string]interface{}{"name": dir, "user": nobody.Username, "recurse": true}}
+	res, err := f.directory(context.Background(), false)
+	if err != nil || !res.Changed {
+		t.Fatalf("first run: %+v, %v; want a change", res, err)
+	}
+	for _, n := range res.Notes {
+		if strings.HasSuffix(n.String(), " to true") {
+			t.Errorf("note %q names the recurse flag, not the user", n)
+		}
+	}
+	res, err = f.directory(context.Background(), false)
+	if err != nil || res.Changed {
+		t.Fatalf("second run: %+v, %v; want no change", res, err)
+	}
+	if ownedBy(outside, 65534, -1) {
+		t.Error("the link's target outside the tree was chowned")
+	}
+	if !ownedBy(filepath.Join(dir, "link"), 65534, -1) {
+		t.Error("the link itself was not chowned")
+	}
+}
