@@ -318,18 +318,30 @@ func rulePresent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) 
 		return cook.Result{Failed: true}, err
 	}
 
-	existing, err := findRuleByName(conn, table, chain, spec.name)
+	named, err := findRulesByName(conn, table, chain, spec.name)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	if existing != nil && reflect.DeepEqual(existing.Exprs, wantExprs) && commentTerminated(existing) {
+	// The first rule of the name is the one kept; any later ones are
+	// removed, as rule_absent removes them all, so the name ends up on
+	// exactly one rule.
+	var existing *nft.Rule
+	var extra []*nft.Rule
+	if len(named) > 0 {
+		existing, extra = named[0], named[1:]
+	}
+	matches := existing != nil && reflect.DeepEqual(existing.Exprs, wantExprs) && commentTerminated(existing)
+	if matches && len(extra) == 0 {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
 			cook.Snprintf("rule %s in %s/%s is already present and matches", spec.name, spec.table, spec.chain),
 		}}, nil
 	}
 
 	verb := "added"
-	if existing != nil {
+	switch {
+	case matches:
+		verb = "de-duplicated"
+	case existing != nil:
 		verb = "updated"
 	}
 	if dryRun {
@@ -344,7 +356,14 @@ func rulePresent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) 
 		Exprs:    wantExprs,
 		UserData: ruleUserData(spec.name),
 	}
+	for _, r := range extra {
+		if err := conn.DelRule(r); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("removing a second rule named %s: %w", spec.name, err)
+		}
+	}
 	switch {
+	case matches:
+		// Only the extra rules needed removing.
 	case existing != nil && !spec.hasPosition:
 		// Replace it where it is: deleting and appending would move it to
 		// the end of the chain, behind any drop rule that followed it.

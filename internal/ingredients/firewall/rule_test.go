@@ -346,3 +346,42 @@ func TestRulePresentRepairKeepsTheRulesPlace(t *testing.T) {
 		}
 	}
 }
+
+// TestRulePresentRemovesSecondRulesOfTheName: the name ends up on exactly
+// one rule, the first, which keeps its place; a second rule of the name
+// (here with another verdict) would otherwise stay active.
+func TestRulePresentRemovesSecondRulesOfTheName(t *testing.T) {
+	conn := newFakeConn()
+	table := &nft.Table{Name: "filter", Family: nft.TableFamilyINet}
+	chain := &nft.Chain{Name: "input", Table: table}
+	conn.AddTable(table)
+	conn.AddChain(chain)
+	spec := mustRuleSpec(t, map[string]interface{}{
+		"name": "web", "table": "filter", "chain": "input",
+		"protocol": "tcp", "dport": "443", "action": "accept",
+	})
+	exprs, err := buildExprs(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, Exprs: exprs, UserData: ruleUserData("web")})
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, UserData: ruleUserData("other")})
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, UserData: ruleUserData("web")})
+
+	res, err := rulePresent(conn, spec, false)
+	if err != nil || !res.Changed {
+		t.Fatalf("first run: %+v, %v; want the second rule removed", res, err)
+	}
+	if res, err := rulePresent(conn, spec, false); err != nil || res.Changed {
+		t.Fatalf("second run: %+v, %v; want no change", res, err)
+	}
+	rules, _ := conn.GetRules(table, chain)
+	var names []string
+	for _, r := range rules {
+		c, _ := ruleComment(r)
+		names = append(names, c)
+	}
+	if len(names) != 2 || names[0] != "web" || names[1] != "other" {
+		t.Fatalf("rules %v, want [web other]", names)
+	}
+}
