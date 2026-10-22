@@ -817,3 +817,22 @@ func TestDirectoryReportsChanges(t *testing.T) {
 		t.Fatalf("mode %o after drift, want 0750", st.Mode().Perm())
 	}
 }
+
+func TestParseID(t *testing.T) {
+	for _, tt := range []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"0", 0, true},
+		{"1000", 1000, true},
+		{"-1", 0, false},
+		{"S-1-5-18", 0, false}, // a Windows SID
+		{"", 0, false},
+	} {
+		got, err := parseID(tt.in)
+		if (err == nil) != tt.ok || got != tt.want {
+			t.Errorf("parseID(%q) = %d, %v; want %d, ok %v", tt.in, got, err, tt.want, tt.ok)
+		}
+	}
+}

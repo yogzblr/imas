@@ -89,21 +89,21 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, lookupErr
 			}
-			uid, parseErr := strconv.ParseUint(userL.Uid, 10, 32)
+			uid, parseErr := parseID(userL.Uid)
 			if parseErr != nil {
 				return cook.Result{
 					Succeeded: false, Failed: true, Notes: notes,
 				}, parseErr
 			}
 
-			if ownedBy(name, int(uid), -1) {
+			if ownedBy(name, uid, -1) {
 				notes = append(notes, cook.Snprintf("%s is already owned by %s", name, d.user))
 			} else {
 				changed = true
 				if test {
 					notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.user))
 				} else {
-					chownErr := os.Chown(name, int(uint32(uid)), -1)
+					chownErr := os.Chown(name, uid, -1)
 					if chownErr != nil {
 						return cook.Result{
 							Succeeded: false, Failed: true, Notes: notes,
@@ -117,7 +117,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					if err != nil {
 						return err
 					}
-					if ownedBy(path, int(uid), -1) {
+					if ownedBy(path, uid, -1) {
 						return nil
 					}
 					changed = true
@@ -126,7 +126,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 						return nil
 					}
 					notes = append(notes, cook.Snprintf("chown %s to %s", path, val))
-					return os.Chown(path, int(uint32(uid)), -1)
+					return os.Chown(path, uid, -1)
 				})
 				if walkErr != nil {
 					return cook.Result{
@@ -146,20 +146,20 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, lookupErr
 			}
-			gid, parseErr := strconv.ParseUint(group.Gid, 10, 32)
+			gid, parseErr := parseID(group.Gid)
 			if parseErr != nil {
 				return cook.Result{
 					Succeeded: false, Failed: true, Notes: notes,
 				}, parseErr
 			}
-			if ownedBy(name, -1, int(gid)) {
+			if ownedBy(name, -1, gid) {
 				notes = append(notes, cook.Snprintf("%s is already owned by group %s", name, d.group))
 			} else {
 				changed = true
 				if test {
 					notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.group))
 				} else {
-					chownErr := os.Chown(name, -1, int(uint32(gid)))
+					chownErr := os.Chown(name, -1, gid)
 					if chownErr != nil {
 						return cook.Result{
 							Succeeded: false, Failed: true, Notes: notes,
@@ -173,7 +173,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					if err != nil {
 						return err
 					}
-					if ownedBy(path, -1, int(gid)) {
+					if ownedBy(path, -1, gid) {
 						return nil
 					}
 					changed = true
@@ -182,7 +182,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 						return nil
 					}
 					notes = append(notes, cook.Snprintf("chown %s to %s", path, val))
-					return os.Chown(path, -1, int(uint32(gid)))
+					return os.Chown(path, -1, gid)
 				})
 				if walkErr != nil {
 					return cook.Result{
@@ -249,6 +249,20 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 	return cook.Result{
 		Succeeded: true, Failed: false, Changed: changed, Notes: notes,
 	}, nil
+}
+
+// parseID parses a numeric user or group ID as an int, the type os.Chown
+// takes. An ID that doesn't fit (over 2^31-1 on a 32-bit build) is an
+// error, never a wrapped-around ID.
+func parseID(s string) (int, error) {
+	id, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if id < 0 {
+		return 0, fmt.Errorf("invalid id %q", s)
+	}
+	return id, nil
 }
 
 // hasPerm reports whether name exists with exactly the permission bits of
