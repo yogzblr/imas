@@ -20,7 +20,7 @@ var mountNamespaceSettings = []string{
 	"ProtectClock", "ProtectHostname", "ProtectProc", "ReadWritePaths",
 	"ReadOnlyPaths", "InaccessiblePaths", "TemporaryFileSystem",
 	"BindPaths", "BindReadOnlyPaths", "RootDirectory", "RootImage",
-	"MountFlags",
+	"MountFlags", "LogNamespace",
 }
 
 // The sprout's units must share the host's mount namespace: the sprout
