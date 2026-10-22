@@ -321,3 +321,41 @@ func TestWaitReachableRidesOutARestart(t *testing.T) {
 		t.Fatalf("the store came back after 100ms: %v", err)
 	}
 }
+
+func TestDialAddress(t *testing.T) {
+	for _, tt := range []struct {
+		endpoint string
+		ssl      bool
+		want     string
+	}{
+		{"rustfs.svc:9000", false, "rustfs.svc:9000"},
+		{"s3.example.com", true, "s3.example.com:443"},
+		{"s3.example.com", false, "s3.example.com:80"},
+		{"[::1]:9000", false, "[::1]:9000"},
+		{"::1", false, "[::1]:80"},
+	} {
+		if got := dialAddress(tt.endpoint, tt.ssl); got != tt.want {
+			t.Errorf("dialAddress(%q, %v) = %q, want %q", tt.endpoint, tt.ssl, got, tt.want)
+		}
+	}
+}
+
+func TestWaitReachableReportsCancellation(t *testing.T) {
+	defer func(d time.Duration) { reachRetry = d }(reachRetry)
+	reachRetry = 10 * time.Millisecond
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := l.Addr().String()
+	l.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err = waitReachable(ctx, endpoint, time.Minute)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want the parent's context.DeadlineExceeded", err)
+	}
+	if strings.Contains(err.Error(), "for 1m0s") {
+		t.Fatalf("%q claims the connect limit passed", err)
+	}
+}

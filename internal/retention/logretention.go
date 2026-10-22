@@ -137,10 +137,23 @@ func LogRetention(ctx context.Context, cfg LogRetentionConfig, now time.Time) (R
 	if connectTimeout <= 0 {
 		connectTimeout = DefaultConnectTimeout
 	}
-	if err := waitReachable(ctx, cfg.Endpoint, connectTimeout); err != nil {
+	if err := waitReachable(ctx, dialAddress(cfg.Endpoint, cfg.UseSSL), connectTimeout); err != nil {
 		return Result{}, err
 	}
 	return SweepDated(ctx, s, cfg.Prefix, LogDate(cfg.Prefix), Cutoff(now, days))
+}
+
+// dialAddress is the host:port the S3 client connects to: the endpoint,
+// with the scheme's default port when it names none (as minio-go does).
+func dialAddress(endpoint string, useSSL bool) string {
+	if _, _, err := net.SplitHostPort(endpoint); err == nil {
+		return endpoint
+	}
+	port := "80"
+	if useSSL {
+		port = "443"
+	}
+	return net.JoinHostPort(strings.Trim(endpoint, "[]"), port)
 }
 
 // reachRetry is how long waitReachable waits between attempts.
@@ -148,8 +161,8 @@ var reachRetry = 2 * time.Second
 
 // waitReachable dials endpoint until a TCP connection opens, for at most
 // limit, and otherwise fails with an error that says where to look.
-func waitReachable(ctx context.Context, endpoint string, limit time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, limit)
+func waitReachable(parent context.Context, endpoint string, limit time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
 	var d net.Dialer
 	for {
@@ -162,6 +175,10 @@ func waitReachable(ctx context.Context, endpoint string, limit time.Duration) er
 		}
 		select {
 		case <-ctx.Done():
+			if perr := parent.Err(); perr != nil {
+				// Cancelled or out of time overall, not the connect limit.
+				return fmt.Errorf("waiting for the object store at %s: %w (last attempt: %v)", endpoint, perr, err)
+			}
 			return fmt.Errorf("the object store at %s did not accept a connection for %s: %w "+
 				"(is it running and Ready? A Service with no ready endpoint refuses connections)", endpoint, limit, err)
 		case <-time.After(reachRetry):
