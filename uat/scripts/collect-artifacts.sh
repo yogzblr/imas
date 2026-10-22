@@ -89,7 +89,8 @@ patterns_ci=(
   # A Bearer credential of any shape (an opaque token, not only a JWT).
   'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{8,}'
   # A Basic Authorization header's credential (base64 of user:password).
-  'Authorization"?[[:space:]]*[:=][[:space:]]*"?Basic[[:space:]]+[A-Za-z0-9+/=]{8,}'
+  # base64 of user:password is 4 characters or more ("u:p" is dTpw).
+  'Authorization"?[[:space:]]*[:=][[:space:]]*"?Basic[[:space:]]+[A-Za-z0-9+/]{2,}={0,2}'
   'client-key-data:'
   'client-certificate-data:'
   '"[a-z_]*password"[[:space:]]*:[[:space:]]*"[^"]+'
