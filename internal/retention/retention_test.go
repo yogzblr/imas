@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -258,5 +259,65 @@ func TestStartRecipeAuditSweeperZeroKeepsForEver(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if lists != 0 {
 		t.Fatalf("listed %d times with retention 0", lists)
+	}
+}
+
+// TestRunLogRetentionFailsFastWhenUnreachable: a refused connection ends
+// the run within -connect-timeout, exit 1, naming the endpoint, instead of
+// the S3 client retrying until the Job's deadline.
+func TestRunLogRetentionFailsFastWhenUnreachable(t *testing.T) {
+	defer func(d time.Duration) { reachRetry = d }(reachRetry)
+	reachRetry = 10 * time.Millisecond
+	// A port nothing listens on: take one and close it.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := l.Addr().String()
+	l.Close()
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	code := RunLogRetention([]string{"-endpoint", endpoint, "-bucket", "imas-logs",
+		"-credentials-dir", writeCreds(t, "test", "test"), "-connect-timeout", "300ms"}, &stderr)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1: %s", code, stderr.String())
+	}
+	if el := time.Since(start); el > 10*time.Second {
+		t.Fatalf("took %s to give up", el)
+	}
+	for _, want := range []string{endpoint, "did not accept a connection", "Ready"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestWaitReachableRidesOutARestart(t *testing.T) {
+	defer func(d time.Duration) { reachRetry = d }(reachRetry)
+	reachRetry = 10 * time.Millisecond
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := l.Addr().String()
+	l.Close()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		l2, err := net.Listen("tcp", endpoint)
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { l2.Close() })
+		for {
+			c, err := l2.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if err := waitReachable(context.Background(), endpoint, 5*time.Second); err != nil {
+		t.Fatalf("the store came back after 100ms: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,16 @@ type LogRetentionConfig struct {
 	// CredentialsDir holds access-key-id and secret-access-key: the
 	// retention credential, list and delete under Prefix only.
 	CredentialsDir string
+	// ConnectTimeout bounds how long the endpoint may refuse connections
+	// before the run gives up; 0 is DefaultConnectTimeout.
+	ConnectTimeout time.Duration
 }
+
+// DefaultConnectTimeout rides out an object store restart, but not an
+// outage: the S3 client's own retries would hold a Job on a refused
+// connection until its deadline (UAT D1 on Azure: three pods, ten minutes,
+// and no message saying why).
+const DefaultConnectTimeout = time.Minute
 
 // errLogUsage marks a configuration error: exit code 2.
 var errLogUsage = errors.New("configuration error")
@@ -74,6 +84,7 @@ func RunLogRetention(args []string, stderr io.Writer) int {
 	fs.IntVar(&cfg.Days, "days", 0, fmt.Sprintf("retention in days; 0 is the default (%d), at most %d", DefaultLogRetentionDays, MaxLogRetentionDays))
 	fs.StringVar(&cfg.CredentialsDir, "credentials-dir", "", "directory holding the retention credential's "+AccessKeyIDFile+" and "+SecretAccessKeyFile)
 	timeout := fs.Duration("timeout", 30*time.Minute, "overall deadline")
+	fs.DurationVar(&cfg.ConnectTimeout, "connect-timeout", DefaultConnectTimeout, "give up when the endpoint refuses connections this long")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Usage: farmer %s -endpoint HOST:PORT -bucket NAME -credentials-dir DIR [flags]\n\n", LogRetentionCommand)
 		fmt.Fprintf(stderr, "Deletes the log objects whose day is older than the retention.\n\n")
@@ -122,7 +133,40 @@ func LogRetention(ctx context.Context, cfg LogRetentionConfig, now time.Time) (R
 	if err != nil {
 		return Result{}, fmt.Errorf("%w: %w", errLogUsage, err)
 	}
+	connectTimeout := cfg.ConnectTimeout
+	if connectTimeout <= 0 {
+		connectTimeout = DefaultConnectTimeout
+	}
+	if err := waitReachable(ctx, cfg.Endpoint, connectTimeout); err != nil {
+		return Result{}, err
+	}
 	return SweepDated(ctx, s, cfg.Prefix, LogDate(cfg.Prefix), Cutoff(now, days))
+}
+
+// reachRetry is how long waitReachable waits between attempts.
+var reachRetry = 2 * time.Second
+
+// waitReachable dials endpoint until a TCP connection opens, for at most
+// limit, and otherwise fails with an error that says where to look.
+func waitReachable(ctx context.Context, endpoint string, limit time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	var d net.Dialer
+	for {
+		dctx, dcancel := context.WithTimeout(ctx, 5*time.Second)
+		c, err := d.DialContext(dctx, "tcp", endpoint)
+		dcancel()
+		if err == nil {
+			_ = c.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("the object store at %s did not accept a connection for %s: %w "+
+				"(is it running and Ready? A Service with no ready endpoint refuses connections)", endpoint, limit, err)
+		case <-time.After(reachRetry):
+		}
+	}
 }
 
 // readCredentialDir reads the access key pair from dir, refusing an empty
