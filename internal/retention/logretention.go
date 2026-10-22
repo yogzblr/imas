@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +139,7 @@ func LogRetention(ctx context.Context, cfg LogRetentionConfig, now time.Time) (R
 	if connectTimeout <= 0 {
 		connectTimeout = DefaultConnectTimeout
 	}
-	if err := waitReachable(ctx, dialAddress(cfg.Endpoint, cfg.UseSSL), connectTimeout); err != nil {
+	if err := waitReachable(ctx, firstHop(cfg.Endpoint, cfg.UseSSL), connectTimeout); err != nil {
 		return Result{}, err
 	}
 	return SweepDated(ctx, s, cfg.Prefix, LogDate(cfg.Prefix), Cutoff(now, days))
@@ -154,6 +156,25 @@ func dialAddress(endpoint string, useSSL bool) string {
 		port = "443"
 	}
 	return net.JoinHostPort(strings.Trim(endpoint, "[]"), port)
+}
+
+// proxyFor is the S3 client's proxy choice (minio-go's default transport
+// uses http.ProxyFromEnvironment). Replaceable in tests: the standard
+// library reads the environment only once.
+var proxyFor = http.ProxyFromEnvironment
+
+// firstHop is the address the S3 client opens its connection to: the
+// HTTP(S)_PROXY that applies to the endpoint, or else the endpoint itself.
+func firstHop(endpoint string, useSSL bool) string {
+	scheme := "http"
+	if useSSL {
+		scheme = "https"
+	}
+	req := &http.Request{URL: &url.URL{Scheme: scheme, Host: endpoint}}
+	if proxy, err := proxyFor(req); err == nil && proxy != nil {
+		return dialAddress(proxy.Host, proxy.Scheme == "https")
+	}
+	return dialAddress(endpoint, useSSL)
 }
 
 // reachRetry is how long waitReachable waits between attempts.

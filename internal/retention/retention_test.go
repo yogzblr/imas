@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -357,5 +359,23 @@ func TestWaitReachableReportsCancellation(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "for 1m0s") {
 		t.Fatalf("%q claims the connect limit passed", err)
+	}
+}
+
+// TestFirstHopFollowsTheProxy: when HTTP(S)_PROXY applies, the S3 client
+// connects to the proxy, so that is what the readiness check dials.
+func TestFirstHopFollowsTheProxy(t *testing.T) {
+	defer func(f func(*http.Request) (*url.URL, error)) { proxyFor = f }(proxyFor)
+	proxyFor = func(r *http.Request) (*url.URL, error) {
+		if r.URL.Host == "s3.example.com" && r.URL.Scheme == "https" {
+			return url.Parse("http://proxy.corp:3128")
+		}
+		return nil, nil
+	}
+	if got := firstHop("s3.example.com", true); got != "proxy.corp:3128" {
+		t.Errorf("through the proxy: %q, want proxy.corp:3128", got)
+	}
+	if got := firstHop("rustfs.svc:9000", false); got != "rustfs.svc:9000" {
+		t.Errorf("no proxy: %q, want rustfs.svc:9000", got)
 	}
 }
