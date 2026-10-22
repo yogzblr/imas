@@ -93,6 +93,17 @@ case "$1 $2" in
       exit 1
     fi
     [ -f "$STUB_STATE/runcmd_fail" ] && { echo "ERROR: stub run-command failure" >&2; exit 1; }
+    # runcmd_conflict: this many calls are refused as while an earlier
+    # run-command still runs ("always": every call).
+    if [ -f "$STUB_STATE/runcmd_conflict" ]; then
+      n=$(cat "$STUB_STATE/runcmd_conflict")
+      if [ "$n" = always ] || [ "$n" -gt 0 ]; then
+        [ "$n" = always ] || echo $((n - 1)) >"$STUB_STATE/runcmd_conflict"
+        echo "ERROR: (Conflict) Run command extension execution is in progress. Please wait for completion before invoking a run command." >&2
+        echo "Code: Conflict" >&2
+        exit 1
+      fi
+    fi
     cid=$(arg --command-id "$@")
     # The script lines are everything after --scripts.
     lines=()
@@ -139,6 +150,16 @@ case "$1 $2" in
     exit "$(cat "$STUB_STATE/start_rc" 2>/dev/null || echo 0)"
     ;;
   "vm get-instance-view")
+    # The guest agent's status and time (agent: "<status> <ISO time>";
+    # default Ready, now), or the power state.
+    if [[ "$(arg --query "$@")" == *vmAgent* ]]; then
+      if [ -f "$STUB_STATE/agent" ]; then
+        tr ' ' '\n' <"$STUB_STATE/agent"
+      else
+        printf 'Ready\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+      fi
+      exit 0
+    fi
     cat "$STUB_STATE/power" 2>/dev/null || echo PowerState/running
     ;;
   "network bastion") ;;

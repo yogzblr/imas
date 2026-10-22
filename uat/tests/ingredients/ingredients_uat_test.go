@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +69,7 @@ func TestIngredients(t *testing.T) {
 			return runM.Match("TestIngredients", id, name) && !skipM.MatchSkip("TestIngredients", id, name)
 		},
 	}
+	logEstimate(t, ctx, f, plan, runner.Selected)
 	runner.Start(ctx, plan)
 	for _, c := range plan.Cases {
 		jobs := plan.Jobs[c.ID]
@@ -82,6 +84,73 @@ func TestIngredients(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// envCookEstimate overrides the time one cook is estimated to take.
+const envCookEstimate = "IMAS_UAT_COOK_ESTIMATE"
+
+// logEstimate times one trivial host call on every VM the selection uses
+// (in parallel; the call goes through the same vmctl.sh channel as the
+// cases'), estimates each VM's share of the plan from it (Plan.Estimate)
+// and logs that against the time left, so a run that cannot fit says so
+// at the start rather than with "the run ended before the case ran" at
+// the end. It never fails the test.
+func logEstimate(t *testing.T, ctx context.Context, f *harness.Fleet, plan *Plan, selected func(id, name string) bool) {
+	perCook := 15 * time.Second
+	if d, err := time.ParseDuration(os.Getenv(envCookEstimate)); err == nil && d > 0 {
+		perCook = d
+	}
+	vms := map[string]harness.Sprout{}
+	for _, c := range plan.Cases {
+		for _, j := range plan.Jobs[c.ID] {
+			if j.Skip == "" && j.Sprout.VM != "" && selected(c.ID, j.Name) {
+				vms[j.Sprout.VM] = j.Sprout
+			}
+		}
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	perCall := map[string]time.Duration{}
+	for vm, sp := range vms {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			probe := "true"
+			if sp.IsWindows() {
+				probe = "$null = 0"
+			}
+			start := time.Now()
+			res, err := f.VM.Run(cctx, vm, sp.Family(), probe)
+			took := time.Since(start)
+			if err != nil || res.ExitCode != 0 {
+				t.Logf("ingredients estimate: a trivial host call on %s failed after %s: %v; its cases may fail on the channel (vmctl.sh)", vm, took.Round(time.Second), err)
+				return
+			}
+			mu.Lock()
+			perCall[vm] = took
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	// A VM whose probe failed is estimated at run-command's pace.
+	ests := plan.Estimate(selected, perCall, 45*time.Second, perCook)
+	var worst VMEstimate
+	for _, e := range ests {
+		t.Logf("ingredients estimate: %s", e)
+		if e.Total > worst.Total {
+			worst = e
+		}
+	}
+	deadline, _ := ctx.Deadline()
+	left := time.Until(deadline).Round(time.Minute)
+	t.Logf("ingredients estimate: VMs run in parallel; the longest, %s, needs about %s (%s a cook, %s); %s left before the run's deadline",
+		worst.VM, worst.Total.Round(time.Minute), perCook, envCookEstimate, left)
+	if worst.Total > left {
+		t.Logf("ingredients estimate: WARNING: %s's cases need about %s more than is left; the cases at the end of its list will fail with \"the run ended before the case ran\"",
+			worst.VM, (worst.Total - left).Round(time.Minute))
 	}
 }
 

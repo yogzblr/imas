@@ -170,3 +170,32 @@ func TestJanitorWorkflowSession(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkflowTestChannelAndDiagnostics checks W8's wiring: vmctl.sh gets
+// the tunnel credentials, the tests' budget comes from what the job has
+// left, a failed test step collects the diagnostics while the tunnels are
+// still open, and the report keeps them.
+func TestWorkflowTestChannelAndDiagnostics(t *testing.T) {
+	_, steps := loadUATWorkflow(t)
+	prep := steps[index(t, steps, "Prepare directories")].Run
+	for _, k := range []string{"VMCTL_SSH_KEY=$RUNNER_TEMP/uat-secrets/ssh_key", "VMCTL_WINRM_PASSWORD_FILE=$RUNNER_TEMP/uat-secrets/winrm_password", "JOB_STARTED_AT="} {
+		if !strings.Contains(prep, k) {
+			t.Errorf("Prepare directories does not set %s", k)
+		}
+	}
+	ti := index(t, steps, "Tests (uat/tests/run.sh)")
+	tests := steps[ti]
+	if tests.Env["IMAS_UAT_DIAG_HOOK"] == "" || !strings.Contains(tests.Run, "JOB_STARTED_AT") ||
+		strings.Contains(tests.Run, "IMAS_UAT_TIMEOUT=165m") {
+		t.Errorf("the Tests step must size IMAS_UAT_TIMEOUT from the job's time left and set IMAS_UAT_DIAG_HOOK:\n%s", tests.Run)
+	}
+	di := index(t, steps, "Diagnostics (on a test failure)")
+	d := steps[di]
+	if di < ti || di > index(t, steps, "Close the Bastion tunnels") || di > index(t, steps, "Collect the report and outputs") {
+		t.Error("the diagnostics must run after the tests and before the tunnels close and the report is collected")
+	}
+	if !strings.Contains(d.If, "steps.tests.outcome == 'failure'") || !strings.Contains(d.If, "always()") ||
+		!strings.Contains(d.Run, "uat/scripts/diagnostics.sh full \"$STATE/report/diagnostics/") {
+		t.Errorf("diagnostics step: if %q\n%s", d.If, d.Run)
+	}
+}

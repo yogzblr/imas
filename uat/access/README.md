@@ -11,10 +11,12 @@ single-node run). The HA run's API tunnels by IP and `vmctl.sh stop-vm` and
 `start-vm` run first in Run 3 of `uat/RUNBOOK.md`; offline both scripts are
 tested against a stubbed `az` (see [Tests](#tests)).
 
-Requirements: bash, `jq`, coreutils (`timeout`, `base64`), `setsid` (util-linux;
+Requirements: bash, `jq`, coreutils (`timeout`, `base64`), `flock` and `setsid` (util-linux;
 without it the tunnels are started with `nohup`), and the Azure CLI logged in to
 the subscription with the `bastion` extension (`az extension add --name
 bastion`). The input is the `tofu output -json uat` file from `uat/tofu`.
+`vmctl.sh`'s tunnel channel also needs OpenSSH's `ssh` and, for Windows,
+`python3` with `pywinrm` (MIT; the workflow installs it for Ansible).
 `session.sh` also needs `curl`, `flock` and `ssh-keyscan` (OpenSSH), all on
 the hosted runner.
 
@@ -189,26 +191,89 @@ uat/access/vmctl.sh <uat.json> run          <vm> <command...>
 `node_names` in `uat.json` (`uat-dmz` and `uat-core` in the single-node run,
 `uat-dmz-1` to `uat-dmz-N` and `uat-core-1` to `uat-core-N` on an HA hub,
 each by its own entry of `node_ids`), or the hub's `name` where the file has
-no node lists. Everything goes through the
-Azure control plane (`az vm restart`, `az vm stop`, `az vm start`, `az vm
-get-instance-view`, `az vm run-command invoke`); no network path to the VM is
-needed.
+no node lists.
+
+### The channel (W8)
+
+UAT Run 2 (run 39709416839, rc.16) ran every command through `az vm
+run-command invoke`: 30 to 60 s a call, one execution at a time per VM, a
+call killed on the runner left the VM's extension busy ("(Conflict) Run
+command extension execution is in progress") for the calls after it, and
+about 85 of its 101 failures came from that channel, not the product. So
+`run`, `stop-sprout` and `start-sprout` now go through the VM's **Bastion
+tunnel** when `access.json` (`tunnels.sh`) has one:
+
+| VM | Channel | As |
+|---|---|---|
+| Linux (hub nodes, `connection: ssh` sprouts) with an `ssh_port` | `ssh -p <ssh_port> <admin_user>@127.0.0.1` with `VMCTL_SSH_KEY`; the command goes on stdin into a temporary file and runs with `sudo -n -H bash` (stdin `/dev/null`) | root |
+| Windows (`connection: winrm` sprouts) with a `winrm_port` | `winrm_exec.py`: pywinrm (MIT, the runner's Ansible stack) to `https://127.0.0.1:<winrm_port>/wsman`, NTLM, certificate not validated (as `uat/enroll`'s inventory: the certificate is self-signed and names the VM); the command goes to `powershell.exe` on stdin, so its length is not bound by the command line | the admin user (an elevated token, as for enrolment), **not SYSTEM** |
+| a VM with no tunnel entry | `az vm run-command invoke` (`RunShellScript`, `RunPowerShellScript`), as before | root, SYSTEM |
+
+A tunnel entry without its credential (`VMCTL_SSH_KEY`,
+`VMCTL_WINRM_PASSWORD_FILE` unset or unreadable) also falls back to
+run-command, and says so on stderr. Over SSH the host key is accepted on
+first use into `<state>/known_hosts` under the VM's name
+(`HostKeyAlias`), so a tunnel that moves to another local port keeps its
+key. Every successful call logs `<vm>: ran over <channel> (127.0.0.1:<port>)
+in Ns`: the measured per-call time.
+
+**One call per VM at a time.** Every action takes the VM's lock (`flock` on
+`<state>/<vm>.lock`) for its whole length, across processes too, so two
+calls never overlap on a VM; calls to different VMs run in parallel. A
+call that waits more than 5 s says so; one that cannot get the lock within
+`VMCTL_LOCK_WAIT_SECONDS` (900) exits 255.
+
+**Timeouts.** Each channel call has its own timeout, `VMCTL_CALL_TIMEOUT`
+(120 s), and is killed (TERM, then KILL 5 s later) when it runs over; each
+`az` power operation has `VMCTL_AZ_TIMEOUT` (600 s). The harness's own
+per-call limit (`IMAS_UAT_VMCTL_TIMEOUT`, 15 minutes) kills `vmctl.sh`'s
+whole process group, so no `az`, `ssh` or `python3` child survives it.
+
+**Retries, only where nothing ran.** A run-command refused with Conflict is
+retried `VMCTL_CONFLICT_RETRIES` (4) times, 15, 30, 60 and 120 s apart. An
+SSH connection that failed before the command started (refused, closed or
+reset before the banner, `kex_exchange_identification`) or a WinRM shell that
+could not be opened is retried `VMCTL_CONNECT_RETRIES` (2) times. A call
+that may have run (it timed out, or gave no exit code) is never repeated.
+
+**Dead VMs fail fast.** A call that gives no exit code (exit 255: the
+channel failed, timed out or returned nothing) counts as a channel failure
+of the VM; a success resets the count. After `VMCTL_DEAD_AFTER` (3) in a row
+the VM is marked dead (`<vm> is now marked dead: 3 channel failures in a row
+(last: ...)`), and `run`, `stop-sprout` and `start-sprout` on it exit 255 at
+once for `VMCTL_DEAD_SECONDS` (1800), naming the last failure, instead of
+each spending its timeout. After that one call may try again (and a failure
+marks it dead again). A `restart` or `start-vm` is always tried and, when the
+VM comes back, clears the mark. The state is in `VMCTL_STATE_DIR` (default
+`<access.json's directory>/vmctl`, else `${TMPDIR:-/tmp}/imas-vmctl-<uid>`).
+
+### Actions
 
 | Action | What it does | Exit status |
 |---|---|---|
-| `restart` | `az vm restart`, then waits until the power state is running and a trivial run-command succeeds (the guest agent answers), up to `VMCTL_WAIT_SECONDS` (default 600), polling every `VMCTL_POLL_SECONDS` (default 10) | 0 when back, 255 otherwise |
-| `stop-vm` | `az vm stop` (powered off, still allocated, so it starts again quickly) on a hub node, then waits until the power state is stopped, up to `VMCTL_WAIT_SECONDS`: the `ha` tier's node stop (`uat/tests`, HA2). Hub nodes only; a sprout is refused | 0 when stopped, 255 otherwise |
+| `restart` | `az vm restart`, then waits until the power state is running (up to `VMCTL_POWER_WAIT_SECONDS`, 300) and then until the guest answers (up to `VMCTL_GUEST_WAIT_SECONDS`, default `VMCTL_WAIT_SECONDS`, else 600), polling every `VMCTL_POLL_SECONDS` (10). The guest answers when a trivial command succeeds over the tunnel (SSH or WinRM, `VMCTL_PROBE_TIMEOUT` 30 s each) or, with no tunnel, when the guest agent reports `Ready` with a time after the restart began. **Never a run-command**: in Run 2 both Windows restarts timed out with the VM running because the run-command probe never answered | 0 when back, 255 otherwise (naming the power state or the last probe error) |
+| `stop-vm` | `az vm stop` (powered off, still allocated, so it starts again quickly) on a hub node, then waits until the power state is stopped, up to `VMCTL_POWER_WAIT_SECONDS`: the `ha` tier's node stop (`uat/tests`, HA2). Hub nodes only; a sprout is refused | 0 when stopped, 255 otherwise |
 | `start-vm` | `az vm start` on a hub node, then waits as `restart` does. Hub nodes only. The workflow also runs it on every HA hub node after the tests, so a node stop that failed half way leaves no VM stopped | 0 when back, 255 otherwise |
-| `stop-sprout`, `start-sprout` | `systemctl stop|start imas-sprout` on Linux, `Stop-Service`/`Start-Service imas-sprout` on Windows (`VMCTL_SPROUT_SERVICE` overrides the name). Sprouts only; a hub is refused | the command's |
-| `run` | Runs `<command...>`, joined with spaces, as root with bash on Linux or as SYSTEM with PowerShell on Windows. Prints its stdout on stdout and its stderr on stderr, then `vmctl.sh: exit_code=N` on stderr | the command's (`N`) |
+| `stop-sprout`, `start-sprout` | `systemctl stop|start imas-sprout` on Linux, `Stop-Service`/`Start-Service imas-sprout` on Windows (`VMCTL_SPROUT_SERVICE` overrides the name), over the channel above. Sprouts only; a hub is refused | the command's |
+| `run` | Runs `<command...>`, joined with spaces, over the channel above. Prints its stdout on stdout and its stderr on stderr, then `vmctl.sh: exit_code=N` on stderr | the command's (`N`) |
 
-The command is sent base64 encoded and decoded on the VM, so quotes, `$` and
-pipes arrive intact. Its exit code comes back through a marker line the wrapper
-prints and `vmctl.sh` removes. On Windows, `N` is `$LASTEXITCODE` of the last
-native command if it is not 0, else 1 when the script raised an error, else 0.
-Azure keeps only the last 4096 bytes of each stream, and a run-command takes
-tens of seconds. Exit 2 is a usage error or an unknown VM (no Azure call is
-made); 255 means Azure could not run the command or returned no exit code.
+The command is sent base64 encoded (or on stdin) and decoded on the VM, so
+quotes, `$` and pipes arrive intact. Its exit code comes back through a
+marker line the wrapper prints and `vmctl.sh` removes. On Windows, `N` is
+`$LASTEXITCODE` of the last native command if it is not 0, else 1 when the
+script raised an error, else 0 (the same wrapper on WinRM and run-command).
+Through run-command Azure keeps only the last 4096 bytes of each stream.
+Exit 2 is a usage error or an unknown VM (no Azure call is made); 255 means
+the command could not be run or returned no exit code.
+
+Environment: `VMCTL_ACCESS` (default `$UAT_SESSION_ACCESS/access.json`,
+else `<uat.json's directory>/access/access.json`), `VMCTL_SSH_KEY`,
+`VMCTL_SSH_USER` and `VMCTL_WINRM_USER` (default the VM's `admin_user`),
+`VMCTL_WINRM_PASSWORD_FILE`, `VMCTL_STATE_DIR`, the timeouts, retries and
+waits above, `VMCTL_BACKOFF_SCALE` (1; the tests set 0), `AZ` and
+`UAT_AZ_RELOGIN` (an expired az login is renewed once and the call
+repeated). The UAT workflow sets `VMCTL_SSH_KEY` and
+`VMCTL_WINRM_PASSWORD_FILE` to the run's own credentials (never uploaded).
 
 ## Tests
 
@@ -239,7 +304,19 @@ uat.json), and for
 both OSes, the hub refusal, restart and its failures, `stop-vm` and `start-vm`
 (waiting for the power state and the guest, a VM that never stops, a failed
 `az vm stop`, the refusal of a sprout), and every node of an HA hub resolved
-by its own id. Sample input: `testdata/uat.json` (single-node) and
+by its own id; and the W8 channel: SSH (`tests/stubs/ssh` runs the command
+locally, with `tests/stubs/sudo`) with its port, user, host key alias, quoting
+and empty stdin, WinRM (`winrm_exec.py` against a stub pywinrm in
+`tests/stubs/py`: NTLM over HTTPS to the tunnel's port, the command intact,
+CLIXML stderr decoded, the shell closed), the run-command fallback for a VM
+with no tunnel entry or no credential, the per-VM lock (two calls never
+overlap, another VM is not held up, a lock held too long gives 255), the
+Conflict retry with backoff and its limit, the connection retry and no retry
+of a call that may have run, a stuck call killed at `VMCTL_CALL_TIMEOUT`, a
+VM marked dead after 3 failures failing at once without touching the
+channel, per VM, expiring and cleared by a success or a restart, and a
+restart that waits over SSH, over WinRM or for a guest agent status newer
+than the restart, never through run-command. Sample input: `testdata/uat.json` (single-node) and
 `testdata/uat-ha.json` (3 + 3 nodes); the `tofu test` in `uat/tofu` keeps
 both in the shape of the real output. shellcheck runs on every script.
 

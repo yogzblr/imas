@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -37,8 +38,12 @@ type VMCtl struct {
 	// Path is vmctl.sh; UATFile is passed as its first argument.
 	Path    string
 	UATFile string
-	// Timeout bounds one call (default 15 minutes: a Windows restart
-	// through the Azure control plane is slow).
+	// Timeout bounds one call (default 15 minutes, or
+	// $IMAS_UAT_VMCTL_TIMEOUT: a Windows restart through the Azure
+	// control plane is slow). vmctl.sh bounds each of its own channel
+	// calls far below it (VMCTL_CALL_TIMEOUT); this is the backstop. On
+	// a timeout vmctl.sh's whole process group is killed, so no az, ssh
+	// or python child it started outlives it.
 	Timeout time.Duration
 	// Exec, when set, replaces running Path: it gets vmctl.sh's arguments
 	// after the uat.json path and returns what it printed and its exit
@@ -49,9 +54,16 @@ type VMCtl struct {
 	locks map[string]*sync.Mutex
 }
 
+// EnvVMCtlTimeout overrides VMCtl's default Timeout (a Go duration).
+const EnvVMCtlTimeout = "IMAS_UAT_VMCTL_TIMEOUT"
+
 // NewVMCtl returns a VMCtl.
 func NewVMCtl(path, uatFile string) *VMCtl {
-	return &VMCtl{Path: path, UATFile: uatFile, Timeout: 15 * time.Minute, locks: map[string]*sync.Mutex{}}
+	timeout := 15 * time.Minute
+	if d, err := time.ParseDuration(os.Getenv(EnvVMCtlTimeout)); err == nil && d > 0 {
+		timeout = d
+	}
+	return &VMCtl{Path: path, UATFile: uatFile, Timeout: timeout, locks: map[string]*sync.Mutex{}}
 }
 
 func (v *VMCtl) lock(vm string) func() {
@@ -89,8 +101,10 @@ func (v *VMCtl) call(ctx context.Context, args ...string) ([]byte, int, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	// On a timeout the script is killed, but a child it started (az,
-	// ssh, sleep) can hold the output pipe open; stop waiting for it.
+	// On a timeout the script's process group is killed (a stuck az, ssh
+	// or python child with it); if something still holds the output pipe
+	// open, stop waiting for it.
+	killGroupOnCancel(cmd)
 	cmd.WaitDelay = time.Second
 	err := cmd.Run()
 	code := 0
@@ -160,7 +174,9 @@ func (r *RunResult) Value(key string) (string, bool) {
 }
 
 // Run runs a script on a VM through vmctl.sh run, as root on Linux (sh)
-// or as SYSTEM on Windows (PowerShell). The script is wrapped so that its
+// and on Windows (PowerShell) as the admin user, elevated, over the WinRM
+// tunnel, or as SYSTEM through run-command when the VM has no tunnel
+// (uat/access/README.md, "The channel"). The script is wrapped so that its
 // exit status is printed as a value; the error is set when vmctl.sh
 // failed or the wrapper's status line never came back, not when the
 // script itself exited non-zero (see ExitCode).

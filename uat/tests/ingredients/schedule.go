@@ -2,6 +2,7 @@ package ingredients
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -247,4 +248,71 @@ func Replay(t testing.TB, o *Outcome) {
 			t.Errorf("unknown outcome line %q: %s", l.Kind, l.Text)
 		}
 	}
+}
+
+// VMEstimate is how long one VM's selected jobs should take.
+type VMEstimate struct {
+	VM        string
+	Jobs      int
+	HostCalls int
+	Cooks     int
+	PerCall   time.Duration
+	Total     time.Duration
+}
+
+// String is the estimate's log line.
+func (e VMEstimate) String() string {
+	return fmt.Sprintf("%s: %d cases, %d host calls x %s + %d cooks = %s",
+		e.VM, e.Jobs, e.HostCalls, e.PerCall.Round(100*time.Millisecond), e.Cooks, e.Total.Round(time.Second))
+}
+
+// Estimate sizes the plan's selected jobs per VM from the number of host
+// calls (vmctl.sh run) and cooks each cycle makes (Cycle.Run: the setup
+// and revert scripts when the case has them, two host reads, one more on
+// tenant 1's sprout for a tenant 2 job; four cooks and the revert recipe),
+// the measured time of one host call on each VM (perCall; a VM missing
+// from it uses fallback) and an estimated time per cook. VMs come in plan
+// order.
+func (p *Plan) Estimate(selected func(caseID, name string) bool, perCall map[string]time.Duration, fallback, perCook time.Duration) []VMEstimate {
+	byVM := map[string]*VMEstimate{}
+	var order []string
+	for _, c := range p.Cases {
+		for _, j := range p.Jobs[c.ID] {
+			if j.Skip != "" || j.Sprout.VM == "" || (selected != nil && !selected(c.ID, j.Name)) {
+				continue
+			}
+			e, ok := byVM[j.Sprout.VM]
+			if !ok {
+				e = &VMEstimate{VM: j.Sprout.VM, PerCall: fallback}
+				if d, ok := perCall[j.Sprout.VM]; ok {
+					e.PerCall = d
+				}
+				byVM[j.Sprout.VM] = e
+				order = append(order, j.Sprout.VM)
+			}
+			part := c.For(j.Sprout.OS)
+			calls, cooks := 2, 4
+			if part.Setup != "" {
+				calls++
+			}
+			if part.Revert != "" {
+				calls++
+			}
+			if part.RevertRecipe != "" {
+				cooks++
+			}
+			if j.Cross != nil {
+				calls++
+			}
+			e.Jobs++
+			e.HostCalls += calls
+			e.Cooks += cooks
+			e.Total += time.Duration(calls)*e.PerCall + time.Duration(cooks)*perCook
+		}
+	}
+	out := make([]VMEstimate, 0, len(order))
+	for _, vm := range order {
+		out = append(out, *byVM[vm])
+	}
+	return out
 }

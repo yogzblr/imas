@@ -76,8 +76,10 @@ log (`<joblogdir>/<jid>.jsonl`, by the batch item's jid) through
 | `ubuntu`, `alma` | an OS's own part, laid over `linux` field by field |
 
 A part has `setup`, `recipe`, `check`, `expect_output`, `revert_recipe` and
-`revert`. Scripts are POSIX `sh` run as root on Linux, and PowerShell run as
-SYSTEM in a child `powershell.exe -File` on Windows. A script reports failure
+`revert`. Scripts are POSIX `sh` run as root on Linux, and PowerShell run
+with administrator rights in a child `powershell.exe -File` on Windows (the
+elevated admin user over the WinRM tunnel, SYSTEM through run-command;
+`uat/access/README.md`, "The channel"). A script reports failure
 with a non-zero exit status (`exit 1`; on Windows an uncaught error exits 1).
 The recipe holds only the steps under test, written literally: no `{{ }}`,
 because farmer renders recipes as templates. Placeholders, filled per case

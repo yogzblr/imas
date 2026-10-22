@@ -10,7 +10,9 @@
 # allowlist of known non-secret files (missing ones are skipped):
 #
 #   <out-dir>/report/    the test report: summary.txt, junit.xml, events.json,
-#                        build.log (uat/tests/run.sh)
+#                        build.log (uat/tests/run.sh), and every regular
+#                        file under report/diagnostics/ (uat/scripts/
+#                        diagnostics.sh, which redacts them first)
 #   <out-dir>/outputs/   run.json (this run's inputs), uat.json (tofu output
 #                        uat, no credentials), ha_node_names.json and
 #                        object_store.json (tofu outputs ha_node_names and
@@ -72,6 +74,11 @@ copy() {
   copied=$((copied + 1))
 }
 for f in "${report_files[@]}"; do copy "$f" "$out"; done
+if [ -d "$state/report/diagnostics" ] && [ ! -L "$state/report/diagnostics" ]; then
+  while IFS= read -r -d '' f; do
+    copy "${f#"$state"/}" "$out"
+  done < <(find "$state/report/diagnostics" -type f -print0)
+fi
 for f in "${output_files[@]}"; do copy "$f" "$out/outputs"; done
 
 # Patterns of things that must never be uploaded (extended regular

@@ -51,6 +51,9 @@ Tiers: `smoke`, `core` (includes the smoke scenarios), `resilience`,
 | `IMAS_UAT_VMCTL` | the `vmctl.sh` to use; else harness.json's `vmctl`; else `uat/access/vmctl.sh` |
 | `IMAS_UAT_REPORT_DIR` | where the report goes (default `$IMAS_UAT_DIR/report`) |
 | `IMAS_UAT_TIMEOUT` | `go test -timeout` (default: smoke 45m, core 4h, resilience and ha 3h, others 8h); with `UAT_SESSION_HOOK`, the budget of all the test processes together (h, m and s only, like `165m`) |
+| `IMAS_UAT_DIAG_HOOK` | optional (W8; the UAT workflow sets `uat/scripts/diagnostics.sh`): after a failed top-level test (with `UAT_SESSION_HOOK`) or package (without), `$IMAS_UAT_DIAG_HOOK kube <report>/diagnostics/<name>` collects the hubs' state, bounded by `IMAS_UAT_DIAG_SECONDS` (300); its time counts against the budget |
+| `IMAS_UAT_VMCTL_TIMEOUT` | the harness's limit on one `vmctl.sh` call (default `15m`); on it, `vmctl.sh`'s whole process group is killed. `vmctl.sh` bounds each channel call itself (`VMCTL_CALL_TIMEOUT`, `uat/access/README.md`) |
+| `IMAS_UAT_COOK_ESTIMATE` | the time one cook is estimated to take in `TestIngredients`' estimate (default `15s`) |
 | `UAT_SESSION_HOOK` | optional (W6; the UAT workflow sets `uat/access/session.sh`): each top-level test then runs in its own test process, and `$UAT_SESSION_HOOK phase "tests: <Test>"` runs before each, refreshing the Azure login and the Bastion tunnels when 15 minutes old, between tests and never during one. A failed hook stops the run, and the tests after it are reported missing. Unset (the local rig): one process per package, as before |
 | `IMAS_UAT_DMZ_KUBECONFIG` | the ha tier: the DMZ cluster's kubeconfig (the core one is `IMAS_UAT_CORE_KUBECONFIG`, below) |
 | `IMAS_UAT_DMZ_CHART`, `IMAS_UAT_CORE_CHART` | the ha tier (HA3's `helm upgrade`): the nats chart uat/hub/dmz installed, and the farmer chart uat/hub/core installed (default `<state>/core/chart/farmer-<version>.tgz`) |
@@ -68,8 +71,13 @@ FAIL   C2                     windows  2          31.0  [C2 os=windows tenant=2 
 SKIP   X5                     -        -           0.0  a plaintext cmd.run or cook can only reach a sprout through the bus ...
 ```
 
-The report directory gets `events.json` (go test -json), `summary.txt` and
-`junit.xml`. **No silent green:** the run fails when no test of the tier
+The report directory gets `events.json` (go test -json), `summary.txt`,
+`junit.xml` and `build.log` (compile errors, everything the tests printed,
+`run.sh`'s messages and the summary, in order). A JUnit failure carries
+everything its tests printed (at most 200 lines each, the first and the
+last); a line's time is the longer of go test's and the case time
+`TestIngredients` logs (`case time on this sprout`), since its parallel
+subtests only collect outcomes computed earlier and report about 0 s. **No silent green:** the run fails when no test of the tier
 ran, when a catalogue scenario of the tier neither ran nor was skipped with
 a written reason, when any skip has no reason, or when a package failed
 outside a test (a build error, `TestMain`, a timeout). Every skip is listed
@@ -227,8 +235,10 @@ as a line `__IMAS_UAT_RC=<n>`, and reads its results from lines
 `__IMAS_UAT_<KEY>=<value>`; everything else vmctl.sh prints is ignored, so
 Azure's run-command headers don't matter. Linux scripts are POSIX sh (one
 probe uses bash) and expect root; Windows scripts are PowerShell and expect
-SYSTEM, which is what `az vm run-command` gives. Calls to one VM are
-serialized. A `run` whose output has no `__IMAS_UAT_RC` line is an error that
+administrator rights: the elevated admin user over the WinRM tunnel, or
+SYSTEM through `az vm run-command` for a VM with no tunnel (W8,
+`uat/access/README.md`). Calls to one VM are serialized, in the harness and,
+across processes, by `vmctl.sh`'s per-VM lock. A `run` whose output has no `__IMAS_UAT_RC` line is an error that
 quotes vmctl.sh's output.
 
 ## For UAT.7 (the harness interface)

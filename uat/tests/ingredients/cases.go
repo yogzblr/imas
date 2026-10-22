@@ -39,8 +39,9 @@ const (
 const DefaultCookTimeout = 6 * time.Minute
 
 // Part is what a case does on one OS family or OS. Scripts are POSIX sh
-// (run as root) on Linux and PowerShell (run as SYSTEM, in a child
-// powershell.exe -File) on Windows; a script reports failure with a
+// (run as root) on Linux and PowerShell (in a child powershell.exe -File,
+// as the elevated admin user over WinRM, or SYSTEM through run-command) on
+// Windows; a script reports failure with a
 // non-zero exit status (exit N; on Windows an uncaught error exits 1).
 type Part struct {
 	// Setup prepares the host before the first cook (a source file, a

@@ -26,6 +26,9 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+# vmctl.sh's tunnel credentials (the stubs never read them).
+echo "stub key" >"$work/id_test"
+echo "stub password" >"$work/winrm_password"
 
 ok() { pass=$((pass + 1)); echo "ok   - $1"; }
 nok() { fail=$((fail + 1)); echo "FAIL - $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/       /'; }
@@ -50,7 +53,10 @@ t() { # t <args>: tunnels.sh with the stubs; sets rc, out
 }
 v() { # v <args>: vmctl.sh with the stubs; sets rc, out (stdout), err (stderr)
   local ef="$STUB_STATE/vmctl.err"
-  out=$(PATH="$stubs:$PATH" VMCTL_WAIT_SECONDS=5 VMCTL_POLL_SECONDS=0 bash "$vmctl" "$@" 2>"$ef")
+  out=$(PATH="$stubs:$PATH" PYTHONPATH="$stubs/py" VMCTL_ACCESS="${V_ACCESS:-$STUB_STATE/no-access.json}" \
+    PYTHONDONTWRITEBYTECODE=1 VMCTL_STATE_DIR="$STUB_STATE/vmctl" VMCTL_SSH_KEY="${V_KEY-$work/id_test}" \
+    VMCTL_WINRM_PASSWORD_FILE="${V_PASSWORD-$work/winrm_password}" VMCTL_BACKOFF_SCALE=0 \
+    VMCTL_WAIT_SECONDS=5 VMCTL_POWER_WAIT_SECONDS=5 VMCTL_POLL_SECONDS=0 bash "$vmctl" "$@" 2>"$ef")
   rc=$?
   err=$(cat "$ef")
 }
@@ -299,12 +305,13 @@ if [ "$rc" -eq 2 ] && [ "$(calls | wc -l)" -eq "$before" ]; then ok "vmctl: stop
 new_case vrestart
 v "$uat" restart t2-alma
 t2a_id=$(jq -r '.sprouts["t2-alma"].id' "$uat")
-if [ "$rc" -eq 0 ] && calls | grep -q -- "^az vm restart --ids $t2a_id" && calls | grep -q "vm get-instance-view --ids $t2a_id" && calls | grep -q "vm run-command invoke --ids $t2a_id"; then
-  ok "vmctl: restart restarts, checks power state and probes the guest"
+if [ "$rc" -eq 0 ] && calls | grep -q -- "^az vm restart --ids $t2a_id" && calls | grep -q "vm get-instance-view --ids $t2a_id.*PowerState" &&
+  calls | grep -q "vm get-instance-view --ids $t2a_id.*vmAgent" && ! calls | grep -q "run-command"; then
+  ok "vmctl: restart (no tunnel) waits for the power state, then the guest agent; no run-command"
 else nok "vmctl: restart (rc=$rc)" "$(calls) $err"; fi
 echo PowerState/stopped >"$STUB_STATE/power"
 v "$uat" restart uat-dmz
-if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "not back"; then ok "vmctl: restart that never comes back gives 255"; else nok "vmctl: restart timeout (rc=$rc)" "$err"; fi
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "not running after"; then ok "vmctl: restart that never comes back gives 255"; else nok "vmctl: restart timeout (rc=$rc)" "$err"; fi
 rm -f "$STUB_STATE/power"
 echo 1 >"$STUB_STATE/restart_rc"
 v "$uat" restart uat-dmz
@@ -334,7 +341,7 @@ if [ "$rc" -eq 0 ] && calls | grep -qx -- "az vm stop --ids $core3_id -o none" &
   ok "vmctl: stop-vm stops the node by its id and waits for PowerState/stopped"
 else nok "vmctl: stop-vm (rc=$rc)" "$(calls) $err"; fi
 v "$uat_ha" start-vm uat-core-3
-if [ "$rc" -eq 0 ] && calls | grep -qx -- "az vm start --ids $core3_id -o none" && calls | grep -q "vm run-command invoke --ids $core3_id" && printf '%s' "$err" | grep -q "is back"; then
+if [ "$rc" -eq 0 ] && calls | grep -qx -- "az vm start --ids $core3_id -o none" && calls | grep -q "vm get-instance-view --ids $core3_id.*vmAgent" && printf '%s' "$err" | grep -q "is back"; then
   ok "vmctl: start-vm starts the node and waits until its guest answers"
 else nok "vmctl: start-vm (rc=$rc)" "$(calls) $err"; fi
 touch "$STUB_STATE/stop_noeffect"
@@ -371,6 +378,201 @@ v "$uat" run t1-ubuntu 'echo x'
 if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q AADSTS700024; then
   ok "vmctl: without the hook an expired login fails (255) and says why"
 else nok "vmctl: expired login without hook (rc=$rc)" "$err"; fi
+
+# ------------------------------------------- vmctl.sh over the tunnels (W8)
+# access.json lists the Linux VMs' SSH ports and the Windows VMs' WinRM
+# ports; t2-alma has no entry, so it falls back to run-command.
+write_access() {
+  jq -n '{"uat-core": {host: "127.0.0.1", ssh_port: 20102, kube_port: 20103},
+          "t1-ubuntu": {host: "127.0.0.1", ssh_port: 20105},
+          "t1-alma": {host: "127.0.0.1", ssh_port: 20104},
+          "t1-win": {host: "127.0.0.1", winrm_port: 20106},
+          "t2-win": {host: "127.0.0.1", winrm_port: 20109}}' >"$STUB_STATE/access.json"
+  V_ACCESS=$STUB_STATE/access.json
+}
+
+new_case vssh
+write_access
+# shellcheck disable=SC2016 # expanded on the VM, not here
+v "$uat" run t1-ubuntu 'echo hello "$((1+2))"; echo oops >&2; exit 3'
+if [ "$rc" -eq 3 ] && [ "$out" = "hello 3" ] && printf '%s' "$err" | grep -q "^oops$" && printf '%s' "$err" | grep -q "vmctl.sh: exit_code=3"; then
+  ok "vmctl: a Linux run over the SSH tunnel returns stdout, stderr and the exit code"
+else nok "vmctl: ssh run (rc=$rc)" "out=$out err=$err"; fi
+if calls | grep -q -- "^ssh -p 20105 -i $work/id_test .*HostKeyAlias=t1-ubuntu.* imasuat@127.0.0.1 " && ! calls | grep -q "^az"; then
+  ok "vmctl: SSH goes to the tunnel's port as the admin user, by the VM's host key alias, and never to Azure"
+else nok "vmctl: ssh arguments" "$(calls)"; fi
+if printf '%s' "$err" | grep -q "t1-ubuntu: ran over ssh (127.0.0.1:20105) in"; then ok "vmctl: the channel and its time are logged"; else nok "vmctl: channel log" "$err"; fi
+v "$uat" run uat-core "printf '%s\n' \"it's\" 'a \$HOME' | tr a-z A-Z; read -r x; echo \"stdin:\${x:-none}\""
+if [ "$rc" -eq 0 ] && [ "$out" = "IT'S"$'\n'"A \$HOME"$'\n'"stdin:none" ] && calls | grep -q -- "^ssh -p 20102 "; then
+  ok "vmctl: over SSH (a hub node too) quoting holds and the command's stdin is empty"
+else nok "vmctl: ssh quoting (rc=$rc)" "$out $err"; fi
+v "$uat" stop-sprout t1-alma
+if [ "$rc" -eq 0 ] && calls | grep -qx "systemctl stop imas-sprout" && calls | grep -q -- "^ssh -p 20104 "; then
+  ok "vmctl: stop-sprout goes over SSH"
+else nok "vmctl: ssh stop-sprout (rc=$rc)" "$(calls) $err"; fi
+
+new_case vfallback
+write_access
+v "$uat" run t2-alma 'echo via-azure'
+if [ "$rc" -eq 0 ] && [ "$out" = "via-azure" ] && calls | grep -q "^az vm run-command invoke" && ! calls | grep -q "^ssh"; then
+  ok "vmctl: a VM with no tunnel entry falls back to run-command"
+else nok "vmctl: fallback (rc=$rc)" "$(calls) $err"; fi
+: >"$STUB_STATE/calls.log"
+V_KEY="" v "$uat" run t1-ubuntu 'echo no-key'
+if [ "$rc" -eq 0 ] && [ "$out" = "no-key" ] && calls | grep -q "^az vm run-command" && printf '%s' "$err" | grep -q "VMCTL_SSH_KEY is not a readable file; using run-command"; then
+  ok "vmctl: a tunnel without its key falls back to run-command, saying so"
+else nok "vmctl: no key fallback (rc=$rc)" "$(calls) $err"; fi
+
+new_case vwinrm
+write_access
+echo 7 >"$STUB_STATE/win_rc"
+v "$uat" run t1-win 'Get-Service imas-sprout; exit 7'
+if [ "$rc" -eq 7 ] && [ "$out" = "win-out" ] && printf '%s' "$err" | grep -q "^win-err" && ! calls | grep -q "^az"; then
+  ok "vmctl: a Windows run over the WinRM tunnel returns stdout, stderr (CLIXML decoded) and the exit code"
+else nok "vmctl: winrm run (rc=$rc)" "out=$out err=$err $(calls)"; fi
+if calls | grep -qx "winrm endpoint=https://127.0.0.1:20106/wsman transport=ntlm user=imasuat password=set cert=ignore" &&
+  calls | grep -qxF "winrm decoded: Get-Service imas-sprout; exit 7" && calls | grep -qx "winrm close_shell"; then
+  ok "vmctl: WinRM is HTTPS with NTLM to the tunnel's port, carries the command intact and closes its shell"
+else nok "vmctl: winrm call" "$(calls)"; fi
+rm -f "$STUB_STATE/win_rc"
+v "$uat" start-sprout t2-win
+if [ "$rc" -eq 0 ] && calls | grep -qxF "winrm decoded: Start-Service -Name 'imas-sprout' -ErrorAction Stop"; then
+  ok "vmctl: start-sprout on Windows goes over WinRM"
+else nok "vmctl: winrm start-sprout (rc=$rc)" "$(calls) $err"; fi
+touch "$STUB_STATE/winrm_open_fail"
+v "$uat" run t1-win 'hostname'
+if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^winrm endpoint')" -eq 5 ] && printf '%s' "$err" | grep -q "retry 2 of 2" &&
+  printf '%s' "$err" | grep -q "vmctl.sh: exit_code=255"; then
+  ok "vmctl: a WinRM shell that cannot open is retried (nothing ran), then gives 255"
+else nok "vmctl: winrm open failure (rc=$rc)" "$(calls) $err"; fi
+rm -f "$STUB_STATE/winrm_open_fail"
+touch "$STUB_STATE/win_no_marker"
+v "$uat" run t2-win 'hostname'
+if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^winrm decoded: hostname')" -eq 1 ]; then
+  ok "vmctl: a WinRM run with no exit code gives 255 and is not repeated"
+else nok "vmctl: winrm no marker (rc=$rc)" "$(calls) $err"; fi
+
+new_case vretry
+write_access
+echo 1 >"$STUB_STATE/ssh_preexec_fail"
+v "$uat" run t1-ubuntu 'echo second-try'
+if [ "$rc" -eq 0 ] && [ "$out" = "second-try" ] && [ "$(calls | grep -c '^ssh ')" -eq 2 ]; then
+  ok "vmctl: an SSH connection refused before the command started is retried"
+else nok "vmctl: ssh retry (rc=$rc)" "$(calls) $err"; fi
+touch "$STUB_STATE/ssh_no_marker"
+: >"$STUB_STATE/calls.log"
+v "$uat" run t1-ubuntu 'echo once'
+if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^ssh ')" -eq 1 ]; then
+  ok "vmctl: an SSH run that may have run (no exit code) is not repeated"
+else nok "vmctl: ssh no retry (rc=$rc)" "$(calls) $err"; fi
+rm -f "$STUB_STATE/ssh_no_marker"
+echo 2 >"$STUB_STATE/runcmd_conflict"
+: >"$STUB_STATE/calls.log"
+v "$uat" run t2-alma 'echo after-conflict'
+if [ "$rc" -eq 0 ] && [ "$out" = "after-conflict" ] && [ "$(calls | grep -c '^az vm run-command invoke')" -eq 3 ] &&
+  printf '%s' "$err" | grep -q "busy with an earlier command (Conflict); retry 2 of 4"; then
+  ok "vmctl: a run-command refused with Conflict is retried with backoff"
+else nok "vmctl: conflict retry (rc=$rc)" "$(calls) $err"; fi
+echo always >"$STUB_STATE/runcmd_conflict"
+: >"$STUB_STATE/calls.log"
+VMCTL_CONFLICT_RETRIES=1 v "$uat" run t2-alma 'echo never'
+if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^az vm run-command invoke')" -eq 2 ] && printf '%s' "$err" | grep -q "stayed busy (Conflict)"; then
+  ok "vmctl: a run-command still in Conflict after the retries gives 255 and says so"
+else nok "vmctl: conflict exhausted (rc=$rc)" "$(calls) $err"; fi
+
+new_case vtimeout
+write_access
+touch "$STUB_STATE/ssh_hang"
+start=$SECONDS
+VMCTL_CALL_TIMEOUT=2 v "$uat" run t1-ubuntu 'echo never'
+took=$((SECONDS - start))
+sleep 0.5
+if [ "$rc" -eq 255 ] && [ "$took" -lt 15 ] && printf '%s' "$err" | grep -q "timed out after 2s (VMCTL_CALL_TIMEOUT); killed" &&
+  ! running "$(cat "$STUB_STATE/ssh.pid")"; then
+  ok "vmctl: a stuck call is killed at VMCTL_CALL_TIMEOUT and gives 255 (took ${took}s)"
+else nok "vmctl: call timeout (rc=$rc, ${took}s)" "$err"; fi
+rm -f "$STUB_STATE/ssh_hang"
+
+new_case vdead
+write_access
+echo always >"$STUB_STATE/ssh_preexec_fail"
+for i in 1 2 3; do
+  VMCTL_CONNECT_RETRIES=0 v "$uat" run t1-alma "echo try-$i"
+done
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "t1-alma is now marked dead: 3 channel failures in a row"; then
+  ok "vmctl: the third channel failure in a row marks the VM dead"
+else nok "vmctl: dead mark (rc=$rc)" "$err"; fi
+before=$(calls | grep -c '^ssh ')
+start=$SECONDS
+v "$uat" run t1-alma 'echo fast'
+if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^ssh ')" -eq "$before" ] && [ $((SECONDS - start)) -lt 5 ] &&
+  printf '%s' "$err" | grep -q "t1-alma is marked dead after 3 channel failures in a row (last .*Connection closed by 127.0.0.1" &&
+  printf '%s' "$err" | grep -q "vmctl.sh: exit_code=255"; then
+  ok "vmctl: a dead VM fails at once, naming the last failure, without touching the channel"
+else nok "vmctl: dead fast fail (rc=$rc)" "$(calls) $err"; fi
+v "$uat" run t1-ubuntu 'echo other-vm'
+if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^ssh ')" -gt "$before" ]; then ok "vmctl: a dead mark is per VM"; else nok "vmctl: dead per VM (rc=$rc)" "$err"; fi
+rm -f "$STUB_STATE/ssh_preexec_fail"
+VMCTL_DEAD_SECONDS=0 v "$uat" run t1-alma 'echo revived'
+if [ "$rc" -eq 0 ] && [ "$out" = "revived" ] && [ ! -e "$STUB_STATE/vmctl/t1-alma.fails" ]; then
+  ok "vmctl: after VMCTL_DEAD_SECONDS one call tries again, and a success clears the mark"
+else nok "vmctl: dead expiry (rc=$rc)" "$err"; fi
+echo always >"$STUB_STATE/ssh_preexec_fail"
+for i in 1 2 3; do VMCTL_CONNECT_RETRIES=0 v "$uat" run t1-alma "echo x"; done
+rm -f "$STUB_STATE/ssh_preexec_fail"
+v "$uat" restart t1-alma
+if [ "$rc" -eq 0 ] && [ ! -e "$STUB_STATE/vmctl/t1-alma.fails" ]; then
+  ok "vmctl: a restart that comes back clears a dead mark"
+else nok "vmctl: restart clears dead (rc=$rc)" "$err"; fi
+
+new_case vlock
+write_access
+# shellcheck disable=SC2016 # expanded on the "VM"
+body='echo "start $$" >>"$STUB_STATE/order"; sleep 1; echo "end $$" >>"$STUB_STATE/order"'
+v "$uat" run t1-ubuntu "$body" &
+p1=$!
+v "$uat" run t1-ubuntu "$body" &
+p2=$!
+# shellcheck disable=SC2016 # expanded on the "VM"
+v "$uat" run t1-alma 'echo "other $$" >>"$STUB_STATE/order"' &
+p3=$!
+wait "$p1" "$p2" "$p3"
+seq=$(awk '{print $1}' "$STUB_STATE/order" | grep -v other | tr '\n' ' ')
+if [ "$seq" = "start end start end " ]; then ok "vmctl: two calls to one VM never overlap (per-VM lock)"; else nok "vmctl: lock" "$(cat "$STUB_STATE/order")"; fi
+if awk 'NR==2' "$STUB_STATE/order" | grep -q "^other"; then ok "vmctl: another VM is not held up by that lock"; else nok "vmctl: lock is per VM" "$(cat "$STUB_STATE/order")"; fi
+( flock 9; sleep 3 ) 9>>"$STUB_STATE/vmctl/t1-ubuntu.lock" &
+holder=$!
+sleep 0.5
+VMCTL_LOCK_WAIT_SECONDS=1 v "$uat" run t1-ubuntu 'echo never'
+wait "$holder"
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "held the lock of t1-ubuntu for 1s"; then
+  ok "vmctl: a lock held past VMCTL_LOCK_WAIT_SECONDS gives 255 and says so"
+else nok "vmctl: lock wait (rc=$rc)" "$err"; fi
+
+new_case vrestart_tunnel
+write_access
+v "$uat" restart t1-ubuntu
+if [ "$rc" -eq 0 ] && calls | grep -q "^az vm restart" && calls | grep -q "PowerState" && calls | grep -q -- "^ssh -p 20105 " &&
+  ! calls | grep -q "run-command" && ! calls | grep -q "vmAgent"; then
+  ok "vmctl: restart with a tunnel waits for the power state, then SSH; no run-command"
+else nok "vmctl: restart over ssh (rc=$rc)" "$(calls) $err"; fi
+v "$uat" restart t2-win
+if [ "$rc" -eq 0 ] && calls | grep -qxF "winrm decoded: exit 0" && ! calls | grep -q "run-command"; then
+  ok "vmctl: a Windows restart waits for WinRM; no run-command"
+else nok "vmctl: restart over winrm (rc=$rc)" "$(calls) $err"; fi
+touch "$STUB_STATE/winrm_open_fail"
+VMCTL_GUEST_WAIT_SECONDS=1 VMCTL_CONNECT_RETRIES=0 v "$uat" restart t1-win
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "t1-win is running; waiting for its guest" &&
+  printf '%s' "$err" | grep -q "not back after 1s: running, but its guest does not answer over winrm (last: .*could not open a WinRM shell"; then
+  ok "vmctl: a restart whose guest never answers gives 255, naming the power state and the last probe error"
+else nok "vmctl: restart guest timeout (rc=$rc)" "$err"; fi
+rm -f "$STUB_STATE/winrm_open_fail"
+new_case vrestart_agent
+echo "Ready 2000-01-01T00:00:00+00:00" >"$STUB_STATE/agent"
+v "$uat" restart t2-alma
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "guest agent 'Ready' at '2000-01-01"; then
+  ok "vmctl: a guest agent status from before the restart does not count"
+else nok "vmctl: stale agent (rc=$rc)" "$err"; fi
 
 # ------------------------------------------------------- tunnels.sh reopen
 

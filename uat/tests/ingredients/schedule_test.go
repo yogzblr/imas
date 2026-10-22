@@ -131,3 +131,29 @@ func TestRunnerNotReadyAndCancelled(t *testing.T) {
 		t.Errorf("cancelled: %q", e)
 	}
 }
+
+func TestPlanEstimate(t *testing.T) {
+	reg := NewRegistry([]Method{{Ingredient: "file", Method: "content", GOOS: []string{GOOSLinux, GOOSWindows}}}, nil)
+	content := mustCase(t, strings.Replace(cycleCase, "os: [", "tenant2: true\nos: [", 1))
+	p := BuildPlan(reg, []*Case{content}, []harness.Sprout{t1Ubuntu, t1Win, t2Ubuntu})
+	perCall := map[string]time.Duration{"t1-ubuntu": 2 * time.Second, t1Win.VM: 3 * time.Second}
+	got := p.Estimate(nil, perCall, time.Minute, 10*time.Second)
+	want := []VMEstimate{
+		// setup, two reads and revert; four cooks.
+		{VM: "t1-ubuntu", Jobs: 1, HostCalls: 4, Cooks: 4, PerCall: 2 * time.Second, Total: 48 * time.Second},
+		// Plus the cross check on tenant 1's sprout; not measured: the fallback.
+		{VM: "t2-ubuntu", Jobs: 1, HostCalls: 5, Cooks: 4, PerCall: time.Minute, Total: 340 * time.Second},
+		// Windows has no setup or revert script.
+		{VM: t1Win.VM, Jobs: 1, HostCalls: 2, Cooks: 4, PerCall: 3 * time.Second, Total: 46 * time.Second},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("estimate\n got %v\nwant %v", got, want)
+	}
+	if s := got[0].String(); s != "t1-ubuntu: 1 cases, 4 host calls x 2s + 4 cooks = 48s" {
+		t.Errorf("String() = %q", s)
+	}
+	none := p.Estimate(func(string, string) bool { return false }, perCall, time.Minute, 10*time.Second)
+	if len(none) != 0 {
+		t.Errorf("nothing selected: %v", none)
+	}
+}

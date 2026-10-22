@@ -45,12 +45,12 @@ func run(t *testing.T, name string, args ...string) {
 }
 
 func TestAccessScripts(t *testing.T) {
-	need(t, "bash", "jq", "python3", "base64", "timeout", "setsid", "pgrep")
+	need(t, "bash", "jq", "python3", "base64", "timeout", "setsid", "pgrep", "flock")
 	run(t, "bash", "tests/access_test.sh")
 }
 
 func TestShellcheck(t *testing.T) {
 	need(t, "shellcheck")
 	run(t, "shellcheck", "tunnels.sh", "vmctl.sh", "az-relogin.sh", "session.sh", "tests/access_test.sh", "tests/stubs/az", "tests/stubs/systemctl",
-		"tests/stubs/ssh-keyscan", "tests/stubs/curl")
+		"tests/stubs/ssh-keyscan", "tests/stubs/curl", "tests/stubs/ssh", "tests/stubs/sudo")
 }

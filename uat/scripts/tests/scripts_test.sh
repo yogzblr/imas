@@ -339,13 +339,18 @@ fake_nkey SU >"$s/hub/core/sensitive/seeds/sys-user.nk"
 echo 'k_1.secret' >"$s/enroll/keys/t1-ubuntu.key"
 echo '{"t1-ubuntu":{"host":"127.0.0.1"}}' >"$s/access/access.json"
 ln -s "$s/secrets/ssh_key" "$s/enroll/tenants.json"
+mkdir -p "$s/report/diagnostics/final/core/pods"
+echo "== get pods" >"$s/report/diagnostics/final/core/pods.txt"
+echo "== describe" >"$s/report/diagnostics/final/core/pods/imas-uat.rustfs-0.txt"
+ln -s "$s/secrets/ssh_key" "$s/report/diagnostics/final/core/linked.txt"
 run collect-artifacts.sh "$s" "$o"
 check "collect succeeds on a run's state" test "$rc" -eq 0
 listing=$(cd "$o" && find . -type f | sort)
 expected=$(printf '%s\n' ./outputs/dmz/dmz.json ./outputs/enroll/keys.json ./outputs/enroll/sprouts.json \
   ./outputs/hub/core/out/core.json ./outputs/k0s/endpoints.json ./outputs/k0s/k0sctl-dmz.yaml ./outputs/k0s/uat-ca.crt \
-  ./outputs/ha_node_names.json ./outputs/object_store.json ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt | sort)
-check "exactly the allowlisted, present, regular files are copied" test "$listing" = "$expected"
+  ./outputs/ha_node_names.json ./outputs/object_store.json ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt \
+  ./report/diagnostics/final/core/pods.txt ./report/diagnostics/final/core/pods/imas-uat.rustfs-0.txt | sort)
+check "exactly the allowlisted, present, regular files (and the diagnostics, no symlink) are copied" test "$listing" = "$expected"
 [ "$listing" = "$expected" ] || diff <(echo "$expected") <(echo "$listing")
 check "no private key, kubeconfig, unseal key, seed or enrolment key in the output" \
   test -z "$(grep -rlE 'PRIVATE KEY|client-key-data|unseal|SUAAAA|k_1\.secret|bW9jay1henVyZS1rZXk' "$o")"
@@ -369,8 +374,62 @@ leak_case "NKey seed" uat.json outputs/uat.json "{\"x\":\"$(fake_nkey SO)\"}"
 leak_case "private key" k0s/uat-ca.crt outputs/k0s/uat-ca.crt "$(fake_pem "EC ")"
 leak_case "root token" dmz/dmz.json outputs/dmz/dmz.json '{"root_token": "placeholder"}'
 leak_case "kubeconfig credential" k0s/k0sctl-core.yaml outputs/k0s/k0sctl-core.yaml 'client-key-data: QUJD'
+leak_case "JWT" report/diagnostics/final/core/pods/x.txt report/diagnostics/final/core/pods/x.txt "AUTH: Bearer $(fake_jwt)"
 run collect-artifacts.sh /nonexistent "$work/x"
 check "a missing state directory is a usage error" test "$rc" -eq 2
+
+###############################################################################
+echo "# diagnostics.sh"
+new_state diag
+access_uat="$scripts/../access/testdata/uat.json"
+cat >"$STUB_STATE/vmctl" <<'VMCTL'
+#!/usr/bin/env bash
+echo "vmctl $2 $3" >>"$STUB_STATE/calls.log"
+printf '%s\n' "$4" >"$STUB_STATE/vmctl-$3.cmd"
+echo "imas-sprout.service - active (running); token=stub-value-3"
+echo "vmctl.sh: exit_code=0" >&2
+VMCTL
+chmod +x "$STUB_STATE/vmctl"
+echo kc >"$STUB_STATE/core.kubeconfig"
+d="$STUB_STATE/out"
+DIAG_KUBECONFIGS="core=$STUB_STATE/core.kubeconfig:dmz=$STUB_STATE/missing.kubeconfig" run diagnostics.sh kube "$d"
+check "kube: exits 0" test "$rc" -eq 0
+for f in nodes pods jobs events top endpoints; do
+  check "kube: core/$f.txt is written" test -s "$d/core/$f.txt"
+done
+check "kube: a hub without a kubeconfig says so and the rest goes on" grep -q "no kubeconfig at" "$d/dmz/error.txt"
+described=$(cd "$d/core/pods" && find . -type f | sed 's|^\./||' | sort | tr '\n' ' ')
+check "kube: the RustFS pod, the failed Job's pod and the restarting pod are described, the healthy and finished ones not" \
+  test "$described" = "imas-uat.imas-uat-farmer-7d9.txt imas-uat.imas-uat-log-retention-1-abcde.txt imas-uat.imas-uat-rustfs-0.txt "
+out=$(cat "$d/core/pods/imas-uat.imas-uat-rustfs-0.txt")
+check "kube: describe, logs and logs --previous for each" \
+  test -n "$(grep '^== describe pod' <<<"$out")" -a -n "$(grep 'connection refused' <<<"$out")" -a -n "$(grep -A2 'logs --previous' <<<"$out" | grep 'exited 1')"
+check "kube: the RustFS endpoints are listed" grep -q "imas-uat-rustfs" "$d/core/endpoints.txt"
+check "kube: top nodes and pods" test "$(grep -c '^== top' "$d/core/top.txt")" -eq 2
+check "kube: secret-looking values are redacted" test -z "$(grep -rE 'stub-value|eyJstub' "$d")"
+check "kube: ... and say so" grep -q "RUSTFS_SECRET_KEY:  \[redacted\]" "$d/core/pods/imas-uat.imas-uat-rustfs-0.txt"
+check "kube: every kubectl call is bounded by --request-timeout" test -z "$(grep '^kubectl' "$STUB_STATE/calls.log" | grep -v -- '--request-timeout=30s')"
+check "kube: no sprout or Azure call" test -z "$(grep -E '^(vmctl|az) ' "$STUB_STATE/calls.log")"
+
+new_state diag-full
+cp "$work/diag/vmctl" "$STUB_STATE/vmctl"
+echo kc >"$STUB_STATE/core.kubeconfig"
+d="$STUB_STATE/out"
+DIAG_KUBECONFIGS="core=$STUB_STATE/core.kubeconfig" DIAG_UAT="$access_uat" DIAG_VMCTL="$STUB_STATE/vmctl" run diagnostics.sh full "$d"
+check "full: exits 0" test "$rc" -eq 0
+check "full: one sprout log file per sprout" test "$(find "$d/sprouts" -type f | wc -l)" -eq 6
+check "full: Linux sprouts get journalctl -u imas-sprout" grep -q "journalctl -u 'imas-sprout'" "$STUB_STATE/vmctl-t1-alma.cmd"
+check "full: Windows sprouts get sprout.log and sprout-crash.log" grep -q 'sprout-crash.log' "$STUB_STATE/vmctl-t2-win.cmd"
+check "full: the sprout logs are redacted too" test -z "$(grep -r 'stub-value-3' "$d")"
+check "full: az vm run-command list for every VM, hubs too" test "$(grep -c '^az vm run-command list --resource-group imas-uat-abc123 --vm-name' "$STUB_STATE/calls.log")" -eq 8
+check "full: the run-command extension state from the instance view" grep -q "execution is in progress" "$d/azure/t1-win.json"
+new_state diag-down
+touch "$STUB_STATE/kubectl_fail"
+echo kc >"$STUB_STATE/core.kubeconfig"
+DIAG_KUBECONFIGS="core=$STUB_STATE/core.kubeconfig" run diagnostics.sh kube "$STUB_STATE/out"
+check "a hub that does not answer: still exit 0, the failure noted" test "$rc" -eq 0 -a -n "$(grep 'exited 1' "$STUB_STATE/out/core/pods.txt")"
+run diagnostics.sh bogus "$STUB_STATE/out"
+check "an unknown mode is a usage error" test "$rc" -eq 2
 
 ###############################################################################
 echo "# verify-teardown.sh"
