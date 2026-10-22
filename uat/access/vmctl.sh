@@ -143,8 +143,10 @@ for n in "$wait_seconds" "$power_wait" "$guest_wait" "$poll_seconds" "$call_time
   "$lock_wait" "$conflict_retries" "$connect_retries" "$dead_after" "$dead_seconds" "$backoff_scale"; do
   [[ "$n" =~ ^[0-9]+$ ]] || { log "the VMCTL_* timeouts, waits and counts must be whole numbers (got '$n')"; exit 2; }
 done
-[ "$call_timeout" -gt 0 ] && [ "$probe_timeout" -gt 0 ] && [ "$az_timeout" -gt 0 ] ||
-  { log "VMCTL_CALL_TIMEOUT, VMCTL_PROBE_TIMEOUT and VMCTL_AZ_TIMEOUT must be above 0"; exit 2; }
+if [ "$call_timeout" -eq 0 ] || [ "$probe_timeout" -eq 0 ] || [ "$az_timeout" -eq 0 ]; then
+  log "VMCTL_CALL_TIMEOUT, VMCTL_PROBE_TIMEOUT and VMCTL_AZ_TIMEOUT must be above 0"
+  exit 2
+fi
 [ -r "$uat" ] || { log "cannot read $uat"; exit 2; }
 for tool in jq timeout flock; do
   command -v "$tool" >/dev/null 2>&1 || { log "$tool is not on PATH"; exit 2; }
