@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	nft "github.com/google/nftables"
+	"github.com/google/nftables/userdata"
 )
 
 func mustRuleSpec(t *testing.T, params map[string]interface{}) ruleSpec {
@@ -208,5 +209,100 @@ func TestRulePresentReject(t *testing.T) {
 	}
 	if len(exprs) == 0 {
 		t.Fatal("expected at least the reject expr")
+	}
+}
+
+// TestRuleCommentIsNULTerminated: nft shows a rule's comment only when it
+// ends in NUL, as the nft CLI writes it. Without it, a rule this
+// ingredient added was invisible to `nft list` by name (UAT
+// I.firewall.rule_present).
+func TestRuleCommentIsNULTerminated(t *testing.T) {
+	conn := newFakeConn()
+	table := &nft.Table{Name: "filter", Family: nft.TableFamilyINet}
+	chain := &nft.Chain{Name: "input", Table: table}
+	conn.AddTable(table)
+	conn.AddChain(chain)
+	spec := mustRuleSpec(t, map[string]interface{}{
+		"name": "uat-rule", "table": "filter", "chain": "input",
+		"protocol": "tcp", "dport": "65000", "action": "accept",
+	})
+	if _, err := rulePresent(conn, spec, false); err != nil {
+		t.Fatalf("rulePresent: %v", err)
+	}
+	rules, _ := conn.GetRules(table, chain)
+	if len(rules) != 1 {
+		t.Fatalf("want 1 rule, got %d", len(rules))
+	}
+	raw := userdata.Get(rules[0].UserData, userdata.TypeComment)
+	if string(raw) != "uat-rule\x00" {
+		t.Fatalf("comment is %q, want %q", raw, "uat-rule\x00")
+	}
+}
+
+// TestRulePresentRewritesUnterminatedComment: a rule an earlier sprout
+// wrote without the NUL is rewritten once, then left alone.
+func TestRulePresentRewritesUnterminatedComment(t *testing.T) {
+	conn := newFakeConn()
+	table := &nft.Table{Name: "filter", Family: nft.TableFamilyINet}
+	chain := &nft.Chain{Name: "input", Table: table}
+	conn.AddTable(table)
+	conn.AddChain(chain)
+	spec := mustRuleSpec(t, map[string]interface{}{
+		"name": "uat-rule", "table": "filter", "chain": "input",
+		"protocol": "tcp", "dport": "65000", "action": "accept",
+	})
+	exprs, err := buildExprs(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, Exprs: exprs,
+		UserData: userdata.Append(nil, userdata.TypeComment, []byte("uat-rule"))})
+
+	res, err := rulePresent(conn, spec, false)
+	if err != nil || !res.Changed {
+		t.Fatalf("first run: %+v, %v; want the rule rewritten", res, err)
+	}
+	res, err = rulePresent(conn, spec, false)
+	if err != nil || res.Changed {
+		t.Fatalf("second run: %+v, %v; want no change", res, err)
+	}
+	rules, _ := conn.GetRules(table, chain)
+	if len(rules) != 1 || !commentTerminated(rules[0]) {
+		t.Fatalf("want one rule with a terminated comment, got %d", len(rules))
+	}
+}
+
+// TestRuleAbsentRemovesEveryRuleOfTheName: nftables doesn't keep comments
+// unique. Removing only the first left the name present, so every run
+// removed another (UAT I.firewall.rule_absent's second cook).
+func TestRuleAbsentRemovesEveryRuleOfTheName(t *testing.T) {
+	conn := newFakeConn()
+	table := &nft.Table{Name: "filter", Family: nft.TableFamilyINet}
+	chain := &nft.Chain{Name: "input", Table: table}
+	conn.AddTable(table)
+	conn.AddChain(chain)
+	for i := 0; i < 2; i++ {
+		conn.AddRule(&nft.Rule{Table: table, Chain: chain, UserData: ruleUserData("dup")})
+	}
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, UserData: ruleUserData("other")})
+	spec, err := parseRuleSpec(map[string]interface{}{"name": "dup", "table": "filter", "chain": "input"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := ruleAbsent(conn, spec, false)
+	if err != nil || !res.Changed {
+		t.Fatalf("first run: %+v, %v; want a change", res, err)
+	}
+	res, err = ruleAbsent(conn, spec, false)
+	if err != nil || res.Changed {
+		t.Fatalf("second run: %+v, %v; want no change", res, err)
+	}
+	rules, _ := conn.GetRules(table, chain)
+	if len(rules) != 1 {
+		t.Fatalf("want only the other rule left, got %d rules", len(rules))
+	}
+	if c, _ := ruleComment(rules[0]); c != "other" {
+		t.Fatalf("left %q, want other", c)
 	}
 }
