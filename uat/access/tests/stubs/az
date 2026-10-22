@@ -93,6 +93,11 @@ case "$1 $2" in
       exit 1
     fi
     [ -f "$STUB_STATE/runcmd_fail" ] && { echo "ERROR: stub run-command failure" >&2; exit 1; }
+    # runcmd_hang: never answers and ignores TERM, so timeout must KILL it.
+    if [ -f "$STUB_STATE/runcmd_hang" ]; then
+      trap '' TERM
+      exec sleep 30
+    fi
     # runcmd_conflict: this many calls are refused as while an earlier
     # run-command still runs ("always": every call).
     if [ -f "$STUB_STATE/runcmd_conflict" ]; then

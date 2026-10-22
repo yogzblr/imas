@@ -492,6 +492,14 @@ if [ "$rc" -eq 255 ] && [ "$took" -lt 15 ] && printf '%s' "$err" | grep -q "time
   ok "vmctl: a stuck call is killed at VMCTL_CALL_TIMEOUT and gives 255 (took ${took}s)"
 else nok "vmctl: call timeout (rc=$rc, ${took}s)" "$err"; fi
 rm -f "$STUB_STATE/ssh_hang"
+touch "$STUB_STATE/runcmd_hang"
+start=$SECONDS
+VMCTL_CALL_TIMEOUT=1 v "$uat" run t2-alma 'echo never'
+took=$((SECONDS - start))
+if [ "$rc" -eq 255 ] && [ "$took" -lt 25 ] && printf '%s' "$err" | grep -q "az vm run-command timed out after 1s"; then
+  ok "vmctl: an az that ignores TERM is killed and still reported as a timeout (took ${took}s)"
+else nok "vmctl: az killed after TERM (rc=$rc, ${took}s)" "$err"; fi
+rm -f "$STUB_STATE/runcmd_hang"
 
 new_case vdead
 write_access

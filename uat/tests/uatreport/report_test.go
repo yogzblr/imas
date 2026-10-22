@@ -538,4 +538,9 @@ func TestOutputOfIsBounded(t *testing.T) {
 	if len(got) != maxOutputLines+2 || !strings.Contains(strings.Join(got, "\n"), "800 lines left out") {
 		t.Errorf("%d lines: %v", len(got), got[:3])
 	}
+	long := &node{name: "TestLong", output: []string{strings.Repeat("y", 5<<20)}}
+	got = outputOf(long)
+	if len(got) != 2 || len(got[1]) > maxLineBytes+64 || !strings.HasSuffix(got[1], "bytes left out)") {
+		t.Errorf("a 5 MiB line must be cut to %d bytes: %d lines, %d bytes", maxLineBytes, len(got), len(got[len(got)-1]))
+	}
 }

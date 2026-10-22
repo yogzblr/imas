@@ -316,13 +316,23 @@ func elapsedOf(n *node) float64 {
 	return el
 }
 
-// maxOutputLines bounds the output one failed test adds to the JUnit file.
-const maxOutputLines = 200
+// maxOutputLines and maxLineBytes bound the output one failed test adds
+// to the JUnit file: at most 200 lines of at most 2000 bytes each.
+const (
+	maxOutputLines = 200
+	maxLineBytes   = 2000
+)
 
 // outputOf is what a failed test printed, for the JUnit failure body: its
-// first lines and its last, when it printed more than maxOutputLines.
+// first lines and its last, when it printed more than maxOutputLines, each
+// cut at maxLineBytes.
 func outputOf(n *node) []string {
 	lines := meaningful(n)
+	for i, l := range lines {
+		if len(l) > maxLineBytes {
+			lines[i] = strings.ToValidUTF8(l[:maxLineBytes], "") + fmt.Sprintf("... (%d bytes left out)", len(l)-maxLineBytes)
+		}
+	}
 	if len(lines) > maxOutputLines {
 		head := lines[:maxOutputLines/4]
 		tail := lines[len(lines)-3*maxOutputLines/4:]

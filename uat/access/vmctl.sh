@@ -42,6 +42,8 @@
 #               error, else 0. Through run-command Azure keeps only the last
 #               4096 bytes of each stream.
 #
+# Every timeout here runs with --foreground, so it stays in vmctl.sh's process
+# group and the harness's group kill reaches it and its child.
 # Every call to one VM holds that VM's lock (flock, in VMCTL_STATE_DIR), so
 # two calls never overlap on a VM, across processes too. Each channel call
 # has its own timeout (VMCTL_CALL_TIMEOUT) and is killed when it runs over.
@@ -283,19 +285,23 @@ backoff() { sleep $(($1 * backoff_scale)); }
 az_err_file=$(mktemp)
 trap 'rm -f "$az_err_file"' EXIT
 az_run() {
-  local secs=$1 rc=0
+  local secs=$1 rc=0 started=$SECONDS
   shift
-  timeout -k 10 "$secs" "$AZ" "$@" 2>"$az_err_file" || rc=$?
+  timeout --foreground -k 10 "$secs" "$AZ" "$@" 2>"$az_err_file" || rc=$?
   if [ "$rc" -ne 0 ] && [ -n "${UAT_AZ_RELOGIN:-}" ] && grep -q AADSTS700024 "$az_err_file"; then
     log "the Azure login expired; logging in again"
     if "$UAT_AZ_RELOGIN" >&2; then
       rc=0
-      timeout -k 10 "$secs" "$AZ" "$@" 2>"$az_err_file" || rc=$?
+      timeout --foreground -k 10 "$secs" "$AZ" "$@" 2>"$az_err_file" || rc=$?
     else
       log "logging in again failed"
     fi
   fi
-  [ "$rc" -ne 124 ] || echo "az $1 $2 timed out after ${secs}s" >>"$az_err_file"
+  # 124: timed out; 137: timed out and killed after ignoring TERM (or killed
+  # otherwise, hence the elapsed time check).
+  if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ $((SECONDS - started)) -ge "$secs" ]; }; then
+    echo "az $1 $2 timed out after ${secs}s" >>"$az_err_file"
+  fi
   cat "$az_err_file" >&2
   return "$rc"
 }
@@ -384,7 +390,7 @@ run_ssh() {
   # /dev/null (as through run-command); the marker comes from the login
   # shell after it.
   # shellcheck disable=SC2016 # expanded on the VM
-  remote_out=$(printf '%s' "$script" | timeout -k 5 "$secs" ssh -p "$tunnel_port" -i "$VMCTL_SSH_KEY" \
+  remote_out=$(printf '%s' "$script" | timeout --foreground -k 5 "$secs" ssh -p "$tunnel_port" -i "$VMCTL_SSH_KEY" \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$state_dir/known_hosts" -o HostKeyAlias="$vm" \
     -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR \
@@ -407,7 +413,7 @@ run_winrm() {
   local script=$1 secs=$2 errf b64 rc=0
   errf=$(mktemp)
   b64=$(printf '%s' "$script" | base64 | tr -d '\n')
-  remote_out=$(ps_wrapper "$b64" | timeout -k 5 "$secs" python3 "$here/winrm_exec.py" \
+  remote_out=$(ps_wrapper "$b64" | timeout --foreground -k 5 "$secs" python3 "$here/winrm_exec.py" \
     --host "$tunnel_host" --port "$tunnel_port" --user "$winrm_user" \
     --password-file "$VMCTL_WINRM_PASSWORD_FILE" 2>"$errf") || rc=$?
   remote_out=$(printf '%s' "$remote_out" | tr -d '\r')

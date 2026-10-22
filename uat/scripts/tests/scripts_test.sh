@@ -374,6 +374,7 @@ leak_case "NKey seed" uat.json outputs/uat.json "{\"x\":\"$(fake_nkey SO)\"}"
 leak_case "private key" k0s/uat-ca.crt outputs/k0s/uat-ca.crt "$(fake_pem "EC ")"
 leak_case "root token" dmz/dmz.json outputs/dmz/dmz.json '{"root_token": "placeholder"}'
 leak_case "kubeconfig credential" k0s/k0sctl-core.yaml outputs/k0s/k0sctl-core.yaml 'client-key-data: QUJD'
+leak_case "Bearer credential" report/diagnostics/final/core/pods/y.txt report/diagnostics/final/core/pods/y.txt "Authorization: Bearer $(rep Q 24)"
 leak_case "JWT" report/diagnostics/final/core/pods/x.txt report/diagnostics/final/core/pods/x.txt "AUTH: Bearer $(fake_jwt)"
 run collect-artifacts.sh /nonexistent "$work/x"
 check "a missing state directory is a usage error" test "$rc" -eq 2
@@ -406,7 +407,7 @@ check "kube: describe, logs and logs --previous for each" \
   test -n "$(grep '^== describe pod' <<<"$out")" -a -n "$(grep 'connection refused' <<<"$out")" -a -n "$(grep -A2 'logs --previous' <<<"$out" | grep 'exited 1')"
 check "kube: the RustFS endpoints are listed" grep -q "imas-uat-rustfs" "$d/core/endpoints.txt"
 check "kube: top nodes and pods" test "$(grep -c '^== top' "$d/core/top.txt")" -eq 2
-check "kube: secret-looking values are redacted" test -z "$(grep -rE 'stub-value|eyJstub' "$d")"
+check "kube: secret-looking values are redacted (opaque Bearer credentials too)" test -z "$(grep -rE 'stub-value|eyJstub|opaqueStubValue' "$d")"
 check "kube: ... and say so" grep -q "RUSTFS_SECRET_KEY:  \[redacted\]" "$d/core/pods/imas-uat.imas-uat-rustfs-0.txt"
 check "kube: every kubectl call is bounded by --request-timeout" test -z "$(grep '^kubectl' "$STUB_STATE/calls.log" | grep -v -- '--request-timeout=30s')"
 check "kube: no sprout or Azure call" test -z "$(grep -E '^(vmctl|az) ' "$STUB_STATE/calls.log")"

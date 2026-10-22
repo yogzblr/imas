@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stub kubectl for uat/scripts/tests/scripts_test.sh (diagnostics.sh). Logs
 # its arguments; answers like a hub with a RustFS pod, a failed Job's pod, a
-# restarting pod and a healthy one. kubectl_fail in $STUB_STATE: every call
+# restarting pod and a healthy one. The failed Job's pod is Running and
+# ready, so only the failed Job selects it. kubectl_fail in $STUB_STATE: every call
 # fails.
 set -u
 echo "kubectl $*" >>"$STUB_STATE/calls.log"
@@ -15,7 +16,7 @@ pod() { # pod NS NAME PHASE READY RESTARTS [JOB]
 case "$args" in
   *" get pods -A -o json "*)
     { pod imas-uat imas-uat-rustfs-0 Running true 0
-      pod imas-uat imas-uat-log-retention-1-abcde Failed false 0 imas-uat-log-retention-1
+      pod imas-uat imas-uat-log-retention-1-abcde Running true 0 imas-uat-log-retention-1
       pod imas-uat imas-uat-farmer-7d9 Running false 4
       pod imas-uat imas-uat-saasapi-5c8 Running true 0
       pod imas-uat imas-uat-done-1-xyz Succeeded false 0 imas-uat-done-1; } | jq -s '{items: .}'
@@ -37,6 +38,7 @@ case "$args" in
     ;;
   *" logs "*)
     echo "2026-10-22T03:13:00Z dial tcp 10.99.61.204:9000: connect: connection refused"
+    echo "2026-10-22T03:13:01Z GET /v1/x Authorization: Bearer opaqueStubValue4 404"
     ;;
   *" get svc,endpoints -A -o wide "*)
     printf 'NAMESPACE NAME ENDPOINTS\nimas-uat endpoints/imas-uat-rustfs <none>\n'
