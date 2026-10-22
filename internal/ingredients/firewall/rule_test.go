@@ -306,3 +306,43 @@ func TestRuleAbsentRemovesEveryRuleOfTheName(t *testing.T) {
 		t.Fatalf("left %q, want other", c)
 	}
 }
+
+// TestRulePresentRepairKeepsTheRulesPlace: repairing a rule (an old
+// unterminated comment, or drifted expressions) must not move it behind
+// the rules that followed it, such as a catch-all drop.
+func TestRulePresentRepairKeepsTheRulesPlace(t *testing.T) {
+	conn := newFakeConn()
+	table := &nft.Table{Name: "filter", Family: nft.TableFamilyINet}
+	chain := &nft.Chain{Name: "input", Table: table}
+	conn.AddTable(table)
+	conn.AddChain(chain)
+	spec := mustRuleSpec(t, map[string]interface{}{
+		"name": "allow-ssh", "table": "filter", "chain": "input",
+		"protocol": "tcp", "dport": "22", "action": "accept",
+	})
+	exprs, err := buildExprs(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, Exprs: exprs,
+		UserData: userdata.Append(nil, userdata.TypeComment, []byte("allow-ssh"))})
+	conn.AddRule(&nft.Rule{Table: table, Chain: chain, UserData: ruleUserData("drop-all")})
+
+	for _, s := range []ruleSpec{spec, mustRuleSpec(t, map[string]interface{}{
+		"name": "allow-ssh", "table": "filter", "chain": "input",
+		"protocol": "tcp", "dport": "2222", "action": "accept",
+	})} {
+		if res, err := rulePresent(conn, s, false); err != nil || !res.Changed {
+			t.Fatalf("repair: %+v, %v; want a change", res, err)
+		}
+		rules, _ := conn.GetRules(table, chain)
+		var names []string
+		for _, r := range rules {
+			c, _ := ruleComment(r)
+			names = append(names, c)
+		}
+		if len(names) != 2 || names[0] != "allow-ssh" || names[1] != "drop-all" {
+			t.Fatalf("rules in order %v, want [allow-ssh drop-all]", names)
+		}
+	}
+}

@@ -108,6 +108,19 @@ func (f *fakeConn) InsertRule(r *nft.Rule) *nft.Rule {
 	return r
 }
 
+// ReplaceRule replaces the rule with r's handle in place, as the kernel
+// does for a replace by handle.
+func (f *fakeConn) ReplaceRule(r *nft.Rule) *nft.Rule {
+	key := ruleKey(r.Table.Name, r.Chain.Name)
+	for i, existing := range f.rules[key] {
+		if existing.Handle == r.Handle {
+			f.rules[key][i] = r
+			return r
+		}
+	}
+	return r
+}
+
 func (f *fakeConn) DelRule(r *nft.Rule) error {
 	if f.delRuleErr != nil {
 		return f.delRuleErr

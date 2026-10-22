@@ -338,21 +338,29 @@ func rulePresent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) 
 		}}, nil
 	}
 
-	if existing != nil {
-		if err := conn.DelRule(existing); err != nil {
-			return cook.Result{Failed: true}, fmt.Errorf("replacing rule %s: %w", spec.name, err)
-		}
-	}
 	newRule := &nft.Rule{
 		Table:    table,
 		Chain:    chain,
 		Exprs:    wantExprs,
 		UserData: ruleUserData(spec.name),
 	}
-	if spec.hasPosition {
+	switch {
+	case existing != nil && !spec.hasPosition:
+		// Replace it where it is: deleting and appending would move it to
+		// the end of the chain, behind any drop rule that followed it.
+		newRule.Handle = existing.Handle
+		conn.ReplaceRule(newRule)
+	case existing != nil:
+		// position asks for a place of its own: delete, then insert there.
+		if err := conn.DelRule(existing); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("replacing rule %s: %w", spec.name, err)
+		}
 		newRule.Position = spec.position
 		conn.InsertRule(newRule)
-	} else {
+	case spec.hasPosition:
+		newRule.Position = spec.position
+		conn.InsertRule(newRule)
+	default:
 		conn.AddRule(newRule)
 	}
 	if err := conn.Flush(); err != nil {
