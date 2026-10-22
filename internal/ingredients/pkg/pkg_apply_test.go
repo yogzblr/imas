@@ -1351,3 +1351,66 @@ func TestParseNonStringName(t *testing.T) {
 		t.Error("expected error for non-string name")
 	}
 }
+
+// TestKeyManagedURLIsIdempotent mirrors UAT I.pkg.key_managed: a key
+// given as a URL is listed by rpm as gpg-pubkey-<id>-<date>, never by the
+// URL, so every run used to import it again and report "added key".
+func TestKeyManagedURLIsIdempotent(t *testing.T) {
+	const url = "https://download.docker.com/linux/ubuntu/gpg"
+	mock := newMock()
+	mock.name = "dnf"
+	mock.addKeyAs = "gpg-pubkey-621e9f35-58adea78"
+	restore := withManager(mock)
+	defer restore()
+
+	p := Pkg{name: url, method: "key_managed", properties: map[string]interface{}{"name": url}}
+	result, err := p.Apply(context.Background())
+	if err != nil || !result.Changed {
+		t.Fatalf("first run: %+v, %v; want a change", result, err)
+	}
+	result, err = p.Apply(context.Background())
+	if err != nil || result.Changed {
+		t.Fatalf("second run: %+v, %v; want no change", result, err)
+	}
+}
+
+// TestKeyManagedAptURLKeyring: apt keeps a URL's key in
+// /etc/apt/keyrings/<base>.gpg; once that is listed the key is present and
+// nothing is fetched (gpg --dearmor would refuse to overwrite it).
+func TestKeyManagedAptURLKeyring(t *testing.T) {
+	const url = "https://download.docker.com/linux/ubuntu/gpg"
+	mock := newMock()
+	mock.name = "apt"
+	mock.keys = []string{"/etc/apt/keyrings/gpg.gpg"}
+	restore := withManager(mock)
+	defer restore()
+
+	p := Pkg{name: url, method: "key_managed", properties: map[string]interface{}{"name": url}}
+	result, err := p.Apply(context.Background())
+	if err != nil || result.Changed {
+		t.Fatalf("%+v, %v; want no change", result, err)
+	}
+	if mock.addKeyCalled != "" {
+		t.Errorf("AddKey called with %q for a key already in the keyring", mock.addKeyCalled)
+	}
+}
+
+func TestKeyListingName(t *testing.T) {
+	apt := newMock()
+	apt.name = "apt"
+	dnf := newMock()
+	dnf.name = "dnf"
+	for _, tt := range []struct {
+		mgr       *mockManager
+		key, want string
+	}{
+		{apt, "https://download.docker.com/linux/ubuntu/gpg", "/etc/apt/keyrings/gpg.gpg"},
+		{apt, "https://example.com/keys/repo.asc", "/etc/apt/keyrings/repo.gpg"},
+		{apt, "ABCD1234", "ABCD1234"},
+		{dnf, "https://example.com/RPM-GPG-KEY", "https://example.com/RPM-GPG-KEY"},
+	} {
+		if got := keyListingName(tt.mgr, tt.key); got != tt.want {
+			t.Errorf("%s %s: got %q, want %q", tt.mgr.name, tt.key, got, tt.want)
+		}
+	}
+}

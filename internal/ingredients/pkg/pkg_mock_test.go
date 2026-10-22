@@ -14,6 +14,8 @@ type mockManager struct {
 	held                  map[string]bool
 	repos                 []snack.Repository
 	keys                  []string
+	addKeyAs              string // the name AddKey lists a key under; default the key itself
+	name                  string // Name(); default "mock"
 	groupInstalled        map[string]bool
 	upgrades              []snack.Package
 	installCalled         bool
@@ -101,7 +103,12 @@ func (m *mockManager) Version(_ context.Context, pkg string) (string, error) {
 }
 
 func (m *mockManager) Available() bool { return true }
-func (m *mockManager) Name() string    { return "mock" }
+func (m *mockManager) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "mock"
+}
 
 // Cleaner interface
 func (m *mockManager) Clean(_ context.Context) error {
@@ -179,7 +186,22 @@ func (m *mockManager) ListKeys(_ context.Context) ([]string, error) {
 
 func (m *mockManager) AddKey(_ context.Context, key string) error {
 	m.addKeyCalled = key
-	return m.addKeyErr
+	if m.addKeyErr != nil {
+		return m.addKeyErr
+	}
+	// Like rpm and apt, list the key under the ID it carries (addKeyAs),
+	// once, however often it is imported.
+	listed := key
+	if m.addKeyAs != "" {
+		listed = m.addKeyAs
+	}
+	for _, k := range m.keys {
+		if k == listed {
+			return nil
+		}
+	}
+	m.keys = append(m.keys, listed)
+	return nil
 }
 
 func (m *mockManager) RemoveKey(_ context.Context, keyID string) error {
