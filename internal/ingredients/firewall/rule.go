@@ -280,20 +280,11 @@ func ruleComment(rule *nft.Rule) (string, bool) {
 	return string(bytes.TrimRight(c, "\x00")), true
 }
 
-// findRuleByName scans every rule in the chain for one whose comment
-// matches spec.name. Comments are how this ingredient makes an otherwise
-// anonymous nftables rule addressable/idempotent by name (nftables rules
-// have no native "name", only a numeric handle assigned on creation).
-func findRuleByName(conn nftConn, table *nft.Table, chain *nft.Chain, name string) (*nft.Rule, error) {
-	rules, err := findRulesByName(conn, table, chain, name)
-	if err != nil || len(rules) == 0 {
-		return nil, err
-	}
-	return rules[0], nil
-}
-
-// findRulesByName returns every rule in the chain named name. nftables
-// doesn't keep comments unique, so a name added twice (by hand, or by a
+// findRulesByName returns every rule in the chain whose comment is name.
+// Comments are how this ingredient makes an otherwise anonymous nftables
+// rule addressable/idempotent by name (nftables rules have no native
+// "name", only a numeric handle assigned on creation). nftables doesn't
+// keep comments unique, so a name added twice (by hand, or by a
 // script run twice) is held by more than one rule.
 func findRulesByName(conn nftConn, table *nft.Table, chain *nft.Chain, name string) ([]*nft.Rule, error) {
 	rules, err := conn.GetRules(table, chain)
