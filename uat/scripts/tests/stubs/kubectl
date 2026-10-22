@@ -39,6 +39,7 @@ case "$args" in
   *" logs "*)
     echo "2026-10-22T03:13:00Z dial tcp 10.99.61.204:9000: connect: connection refused"
     echo "2026-10-22T03:13:01Z GET /v1/x Authorization: Bearer opaqueStubValue4 404"
+    echo "2026-10-22T03:13:02Z GET /v1/y Authorization: Basic c3R1YlVzZXI6c3R1YlZhbHVlNQ== 401"
     ;;
   *" get svc,endpoints -A -o wide "*)
     printf 'NAMESPACE NAME ENDPOINTS\nimas-uat endpoints/imas-uat-rustfs <none>\n'

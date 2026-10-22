@@ -23,10 +23,11 @@
 #                        enroll/{run,tenants,keys,sprouts,sprouts-detail}.json
 #
 # and then scans every copied file for anything that looks like a secret (a
-# private key, kubeconfig credentials, a Bearer credential, a JWT, an NKey
-# seed, a JSON password, secret, token or unseal key). A file that matches is deleted from <out-dir>,
-# named, and the script exits 1, so a leak is a failed step rather than an
-# uploaded artifact. Fix the allowlist or the file that grew a secret.
+# private key, kubeconfig credentials, a Bearer or Basic credential, a JWT,
+# an NKey seed, a JSON password, secret, token or unseal key). A file that
+# matches is deleted from <out-dir>, named, and the script exits 1, so a
+# leak is a failed step rather than an uploaded artifact. Fix the allowlist
+# or the file that grew a secret.
 set -euo pipefail
 
 prog=$(basename "$0")
@@ -87,6 +88,8 @@ patterns_ci=(
   'BEGIN [A-Z ]*PRIVATE KEY'
   # A Bearer credential of any shape (an opaque token, not only a JWT).
   'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{8,}'
+  # A Basic Authorization header's credential (base64 of user:password).
+  'Authorization"?[[:space:]]*[:=][[:space:]]*"?Basic[[:space:]]+[A-Za-z0-9+/=]{8,}'
   'client-key-data:'
   'client-certificate-data:'
   '"[a-z_]*password"[[:space:]]*:[[:space:]]*"[^"]+'

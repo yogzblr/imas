@@ -30,8 +30,8 @@
 # --request-timeout too), a failure is written into the file it was for,
 # and the script always exits 0: it is a diagnostic, never a gate. Each
 # file is filtered on the way out (redact): values of keys that look like a
-# password, secret, token, access or secret key or credential, Bearer
-# credentials, JWTs, NKey
+# password, secret, token, access or secret key or credential, Bearer and
+# Basic Authorization credentials, JWTs, NKey
 # seeds and private key blocks are replaced by [redacted]. collect-artifacts.sh
 # scans the result again before anything is uploaded.
 #
@@ -73,6 +73,7 @@ redact() {
   sed -E \
     -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\[redacted private key]' \
     -e 's/(Bearer[[:space:]]+)[^[:space:]",;}]+/\1[redacted]/Ig' \
+    -e 's/(Authorization"?[[:space:]]*[:=][[:space:]]*"?Basic[[:space:]]+)[^[:space:]",;}]+/\1[redacted]/Ig' \
     -e 's/((pass(word|wd)?|secret|token|access[_-]?key|secret[_-]?key|api[_-]?key|credential|client-key-data|client-certificate-data|root[_-]?(user|pass(word)?))[A-Za-z0-9_.-]*"?[[:space:]]*[:=][[:space:]]*)("[^"]*"|[^[:space:],;}]+)/\1[redacted]/Ig' \
     -e 's/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/[redacted jwt]/g' \
     -e 's/(^|[^A-Z0-9])S[OAUNCX][A-Z2-7]{56}([^A-Z2-7]|$)/\1[redacted seed]\2/g'
