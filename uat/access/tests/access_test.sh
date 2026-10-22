@@ -541,13 +541,20 @@ v "$uat" run t1-ubuntu "$body" &
 p1=$!
 v "$uat" run t1-ubuntu "$body" &
 p2=$!
-# shellcheck disable=SC2016 # expanded on the "VM"
-v "$uat" run t1-alma 'echo "other $$" >>"$STUB_STATE/order"' &
-p3=$!
-wait "$p1" "$p2" "$p3"
-seq=$(awk '{print $1}' "$STUB_STATE/order" | grep -v other | tr '\n' ' ')
+wait "$p1" "$p2"
+seq=$(awk '{print $1}' "$STUB_STATE/order" | tr '\n' ' ')
 if [ "$seq" = "start end start end " ]; then ok "vmctl: two calls to one VM never overlap (per-VM lock)"; else nok "vmctl: lock" "$(cat "$STUB_STATE/order")"; fi
-if awk 'NR==2' "$STUB_STATE/order" | grep -q "^other"; then ok "vmctl: another VM is not held up by that lock"; else nok "vmctl: lock is per VM" "$(cat "$STUB_STATE/order")"; fi
+# While t1-ubuntu's lock is held, a call to t1-alma still runs at once.
+( flock 9; sleep 5 ) 9>>"$STUB_STATE/vmctl/t1-ubuntu.lock" &
+holder=$!
+sleep 0.5
+start=$SECONDS
+v "$uat" run t1-alma 'echo other-vm'
+took=$((SECONDS - start))
+wait "$holder"
+if [ "$rc" -eq 0 ] && [ "$out" = "other-vm" ] && [ "$took" -lt 4 ]; then
+  ok "vmctl: another VM is not held up by that lock (took ${took}s)"
+else nok "vmctl: lock is per VM (rc=$rc, ${took}s)" "$err"; fi
 ( flock 9; sleep 3 ) 9>>"$STUB_STATE/vmctl/t1-ubuntu.lock" &
 holder=$!
 sleep 0.5
