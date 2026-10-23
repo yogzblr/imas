@@ -141,7 +141,7 @@ func TestSupplementaryGroupsAndPrimary(t *testing.T) {
 	if got, want := supplementaryGroups("iuu"), []string{"wheel", "docker"}; !slices.Equal(got, want) {
 		t.Errorf("supplementaryGroups = %q, want %q", got, want)
 	}
-	for id, want := range map[string]string{"1001": "iuu", "10": "wheel", "4242": "4242", "wheel": "wheel", "users": "users", "": ""} {
+	for id, want := range map[string]string{"1001": "iuu", "10": "wheel", "4242": "4242", "010": "wheel", "wheel": "wheel", "users": "users", "1x": "1x", "": ""} {
 		if got := groupName(id); got != want {
 			t.Errorf("groupName(%q) = %q, want %q", id, got, want)
 		}
@@ -160,6 +160,7 @@ func TestBuildUsermodArgsGroups(t *testing.T) {
 		{"missing one", "iuu:x:1001:\nwheel:x:10:iuu\ndocker:x:990:\n", []string{"wheel", "docker"}, []string{"-G", "wheel,docker", "iuu"}},
 		{"extra one", "iuu:x:1001:\nwheel:x:10:iuu\ndocker:x:990:iuu\n", []string{"wheel"}, []string{"-G", "wheel", "iuu"}},
 		{"by group ID", "iuu:x:1001:\nwheel:x:10:iuu\ndocker:x:990:iuu\n", []string{"10", "docker"}, nil},
+		{"by group ID with leading zero", "iuu:x:1001:\nwheel:x:10:iuu\n", []string{"010"}, nil},
 		{"primary by group ID", "iuu:x:1001:\nwheel:x:10:iuu\n", []string{"1001", "wheel"}, nil},
 		{"by unknown group ID", "iuu:x:1001:\nwheel:x:10:iuu\n", []string{"4242"}, []string{"-G", "4242", "iuu"}},
 	}

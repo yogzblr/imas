@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -141,16 +142,20 @@ func supplementaryGroups(username string) []string {
 }
 
 // groupName returns the name of the group id names: a group ID, as usermod
-// reads an all-digit -g or -G entry, becomes the name of the group with
-// that ID in groupFilePath; a name, or an ID no group has, is returned as
-// is.
+// reads an all-digit -g or -G entry (a decimal number, so 010 is 10),
+// becomes the name of the group with that ID in groupFilePath; a name, or
+// an ID no group has, is returned as is.
 func groupName(id string) string {
-	if id == "" || strings.Trim(id, "0123456789") != "" {
+	want, err := strconv.ParseUint(id, 10, 32)
+	if err != nil || strings.Trim(id, "0123456789") != "" {
 		return id
 	}
 	name := id
 	scanColonFile(groupFilePath, func(fields []string) bool {
-		if len(fields) >= 3 && fields[2] == id {
+		if len(fields) < 3 {
+			return true
+		}
+		if got, err := strconv.ParseUint(fields[2], 10, 32); err == nil && got == want {
 			name = fields[0]
 			return false
 		}
