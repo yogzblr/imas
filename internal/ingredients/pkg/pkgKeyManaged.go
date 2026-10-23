@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
-	"strings"
 
 	"github.com/gogrlx/snack"
 	"github.com/yogzblr/imas/internal/cook"
@@ -30,12 +28,15 @@ func (p Pkg) keyManaged(ctx context.Context, test bool) (cook.Result, error) {
 }
 
 func (p Pkg) keyAdded(ctx context.Context, keyMgr snack.KeyManager, test bool) (cook.Result, error) {
+	if isAptURLKey(keyMgr, p.name) {
+		return p.aptURLKeyAdded(ctx, test)
+	}
 	// Check if key already present.
 	keys, err := keyMgr.ListKeys(ctx)
 	if err != nil {
 		return failResult(err)
 	}
-	if keyListed(keys, keyListingName(keyMgr, p.name)) {
+	if keyListed(keys, p.name) {
 		return cook.Result{
 			Succeeded: true,
 			Changed:   false,
@@ -70,22 +71,6 @@ func (p Pkg) keyAdded(ctx context.Context, keyMgr snack.KeyManager, test bool) (
 		Changed:   true,
 		Notes:     []fmt.Stringer{note("added key: %s", p.name)},
 	}, nil
-}
-
-// keyListingName returns the name the key manager lists key as. apt
-// stores a key fetched from a URL in /etc/apt/keyrings/<base>.gpg (the
-// URL's last element without its extension, snack's apt.AddKey) and lists
-// that path; every other key is listed under the name it was given.
-func keyListingName(keyMgr snack.KeyManager, key string) string {
-	m, ok := keyMgr.(interface{ Name() string })
-	if !ok || m.Name() != "apt" {
-		return key
-	}
-	if !strings.HasPrefix(key, "http://") && !strings.HasPrefix(key, "https://") {
-		return key
-	}
-	base := path.Base(key)
-	return path.Join("/etc/apt/keyrings", strings.TrimSuffix(base, path.Ext(base))+".gpg")
 }
 
 func keyListed(keys []string, name string) bool {

@@ -1,0 +1,2 @@
+change: W9: pkg.key_managed on apt installs a URL's key itself (fetched, dearmored in Go, byte-identical to gpg --dearmor) instead of through snack's AddKey, so two key URLs with the same last element (…/linux/ubuntu/gpg, …/repo/gpg) both install: the first keeps snack's /etc/apt/keyrings/<base>.gpg, a different key whose name is taken goes to /etc/apt/keyrings/<base>-<12 hex of the URL's SHA-256>.gpg. A key is present when either file holds exactly the fetched key, so keys snack installed are found where they are, and a second run of each reports no change.
+pr: 309
