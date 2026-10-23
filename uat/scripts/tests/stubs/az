@@ -136,6 +136,9 @@ case "$1 $2" in
     esac
     ;;
   "vm image") ;;
+  # diagnostics.sh: a VM's run-command state.
+  "vm run-command") echo '[{"name": "stub", "provisioningState": "Succeeded"}]' ;;
+  "vm get-instance-view") echo '{"power": "PowerState/running", "runCommand": [{"name": "RunCommandLinux", "statuses": [{"message": "Run command extension execution is in progress"}]}]}' ;;
   *)
     echo "stub az: unexpected call: $*" >&2
     exit 99

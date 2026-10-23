@@ -183,6 +183,15 @@ jobs:
             echo "UAT_SESSION_UAT=$RUNNER_TEMP/uat-state/uat.json"
             echo "UAT_SESSION_ACCESS=$RUNNER_TEMP/uat-state/access"
             echo "UAT_SESSION_KUBECONFIGS=$RUNNER_TEMP/uat-state/k0s/core.kubeconfig:$RUNNER_TEMP/uat-state/k0s/dmz.kubeconfig"
+            # uat/access/vmctl.sh (W8): commands go over the Bastion tunnels,
+            # SSH and WinRM, with the run's own credentials (written by the
+            # credentials step; never uploaded). Only a VM with no tunnel
+            # falls back to az vm run-command.
+            echo "VMCTL_SSH_KEY=$RUNNER_TEMP/uat-secrets/ssh_key"
+            echo "VMCTL_WINRM_PASSWORD_FILE=$RUNNER_TEMP/uat-secrets/winrm_password"
+            # When the job started: the tests' budget is what the job has
+            # left (the Tests step).
+            echo "JOB_STARTED_AT=$(date +%s)"
           } >>"$GITHUB_ENV"
           echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
 
@@ -465,10 +474,13 @@ jobs:
         run: uat/access/session.sh phase "tests" --force --probe
 
       # go test's own timeout stays under the step's, so a slow run still
-      # writes its report.
+      # writes its report. The budget (W8) is what the job has left after
+      # TEARDOWN_RESERVE_MIN for the diagnostics, the report and the destroy,
+      # at most 280 minutes; UAT Run 2's fixed 165 left about 70 ingredient
+      # cases unrun.
       - name: Tests (uat/tests/run.sh)
         id: tests
-        timeout-minutes: 180
+        timeout-minutes: 290
         env:
           TIER: ${{ steps.inputs.outputs.tier }}
           SCENARIOS: ${{ steps.inputs.outputs.scenarios }}
@@ -486,6 +498,11 @@ jobs:
           # run.sh runs each top-level test in its own process and refreshes
           # the login and the tunnels between them when 15 minutes old (W6).
           UAT_SESSION_HOOK: ${{ github.workspace }}/uat/access/session.sh
+          # After a failed top-level test, run.sh collects the hubs' state
+          # (pods, Jobs, RustFS, events) into the report while it is fresh.
+          IMAS_UAT_DIAG_HOOK: ${{ github.workspace }}/uat/scripts/diagnostics.sh
+          JOB_TIMEOUT_MIN: "350"
+          TEARDOWN_RESERVE_MIN: "60"
         run: |
           set -euo pipefail
           export IMAS_UAT_DIR="$STATE/hub"
@@ -496,9 +513,36 @@ jobs:
           # (HA3's helm upgrade; the core chart is in the core state directory).
           export IMAS_UAT_DMZ_KUBECONFIG="$STATE/k0s/dmz.kubeconfig"
           export IMAS_UAT_DMZ_CHART="$STATE/dmz/chart/nats-${IMAS_UAT_RELEASE_TAG#v}.tgz"
-          if [ "$TIER" = smoke ]; then export IMAS_UAT_TIMEOUT=45m; else export IMAS_UAT_TIMEOUT=165m; fi
+          if [ "$TIER" = smoke ]; then
+            export IMAS_UAT_TIMEOUT=45m
+          else
+            used=$(( ($(date +%s) - JOB_STARTED_AT) / 60 ))
+            budget=$(( JOB_TIMEOUT_MIN - used - TEARDOWN_RESERVE_MIN ))
+            [ "$budget" -le 280 ] || budget=280
+            if [ "$budget" -lt 30 ]; then
+              echo "::error::only ${budget} minutes left for the tests (the job has run ${used}m of ${JOB_TIMEOUT_MIN}m)"
+              exit 1
+            fi
+            export IMAS_UAT_TIMEOUT=${budget}m
+            echo "tests budget: ${budget}m (the job has run ${used}m of ${JOB_TIMEOUT_MIN}m;" \
+              "${TEARDOWN_RESERVE_MIN}m kept for diagnostics, the report and the destroy)"
+          fi
           read -r -a ids <<<"$SCENARIOS"
           uat/tests/run.sh "$TIER" "${ids[@]}"
+
+      # Everything that explains a failed test, before the environment goes
+      # (W8): both hubs' pods, failed Jobs, RustFS, endpoints, top and events
+      # through the kube tunnels, the sprouts' service logs through vmctl.sh
+      # and Azure's run-command state, redacted, into the report.
+      - name: Diagnostics (on a test failure)
+        if: always() && (steps.tests.outcome == 'failure' || steps.tests.outcome == 'cancelled')
+        timeout-minutes: 20
+        env:
+          UAT_AZ_RELOGIN: ${{ github.workspace }}/uat/access/az-relogin.sh
+        run: |
+          uat/access/session.sh phase "diagnostics" || true
+          IMAS_UAT_CORE_KUBECONFIG="$STATE/k0s/core.kubeconfig" IMAS_UAT_DMZ_KUBECONFIG="$STATE/k0s/dmz.kubeconfig" \
+            DIAG_UAT="$STATE/uat.json" uat/scripts/diagnostics.sh full "$STATE/report/diagnostics/after-the-tests"
 
       # A failed or timed out HA2 (node stop) can leave a hub VM stopped. Start
       # every node of an HA hub again (a running VM just answers), so the

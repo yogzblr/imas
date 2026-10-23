@@ -263,7 +263,7 @@ run that needs longer than that has to be split into tier runs.
 
 | Artifact | Contents |
 |---|---|
-| `uat-report-<run_id>` | `summary.txt` (one line per scenario, OS and tenant), `junit.xml`, `events.json` (`go test -json`), `build.log` |
+| `uat-report-<run_id>` | `summary.txt` (one line per scenario, OS and tenant), `junit.xml` (with each failure's full test output), `events.json` (`go test -json`), `build.log` (the whole test log), `diagnostics/` (after a failure: both hubs' pods, Jobs, RustFS, events and top, the sprouts' service logs and Azure's run-command state, redacted; `uat/RUNBOOK.md`, "The test channel") |
 | `uat-outputs-<run_id>` | `run.json` (this run's inputs), `uat.json` (tofu output, no credentials), `ha_node_names.json` and `object_store.json` (tofu outputs, no key), `k0s/endpoints.json`, the UAT CA certificate, the rendered k0sctl files, `hub/core/out/core.json` and `admin.json` (public keys), `hub/harness.json`, `dmz/dmz.json`, `enroll/{run,tenants,keys,sprouts,sprouts-detail}.json` |
 
 Never uploaded: the SSH key, the WinRM password, the kubeconfigs, OpenBao's

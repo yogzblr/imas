@@ -265,6 +265,9 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 			report("%s: %v", what, err)
 			return "", false
 		}
+		// The cook's result goes into the report whatever it is: the job
+		// id finds the cook in the hub's and the sprout's logs.
+		r.Logf("%s: job %s, item %s", what, it.JID, it.Status)
 		if it.Status != harness.ItemSucceeded {
 			report("%s: want the item succeeded, got %s", what, it)
 			cy.explain(ctx, r, it.JID, steps)
@@ -388,6 +391,11 @@ func (cy *Cycle) checkLog(r *recorder, res *harness.RunResult, i int, jid string
 			r.Errorf("%s (job %s): step %q is not in the sprout's job log", what, jid, id)
 			continue
 		}
+		changes := "none"
+		if s.ChangesMade {
+			changes = clip(strings.Join(s.Changes, "; "), 300)
+		}
+		r.Logf("%s (job %s): step %q %s, changes: %s", what, jid, id, statusName(s.CompletionStatus), changes)
 		if s.CompletionStatus != StatusCompleted {
 			r.Errorf("%s (job %s): step %q is %s: %s", what, jid, id, statusName(s.CompletionStatus), s.errText())
 		}

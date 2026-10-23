@@ -10,7 +10,9 @@
 # allowlist of known non-secret files (missing ones are skipped):
 #
 #   <out-dir>/report/    the test report: summary.txt, junit.xml, events.json,
-#                        build.log (uat/tests/run.sh)
+#                        build.log (uat/tests/run.sh), and every regular
+#                        file under report/diagnostics/ (uat/scripts/
+#                        diagnostics.sh, which redacts them first)
 #   <out-dir>/outputs/   run.json (this run's inputs), uat.json (tofu output
 #                        uat, no credentials), ha_node_names.json and
 #                        object_store.json (tofu outputs ha_node_names and
@@ -21,10 +23,11 @@
 #                        enroll/{run,tenants,keys,sprouts,sprouts-detail}.json
 #
 # and then scans every copied file for anything that looks like a secret (a
-# private key, kubeconfig credentials, a JWT, an NKey seed, a JSON password,
-# secret, token or unseal key). A file that matches is deleted from <out-dir>,
-# named, and the script exits 1, so a leak is a failed step rather than an
-# uploaded artifact. Fix the allowlist or the file that grew a secret.
+# private key, kubeconfig credentials, a Bearer or Basic credential, a JWT,
+# an NKey seed, a JSON password, secret, token or unseal key). A file that
+# matches is deleted from <out-dir>, named, and the script exits 1, so a
+# leak is a failed step rather than an uploaded artifact. Fix the allowlist
+# or the file that grew a secret.
 set -euo pipefail
 
 prog=$(basename "$0")
@@ -72,12 +75,22 @@ copy() {
   copied=$((copied + 1))
 }
 for f in "${report_files[@]}"; do copy "$f" "$out"; done
+if [ -d "$state/report/diagnostics" ] && [ ! -L "$state/report/diagnostics" ]; then
+  while IFS= read -r -d '' f; do
+    copy "${f#"$state"/}" "$out"
+  done < <(find "$state/report/diagnostics" -type f -print0)
+fi
 for f in "${output_files[@]}"; do copy "$f" "$out/outputs"; done
 
 # Patterns of things that must never be uploaded (extended regular
 # expressions). The first list is matched ignoring case, the second exactly.
 patterns_ci=(
   'BEGIN [A-Z ]*PRIVATE KEY'
+  # A Bearer credential of any shape (an opaque token, not only a JWT).
+  'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{8,}'
+  # A Basic Authorization header's credential (base64 of user:password).
+  # base64 of user:password is 4 characters or more ("u:p" is dTpw).
+  'Authorization"?[[:space:]]*[:=][[:space:]]*"?Basic[[:space:]]+[A-Za-z0-9+/]{2,}={0,2}'
   'client-key-data:'
   'client-certificate-data:'
   '"[a-z_]*password"[[:space:]]*:[[:space:]]*"[^"]+'

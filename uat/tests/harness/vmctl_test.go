@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -151,6 +152,75 @@ func TestVMCtlTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 4*time.Second {
 		t.Errorf("the timeout didn't stop the call (%s)", time.Since(start))
+	}
+}
+
+func TestVMCtlTimeoutKillsTheChildren(t *testing.T) {
+	// A stuck child (az, ssh, python) of vmctl.sh dies with it.
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	v, _ := fakeVMCtl(t, `sleep 30 & echo $! >`+pidFile+`; wait`)
+	v.Timeout = 500 * time.Millisecond
+	if err := v.Restart(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("want a timeout, got %v", err)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p, err := os.FindProcess(pid)
+		if err != nil || p.Signal(syscall.Signal(0)) != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d still runs after vmctl.sh timed out", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestVMCtlTimeoutKillsAForegroundTimeout(t *testing.T) {
+	// vmctl.sh runs each channel call under "timeout --foreground": that
+	// timeout and its child stay in vmctl.sh's process group, so the
+	// harness's group kill reaches them (a plain timeout makes a group
+	// of its own and would survive it).
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("no timeout")
+	}
+	pidFile := filepath.Join(t.TempDir(), "timeout.pid")
+	v, _ := fakeVMCtl(t, `timeout --foreground -k 5 100 sleep 30 & echo $! >`+pidFile+`; wait`)
+	v.Timeout = 500 * time.Millisecond
+	if err := v.Restart(context.Background(), "x"); err == nil {
+		t.Fatal("want a timeout")
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p, err := os.FindProcess(pid)
+		if err != nil || p.Signal(syscall.Signal(0)) != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout %d still runs after vmctl.sh timed out", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestVMCtlTimeoutFromEnv(t *testing.T) {
+	t.Setenv(EnvVMCtlTimeout, "7m")
+	if got := NewVMCtl("x", "u").Timeout; got != 7*time.Minute {
+		t.Errorf("Timeout = %s, want 7m", got)
+	}
+	t.Setenv(EnvVMCtlTimeout, "bogus")
+	if got := NewVMCtl("x", "u").Timeout; got != 15*time.Minute {
+		t.Errorf("Timeout = %s, want the 15m default", got)
 	}
 }
 

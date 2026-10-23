@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Event is one line of go test -json (test2json) output.
@@ -36,6 +37,9 @@ type Line struct {
 	Tests          []string
 	Detail         string
 	Elapsed        float64
+	// Output is what the failed tests of the line printed (framing
+	// removed): the steps, job ids and step changes behind Detail.
+	Output []string
 }
 
 // Report is the outcome of a run.
@@ -164,10 +168,11 @@ func Summarize(cat *Catalogue, sel *Selection, events []Event) *Report {
 				lineOrder = append(lineOrder, key)
 			}
 			l.Tests = append(l.Tests, c.name)
-			l.Elapsed += c.elapsed
+			l.Elapsed += elapsedOf(c)
 			switch c.status {
 			case "fail":
 				failedTests[c.pkg] = true
+				l.Output = append(l.Output, outputOf(c)...)
 				if l.Status != "FAIL" {
 					l.Status = "FAIL"
 					l.Detail = failureDetail(c)
@@ -186,6 +191,7 @@ func Summarize(cat *Catalogue, sel *Selection, events []Event) *Report {
 				}
 			default:
 				rep.Unfinished = append(rep.Unfinished, c.pkg+" "+c.name)
+				l.Output = append(l.Output, outputOf(c)...)
 				if l.Status != "FAIL" {
 					l.Status, l.Detail = "FAIL", "never finished (timeout or panic): "+lastOutput(c, 3)
 				}
@@ -288,6 +294,54 @@ func placeOf(name string) (osName, tenant string) {
 		}
 	}
 	return osName, tenant
+}
+
+// caseTimeRe is the line ingredients.Replay logs with a case's own run
+// time on its sprout.
+var caseTimeRe = regexp.MustCompile(`case time on this sprout: (\S+)`)
+
+// elapsedOf is a test's time: go test's, or the case time it logged when
+// that is longer. A parallel subtest that only collects an outcome
+// computed earlier (TestIngredients, on any OS) reports about 0 s to go
+// test although its case ran for minutes.
+func elapsedOf(n *node) float64 {
+	el := n.elapsed
+	for _, l := range n.output {
+		if m := caseTimeRe.FindStringSubmatch(l); m != nil {
+			if d, err := time.ParseDuration(m[1]); err == nil && d.Seconds() > el {
+				el = d.Seconds()
+			}
+		}
+	}
+	return el
+}
+
+// maxOutputLines and maxLineBytes bound the output one failed test adds
+// to the JUnit file: at most 200 lines of at most 2000 bytes each.
+const (
+	maxOutputLines = 200
+	maxLineBytes   = 2000
+)
+
+// outputOf is what a failed test printed, for the JUnit failure body: its
+// first lines and its last, when it printed more than maxOutputLines, each
+// cut at maxLineBytes.
+func outputOf(n *node) []string {
+	lines := meaningful(n)
+	for i, l := range lines {
+		if len(l) > maxLineBytes {
+			lines[i] = strings.ToValidUTF8(l[:maxLineBytes], "") + fmt.Sprintf("... (%d bytes left out)", len(l)-maxLineBytes)
+		}
+	}
+	if len(lines) > maxOutputLines {
+		head := lines[:maxOutputLines/4]
+		tail := lines[len(lines)-3*maxOutputLines/4:]
+		lines = append(append(append([]string{}, head...), fmt.Sprintf("... (%d lines left out; events.json and build.log have them all)", len(lines)-maxOutputLines)), tail...)
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return append([]string{"--- " + n.name + ":"}, lines...)
 }
 
 func meaningful(n *node) []string {
@@ -457,7 +511,11 @@ func (r *Report) WriteJUnit(w io.Writer) error {
 		c := junitCase{Class: "uat." + l.ID, Name: fmt.Sprintf("%s os=%s tenant=%s", l.ID, l.OS, l.Tenant), Time: fmt.Sprintf("%.1f", l.Elapsed)}
 		switch l.Status {
 		case "FAIL":
-			c.Failure = &junitMessage{Message: oneLine(l.Detail, 300), Body: l.Detail + "\ntests: " + strings.Join(l.Tests, ", ")}
+			body := l.Detail + "\ntests: " + strings.Join(l.Tests, ", ")
+			if len(l.Output) > 0 {
+				body += "\n\noutput:\n" + strings.Join(l.Output, "\n")
+			}
+			c.Failure = &junitMessage{Message: oneLine(l.Detail, 300), Body: body}
 			s.Failures++
 		case "SKIP":
 			c.Skipped = &junitMessage{Message: oneLine(l.Detail, 300)}

@@ -33,11 +33,21 @@
 #                         during one. IMAS_UAT_TIMEOUT is then the budget of
 #                         all of them together. A failed hook stops the run
 #                         (the rest are reported missing).
+#   IMAS_UAT_DIAG_HOOK    optional (W8; the UAT workflow sets
+#                         uat/scripts/diagnostics.sh): after a top-level test
+#                         (with UAT_SESSION_HOOK) or a package (without)
+#                         fails, `$IMAS_UAT_DIAG_HOOK kube
+#                         <report>/diagnostics/<name>` collects the hubs'
+#                         state while it is fresh, bounded by
+#                         IMAS_UAT_DIAG_SECONDS (default 300). Its time
+#                         counts against IMAS_UAT_TIMEOUT.
 #
 # It builds the report tool and one test binary per package under
 # uat/tests with the uat tag, runs them with the tier's -run pattern, and
 # prints one line per scenario id, OS and tenant. The report directory
-# gets events.json (test2json), summary.txt and junit.xml.
+# gets events.json (test2json), summary.txt, junit.xml and build.log: the
+# packages' compile errors, everything the tests printed (as shown while
+# they ran), run.sh's own messages and the summary, in order.
 #
 # Exit status 0 only when every selected scenario passed or was skipped
 # with a written reason, at least one test of the tier ran, every
@@ -93,13 +103,21 @@ mkdir -p "$report/bin"
 report=$(cd "$report" && pwd)
 events="$report/events.json"
 : >"$events"
+build_log="$report/build.log"
+: >"$build_log"
+
+# say TEXT: a message of run.sh's, on stderr and in build.log.
+say() {
+	echo "run.sh: $*" >&2
+	echo "run.sh: $*" >>"$build_log"
+}
 
 cd "$repo"
-echo "run.sh: tier $tier${*:+, scenarios $*}; report in $report" >&2
+say "tier $tier${*:+, scenarios $*}; report in $report"
 go build -o "$report/bin/uatreport" ./uat/tests/uatreport
 uatreport="$report/bin/uatreport"
 pattern=$("$uatreport" pattern -catalogue "$catalogue" -tier "$tier" "$@")
-echo "run.sh: go test -run '$pattern'" >&2
+say "go test -run '$pattern'"
 
 # Every package under uat/tests with tests under the uat tag, except the
 # harness and the report tool, whose own unit tests aren't scenarios.
@@ -131,11 +149,21 @@ fail_event() {
 }
 
 # run_bin PKG DIR BIN PATTERN TIMEOUT: one test process, its events into the
-# report.
+# report and its output into build.log as well.
 run_bin() {
 	(cd "$2" && go tool test2json -t -p "$1" "$3" -test.v=test2json \
 		-test.run "$4" -test.timeout "$5" -test.count=1) |
-		tee -a "$events" | "$uatreport" follow
+		tee -a "$events" | "$uatreport" follow | tee -a "$build_log"
+}
+
+# diagnose NAME: runs IMAS_UAT_DIAG_HOOK after a failure, if set, bounded.
+diagnose() {
+	[ -n "${IMAS_UAT_DIAG_HOOK:-}" ] || return 0
+	local dir="$report/diagnostics/$1" started=$SECONDS
+	say "$1 failed; collecting the hubs' state into $dir"
+	timeout -k 10 "${IMAS_UAT_DIAG_SECONDS:-300}" "$IMAS_UAT_DIAG_HOOK" kube "$dir" >>"$build_log" 2>&1 ||
+		say "the diagnostics for $1 exited $? (see build.log)"
+	say "diagnostics for $1 took $((SECONDS - started))s"
 }
 
 if [ -n "${UAT_SESSION_HOOK:-}" ]; then
@@ -148,7 +176,7 @@ if [ -n "${UAT_SESSION_HOOK:-}" ]; then
 	top=${pattern%%/*}
 	sub=""
 	[ "$top" = "$pattern" ] || sub=/${pattern#*/}
-	echo "run.sh: one test process per top-level test, the session refreshed between them (UAT_SESSION_HOOK)" >&2
+	say "one test process per top-level test, the session refreshed between them (UAT_SESSION_HOOK); budget ${budget}s"
 fi
 started=$SECONDS
 stopped=""
@@ -158,17 +186,24 @@ for entry in "${pkgs[@]}"; do
 	pkg=${entry%%|*}
 	dir=${entry#*|}
 	bin="$report/bin/$(echo "${pkg#*/uat/}" | tr '/' '-').test"
-	if ! go test -tags uat -c -o "$bin" "$pkg" 2>"$report/build.log"; then
-		cat "$report/build.log" >&2
+	if ! go test -tags uat -c -o "$bin" "$pkg" 2>"$report/compile.log"; then
+		cat "$report/compile.log" >&2
+		{
+			echo "run.sh: $pkg did not build with the uat tag:"
+			cat "$report/compile.log"
+		} >>"$build_log"
 		# A package that doesn't build fails the run through the summary.
 		printf '{"Action":"output","Package":"%s","Output":"the package did not build with the uat tag; see build.log\\n"}\n{"Action":"fail","Package":"%s"}\n' \
 			"$pkg" "$pkg" >>"$events"
 		status=1
 		continue
 	fi
-	echo "run.sh: running $pkg" >&2
+	say "running $pkg"
 	if [ -z "${UAT_SESSION_HOOK:-}" ]; then
-		run_bin "$pkg" "$dir" "$bin" "$pattern" "$timeout" || status=1
+		if ! run_bin "$pkg" "$dir" "$bin" "$pattern" "$timeout"; then
+			status=1
+			diagnose "$(echo "${pkg#*/uat/}" | tr '/' '-')"
+		fi
 		continue
 	fi
 	[ -z "$stopped" ] || continue
@@ -184,7 +219,7 @@ for entry in "${pkgs[@]}"; do
 		left=$((budget - (SECONDS - started)))
 		if [ "$left" -le 0 ]; then
 			stopped="the tests' time budget ($timeout) ran out before $test"
-		elif ! "$UAT_SESSION_HOOK" phase "tests: $test"; then
+		elif ! "$UAT_SESSION_HOOK" phase "tests: $test" 2>&1 | tee -a "$build_log" >&2; then
 			stopped="the session refresh before $test failed (see the log above)"
 		else
 			# A refresh can take minutes: the test gets what is left after it.
@@ -192,25 +227,29 @@ for entry in "${pkgs[@]}"; do
 			[ "$left" -gt 0 ] || stopped="the tests' time budget ($timeout) ran out before $test"
 		fi
 		if [ -n "$stopped" ]; then
-			echo "run.sh: $stopped; not running the rest" >&2
+			say "$stopped; not running the rest"
 			fail_event "$pkg" "$stopped; the tests after it did not run"
 			status=1
 			break
 		fi
-		run_bin "$pkg" "$dir" "$bin" "^$test\$$sub" "${left}s" || status=1
+		say "$test: ${left}s of the budget left"
+		if ! run_bin "$pkg" "$dir" "$bin" "^$test\$$sub" "${left}s"; then
+			status=1
+			diagnose "$test"
+		fi
 	done <<<"$tests"
 done
 
 set +e
 "$uatreport" summarize -catalogue "$catalogue" -tier "$tier" -junit "$report/junit.xml" "$@" <"$events" |
-	tee "$report/summary.txt"
+	tee "$report/summary.txt" | tee -a "$build_log"
 summary=${PIPESTATUS[0]}
 set -e
 if [ "$summary" -ne 0 ]; then
 	exit "$summary"
 fi
 if [ "$status" -ne 0 ]; then
-	echo "run.sh: a test binary exited non-zero although the summary passed; failing the run" >&2
+	say "a test binary exited non-zero although the summary passed; failing the run"
 	exit 1
 fi
 exit 0

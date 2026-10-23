@@ -377,6 +377,75 @@ Both answering on a fresh tunnel while the runner's tunnels hung points at
 the runner's login and tunnels, not the VMs (in Run 2 a fresh laptop tunnel
 ran the same `win_get_url` in 6 s).
 
+### The test channel: what Run 2 (rc.16) taught, and what to read now (W8)
+
+**Run 2 (run 39709416839, rc.16)** was the first run to reach the tests:
+207 pass, 101 fail, 60 skip, with every core acceptance scenario (T, K, S,
+C, R, U1, B1, E1, RB1, X3) passing on AlmaLinux, Ubuntu and Windows. About
+85 of the failures were the test channel, not the product: `vmctl.sh run`
+was `az vm run-command invoke`, 30 to 60 s a call and one execution at a
+time per VM, so a Linux ingredient case took 100 to 175 s; the tests'
+fixed 165-minute budget ran out with about 70 cases unrun ("the run ended
+before the case ran on this sprout"), a Windows run-command that hung for
+15 minutes left the extension busy for the calls after it ("(Conflict) Run
+command extension execution is in progress"), and both Windows L1 reboots
+failed with the VM running because the run-command probe never answered.
+L5 was not hung: it was the last test and got the 2m19s left of the budget
+(`panic: test timed out after 2m19s`). D1's log retention Job could not
+reach RustFS (`connection refused` to its Service for over 10 minutes), and
+nothing in the artifacts said why.
+
+**What the gate does now (W8).**
+
+- `vmctl.sh` runs commands over the Bastion tunnels (SSH on Linux, WinRM on
+  Windows), one call per VM at a time, each call with its own 120 s
+  timeout, retrying only what never started, and fails a VM fast after 3
+  channel failures in a row (`uat/access/README.md`, "The channel"). A
+  reboot waits for the power state and then SSH or WinRM, never a
+  run-command.
+- The tests' budget is what the job has left, less 60 minutes for the
+  diagnostics, the report and the destroy (at most 280 minutes); the Tests
+  step prints it (`tests budget: ...`), and `run.sh` prints the budget left
+  before each top-level test.
+- `TestIngredients` times one trivial host call per VM first and logs an
+  estimate per VM (`ingredients estimate: <vm>: <n> cases, <n> host calls
+  x <measured time> + <n> cooks = <total>`), then the longest against the time
+  left, with a WARNING when it cannot fit. The cook time is an estimate
+  (`IMAS_UAT_COOK_ESTIMATE`, 15 s).
+- After a failed top-level test, `run.sh` collects both hubs' state
+  (`uat/scripts/diagnostics.sh kube`) into
+  `report/diagnostics/<Test>/`; after a failed Tests step, the workflow's
+  "Diagnostics (on a test failure)" step collects it again with the
+  sprouts' service logs and Azure's run-command state
+  (`report/diagnostics/after-the-tests/`). Both are redacted and uploaded
+  with the report.
+
+**Reading the next run.**
+
+1. `build.log` in `uat-report-<run_id>` is now the whole test log: compile
+   errors, everything the tests printed, `run.sh`'s messages (budgets,
+   diagnostics), the session refreshes and the summary. (In Run 2 it held
+   only compile errors, so it was empty.)
+2. `junit.xml`: a failed case's body has everything its test printed
+   (steps, `cook ...: job <jid>, item <status>`, each step's status and
+   changes), and its time is the case's own (`case time on this sprout`),
+   so an ingredient line no longer shows 0.0 s on any OS. The summary's
+   SECONDS column uses the same time.
+3. Channel lines in the test output: `<vm>: ran over ssh (127.0.0.1:N) in
+   Ns` (the per-call time), `run-command is busy ... (Conflict); retry`,
+   `<vm> is now marked dead: 3 channel failures in a row (last: ...)` and,
+   on the cases after it, `<vm> is marked dead after ...`. A dead VM's
+   cases all fail with that line: read the first failure it names, then
+   `diagnostics/after-the-tests/sprouts/<vm>.txt` and `azure/<vm>.json`.
+4. `diagnostics/<Test>/<hub>/`: `pods.txt`, `jobs.txt`, `events.txt`,
+   `top.txt`, `endpoints.txt` (the RustFS Service's endpoints in full) and
+   `pods/<ns>.<pod>.txt` (describe, logs, logs `--previous`) for RustFS,
+   failed Jobs and unhealthy pods. For a D1 like Run 2's: an empty RustFS
+   endpoint list with the pod restarting (`--previous`, `OOMKilled` in
+   describe, the node's memory in `top.txt`) is a restart or OOM; a pod
+   Running but not Ready is a readiness problem; endpoints that name
+   another pod or port are a wrong Service.
+
 ## 5. After the runs
 
 Record each run in a status fragment (`docs/status/README.md`): the run id,

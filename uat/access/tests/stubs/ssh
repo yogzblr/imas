@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Stub ssh for access_test.sh: vmctl.sh's SSH channel. Logs its arguments,
+# then runs the remote command (the last argument) locally with bash, stdin
+# passed through and the stubs (sudo, systemctl) first on PATH. Behaviour
+# comes from files in $STUB_STATE:
+#   ssh_preexec_fail       count of calls to fail before the command starts
+#                          (decremented per call; "always" never runs)
+#   ssh_hang               sleep instead of running (a stuck channel)
+#   ssh_no_marker          drop the exit code marker line
+#   ssh.pid                written with this stub's pid (for the kill test)
+set -u
+log_line() {
+  if command -v flock >/dev/null 2>&1; then
+    { flock 8; printf '%s\n' "$1" >&8; } 8>>"$STUB_STATE/calls.log"
+  else
+    printf '%s\n' "$1" >>"$STUB_STATE/calls.log"
+  fi
+}
+line=ssh
+for a in "$@"; do
+  line+=" $(printf '%q' "$a")"
+done
+log_line "$line"
+f=$STUB_STATE/ssh_preexec_fail
+if [ -f "$f" ]; then
+  n=$(cat "$f")
+  if [ "$n" = always ] || [ "$n" -gt 0 ]; then
+    [ "$n" = always ] || echo $((n - 1)) >"$f"
+    echo "kex_exchange_identification: Connection closed by remote host" >&2
+    echo "Connection closed by 127.0.0.1 port 22 (stub)" >&2
+    exit 255
+  fi
+fi
+echo $$ >"$STUB_STATE/ssh.pid"
+if [ -f "$STUB_STATE/ssh_hang" ]; then
+  exec sleep 60
+fi
+remote=${*: -1}
+here=$(cd "$(dirname "$0")" && pwd)
+if [ -f "$STUB_STATE/ssh_no_marker" ]; then
+  PATH="$here:$PATH" bash -c "$remote" | grep -v __IMAS_VMCTL_RC__
+  exit "${PIPESTATUS[0]}"
+fi
+PATH="$here:$PATH" exec bash -c "$remote"

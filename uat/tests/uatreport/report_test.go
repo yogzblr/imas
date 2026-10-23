@@ -384,6 +384,32 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 	if code, out := runSh(dir, "smoke"); code != 0 || !strings.Contains(out, "RESULT: PASS") || !strings.Contains(out, "PASS   C1                     windows  2") {
 		t.Errorf("smoke against the fake: exit %d\n%s", code, out)
 	}
+	// build.log has the tests' output, run.sh's messages and the summary
+	// (W8: Run 2's was empty, as it held only compile errors).
+	buildLog, _ := os.ReadFile(filepath.Join(dir, "report-smoke", "build.log"))
+	for _, want := range []string{"run.sh: running github.com/yogzblr/imas/uat/tests", "=== RUN   TestSmokeC1_", "--- PASS: TestSmokeC1_", "RESULT: PASS"} {
+		if !strings.Contains(string(buildLog), want) {
+			t.Errorf("build.log lacks %q:\n%s", want, buildLog)
+		}
+	}
+	// A failed run calls the diagnostics hook, with "kube" and a
+	// directory in the report (a 1 ms timeout fails the test binary).
+	diagDir := t.TempDir()
+	diag := filepath.Join(diagDir, "diag")
+	if err := os.WriteFile(diag, []byte("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\""+diagDir+"/calls\"\necho diag-output\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runShEnv([]string{"IMAS_UAT_DIAG_HOOK=" + diag, "IMAS_UAT_TIMEOUT=1ms"}, dir, "smoke"); code == 0 {
+		t.Errorf("smoke with a 1 ms timeout must fail: %s", out)
+	}
+	diagCalls, _ := os.ReadFile(filepath.Join(diagDir, "calls"))
+	if want := "kube " + filepath.Join(dir, "report-smoke", "diagnostics", "tests") + "\n"; string(diagCalls) != want {
+		t.Errorf("diagnostics hook calls %q, want %q", diagCalls, want)
+	}
+	buildLog, _ = os.ReadFile(filepath.Join(dir, "report-smoke", "build.log"))
+	if !strings.Contains(string(buildLog), "diag-output") || !strings.Contains(string(buildLog), "collecting the hubs' state") {
+		t.Errorf("build.log lacks the diagnostics:\n%s", buildLog)
+	}
 	// W6: with UAT_SESSION_HOOK each top-level test runs in its own process,
 	// the hook's "phase tests: <Test>" before each; the result is the same.
 	hookDir := t.TempDir()
@@ -450,5 +476,71 @@ func TestRunShAgainstFakeStack(t *testing.T) {
 		if !regexp.MustCompile(`(?m)^PASS   `+id+` `).MatchString(out) || regexp.MustCompile(`(?m)^(SKIP|FAIL)   `+id+` `).MatchString(out) {
 			t.Errorf("%s didn't pass against the fake:\n%s", id, out)
 		}
+	}
+}
+
+func TestCaseTimeAndFailureOutput(t *testing.T) {
+	// Parallel subtests that collect an outcome computed earlier report
+	// about 0 s to go test; the case time Replay logs is the real one.
+	evs := ev(pkg+"/ingredients",
+		"run TestIngredients",
+		"run TestIngredients/I.file.managed",
+		"run TestIngredients/I.file.managed/t1-win",
+		"output TestIngredients/I.file.managed/t1-win     schedule.go:200: [I.file.managed os=windows tenant=1 vm=t1-win step=cook for real] cook for real: job j-real-1, item succeeded",
+		"output TestIngredients/I.file.managed/t1-win     schedule.go:200: [I.file.managed os=windows tenant=1 vm=t1-win step=check out of band] the first real cook (job j-real-1): step \"uat file\" completed, changes: created C:\\x",
+		"output TestIngredients/I.file.managed/t1-win     schedule.go:202: [I.file.managed os=windows tenant=1 vm=t1-win step=check out of band] FAIL: the out of band check exits 1",
+		"output TestIngredients/I.file.managed/t1-win     schedule.go:199: case time on this sprout: 2m21s",
+		"output TestIngredients/I.file.managed/t1-win --- FAIL: TestIngredients/I.file.managed/t1-win (0.00s)",
+		"fail TestIngredients/I.file.managed/t1-win",
+		"run TestIngredients/I.file.managed/t1-ubuntu",
+		"output TestIngredients/I.file.managed/t1-ubuntu     schedule.go:199: case time on this sprout: 1m5s",
+		"pass TestIngredients/I.file.managed/t1-ubuntu",
+		"fail TestIngredients/I.file.managed",
+		"fail TestIngredients",
+	)
+	r := summarize(t, "ingredients", []string{"I.file.managed"}, evs)
+	if l, ok := lineFor(r, "I.file.managed", "windows", "1"); !ok || l.Elapsed != 141 || l.Status != "FAIL" {
+		t.Errorf("windows line %+v", l)
+	}
+	if l, ok := lineFor(r, "I.file.managed", "ubuntu", "1"); !ok || l.Elapsed != 65 || len(l.Output) != 0 {
+		t.Errorf("ubuntu line %+v", l)
+	}
+	var buf bytes.Buffer
+	if err := r.WriteJUnit(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc junitSuites
+	if err := xml.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var win *junitCase
+	for i, c := range doc.Suites[0].Cases {
+		if c.Name == "I.file.managed os=windows tenant=1" {
+			win = &doc.Suites[0].Cases[i]
+		}
+	}
+	if win == nil || win.Time != "141.0" || win.Failure == nil {
+		t.Fatalf("windows case %+v\n%s", win, buf.String())
+	}
+	for _, want := range []string{"job j-real-1, item succeeded", `step "uat file" completed, changes: created C:\x`, "--- TestIngredients/I.file.managed/t1-win:"} {
+		if !strings.Contains(win.Failure.Body, want) {
+			t.Errorf("failure body lacks %q:\n%s", want, win.Failure.Body)
+		}
+	}
+}
+
+func TestOutputOfIsBounded(t *testing.T) {
+	n := &node{name: "TestX"}
+	for i := 0; i < 1000; i++ {
+		n.output = append(n.output, "line "+strings.Repeat("x", i%7))
+	}
+	got := outputOf(n)
+	if len(got) != maxOutputLines+2 || !strings.Contains(strings.Join(got, "\n"), "800 lines left out") {
+		t.Errorf("%d lines: %v", len(got), got[:3])
+	}
+	long := &node{name: "TestLong", output: []string{strings.Repeat("y", 5<<20)}}
+	got = outputOf(long)
+	if len(got) != 2 || len(got[1]) > maxLineBytes+64 || !strings.HasSuffix(got[1], "bytes left out)") {
+		t.Errorf("a 5 MiB line must be cut to %d bytes: %d lines, %d bytes", maxLineBytes, len(got), len(got[len(got)-1]))
 	}
 }
