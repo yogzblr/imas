@@ -3,6 +3,7 @@ package ingredients
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -111,6 +112,31 @@ func BuildPlan(reg *Registry, cases []*Case, sprouts []harness.Sprout) *Plan {
 		p.Jobs[c.ID] = jobs
 	}
 	return p
+}
+
+// NeedSELinux is the need of a case that only an SELinux-enabled kernel
+// can pass (getenforce, getsebool, setenforce).
+const NeedSELinux = "selinux"
+
+// ContainerSkip is the reason a job that needs SELinux doesn't run when
+// the sprouts are containers (harness.json container_sprouts).
+const ContainerSkip = "not run: the local rig runs its sprouts in containers (harness.json container_sprouts), " +
+	"which share the host's kernel and cannot have SELinux enabled, let alone enforcing; " +
+	"the Azure gate runs this on an AlmaLinux 9 VM"
+
+// SkipNeed marks every job not already skipped whose case needs need as
+// skipped with reason.
+func (p *Plan) SkipNeed(need, reason string) {
+	for _, c := range p.Cases {
+		if !slices.Contains(c.Needs, need) {
+			continue
+		}
+		for _, j := range p.Jobs[c.ID] {
+			if j.Skip == "" {
+				j.Skip = reason
+			}
+		}
+	}
 }
 
 // Runner runs the plan's jobs: one worker per sprout VM takes that VM's

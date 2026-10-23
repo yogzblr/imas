@@ -133,6 +133,9 @@ jq -n --arg run_id "$LITE_RUN_ID" --arg zone "$LITE_PRIVATE_DNS_ZONE" \
 # strictly). Envoy listens on 8443, not the default 443; sprouts reach it
 # by the private name. The farmer, bus and Envoy restarts keep their
 # defaults: vmctl.sh runs them on the kind node, whose kubectl works.
+# container_sprouts: the sprouts share the host's kernel, so the
+# ingredients tier skips the cases that need SELinux, saying why (the
+# fallback host sprout is Ubuntu, where those cases don't run anyway).
 saas_url="https://$CORE_FQDN"
 [[ $UAT_CORE_HTTPS_PORT == 443 ]] || saas_url+=":$UAT_CORE_HTTPS_PORT"
 jq -n --arg saas "$saas_url" --arg envoy "https://$DMZ_FQDN:$UAT_DMZ_ENVOY_PORT" \
@@ -144,6 +147,7 @@ jq -n --arg saas "$saas_url" --arg envoy "https://$DMZ_FQDN:$UAT_DMZ_ENVOY_PORT"
 	sprout_envoy_address: $sprout_envoy,
 	ca_file: "uat-ca.pem",
 	vmctl: $vmctl,
+	container_sprouts: true,
 	bind_tenant: {script: $bind, kubeconfig: $kube, endpoints: $ep, state_dir: $st}
 }' >"$LITE_STATE/harness.json"
 

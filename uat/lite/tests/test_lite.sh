@@ -163,14 +163,14 @@ t_up_direct() {
 	check "hosts file: dmz names to the node" has "$T/hosts" "172.29.88.131 uatlite01-dmz.imas-lite.test dmz.uat.imas.internal"
 
 	check "two images built" test "$(count "$STUB_LOG" "docker build")" = 2
-	check "ubuntu image from the official base" has "$STUB_LOG" "docker build -t imas-uat-lite/sprout-ubuntu:1 -f $LITE/sprouts/ubuntu.Dockerfile --build-arg BASE_IMAGE=docker.io/library/ubuntu:24.04 $LITE/sprouts"
+	check "ubuntu image from the official base" has "$STUB_LOG" "docker build -t imas-uat-lite/sprout-ubuntu:2 -f $LITE/sprouts/ubuntu.Dockerfile --build-arg BASE_IMAGE=docker.io/library/ubuntu:24.04 $LITE/sprouts"
 	check "alma image from the official base" has "$STUB_LOG" "--build-arg BASE_IMAGE=docker.io/library/almalinux:9"
 	check "four sprout containers" test "$(count "$STUB_LOG" "docker run -d")" = 4
 	local run
 	run=$(grep -F "docker run -d --name imas-lite-t1-ubuntu " "$STUB_LOG")
 	for want in "--hostname t1-ubuntu" "--network imas-uat-lite --ip 172.29.88.21" "--privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock" \
 		"-p 127.0.0.1:22221:22" "--add-host dmz.uat.imas.internal:172.29.88.131" "--add-host uatlite01-dmz.imas-lite.test:172.29.88.131" \
-		"--add-host uatlite01-core.imas-lite.test:172.29.88.130" "--label imas.io/run-id=lite01" "imas-uat-lite/sprout-ubuntu:1"; do
+		"--add-host uatlite01-core.imas-lite.test:172.29.88.130" "--label imas.io/run-id=lite01" "imas-uat-lite/sprout-ubuntu:2"; do
 		check "t1-ubuntu run has $want" grep -qF -- "$want" <<<"$run"
 	done
 	check "t2-alma at .24, SSH 22224" has "$STUB_LOG" "--name imas-lite-t2-alma --hostname t2-alma --network imas-uat-lite --ip 172.29.88.24 --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock -p 127.0.0.1:22224:22"
@@ -193,6 +193,7 @@ t_up_direct() {
 	local h=$S/harness.json
 	check "harness.json Envoy" jqt "$h" '.envoy_url == "https://uatlite01-dmz.imas-lite.test:8443" and .sprout_envoy_address == "dmz.uat.imas.internal:8443" and .saasapi_url == "https://uatlite01-core.imas-lite.test"'
 	check "harness.json vmctl" jqt "$h" ".vmctl == \"$LITE/vmctl.sh\" and .ca_file == \"uat-ca.pem\""
+	check "harness.json container_sprouts" jqt "$h" '.container_sprouts == true'
 	check "harness.json bind_tenant" jqt "$h" ".bind_tenant == {script: \"$REPO/uat/hub/core/bind-tenant.sh\", kubeconfig: \"$S/kube/core.kubeconfig\", endpoints: \"$S/endpoints.json\", state_dir: \"$S\"}"
 
 	check "core install args" has "$STUB_LOG" "core-install $S/kube/core.kubeconfig $S/endpoints.json $S $TAG"
@@ -485,7 +486,7 @@ t_down() {
 	rc_is 0 up
 	rc_is 0 "$LITE/down.sh" --keep-state --images
 	check "--keep-state" test -s "$S/rig.json"
-	check "--images" has "$STUB_LOG" "docker image rm imas-uat-lite/sprout-alma:1"
+	check "--images" has "$STUB_LOG" "docker image rm imas-uat-lite/sprout-alma:2"
 
 	# A cluster named core that is not on the rig's network is not touched,
 	# and neither is a state directory up.sh did not make.

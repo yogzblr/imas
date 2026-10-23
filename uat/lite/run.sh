@@ -219,7 +219,7 @@ for r in "${runs[@]}"; do
 done
 
 if ((status == 0)); then
-	echo "RIG RESULT: PASS on the Linux sprouts only; $total_rig lines not run on the rig (Windows, X3) are listed above as SKIP, and only the Azure gate can pass them"
+	echo "RIG RESULT: PASS on the Linux sprouts only; $total_rig lines not run on the rig (Windows, X3, the SELinux cases) are listed above as SKIP, and only the Azure gate can pass them"
 else
 	echo "RIG RESULT: FAIL (exit $status); see the summaries above"
 fi
