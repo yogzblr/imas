@@ -141,11 +141,10 @@ func TestSupplementaryGroupsAndPrimary(t *testing.T) {
 	if got, want := supplementaryGroups("iuu"), []string{"wheel", "docker"}; !slices.Equal(got, want) {
 		t.Errorf("supplementaryGroups = %q, want %q", got, want)
 	}
-	if got := primaryGroupName("1001"); got != "iuu" {
-		t.Errorf("primaryGroupName(1001) = %q, want iuu", got)
-	}
-	if got := primaryGroupName("4242"); got != "" {
-		t.Errorf("primaryGroupName(4242) = %q, want empty", got)
+	for id, want := range map[string]string{"1001": "iuu", "10": "wheel", "4242": "4242", "wheel": "wheel", "users": "users", "": ""} {
+		if got := groupName(id); got != want {
+			t.Errorf("groupName(%q) = %q, want %q", id, got, want)
+		}
 	}
 }
 
@@ -160,6 +159,9 @@ func TestBuildUsermodArgsGroups(t *testing.T) {
 		{"primary group listed", "iuu:x:1001:\nwheel:x:10:iuu\n", []string{"iuu", "wheel"}, nil},
 		{"missing one", "iuu:x:1001:\nwheel:x:10:iuu\ndocker:x:990:\n", []string{"wheel", "docker"}, []string{"-G", "wheel,docker", "iuu"}},
 		{"extra one", "iuu:x:1001:\nwheel:x:10:iuu\ndocker:x:990:iuu\n", []string{"wheel"}, []string{"-G", "wheel", "iuu"}},
+		{"by group ID", "iuu:x:1001:\nwheel:x:10:iuu\ndocker:x:990:iuu\n", []string{"10", "docker"}, nil},
+		{"primary by group ID", "iuu:x:1001:\nwheel:x:10:iuu\n", []string{"1001", "wheel"}, nil},
+		{"by unknown group ID", "iuu:x:1001:\nwheel:x:10:iuu\n", []string{"4242"}, []string{"-G", "4242", "iuu"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -168,6 +170,27 @@ func TestBuildUsermodArgsGroups(t *testing.T) {
 				t.Errorf("args = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestBuildUsermodArgsGidAndGroups: when -g moves the primary group away
+// from iuu and groups lists iuu, iuu becomes a supplementary group, so -G
+// is needed as well; when -g names the group already primary, nothing.
+func TestBuildUsermodArgsGidAndGroups(t *testing.T) {
+	withAccountFiles(t, "iuu:x:1001:1001:imas uat:/home/iuu:/bin/sh\n", "iuu:x:1001:\nwheel:x:10:iuu\nstaff:x:50:\n")
+	tests := []struct {
+		gid  string
+		want []string
+	}{
+		{"50", []string{"-g", "50", "-G", "iuu,wheel", "iuu"}},
+		{"staff", []string{"-g", "staff", "-G", "iuu,wheel", "iuu"}},
+		{"1001", nil},
+	}
+	for _, tt := range tests {
+		got := buildUsermodArgs("iuu", "", tt.gid, "", "", "imas uat", "", []string{"iuu", "wheel"}, testUser)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("gid %s: args = %q, want %q", tt.gid, got, tt.want)
+		}
 	}
 }
 

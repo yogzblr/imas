@@ -140,12 +140,17 @@ func supplementaryGroups(username string) []string {
 	return names
 }
 
-// primaryGroupName returns the name of the group with gid in
-// groupFilePath, or "".
-func primaryGroupName(gid string) string {
-	name := ""
+// groupName returns the name of the group id names: a group ID, as usermod
+// reads an all-digit -g or -G entry, becomes the name of the group with
+// that ID in groupFilePath; a name, or an ID no group has, is returned as
+// is.
+func groupName(id string) string {
+	if id == "" || strings.Trim(id, "0123456789") != "" {
+		return id
+	}
+	name := id
 	scanColonFile(groupFilePath, func(fields []string) bool {
-		if len(fields) >= 3 && fields[2] == gid {
+		if len(fields) >= 3 && fields[2] == id {
 			name = fields[0]
 			return false
 		}
@@ -155,13 +160,14 @@ func primaryGroupName(gid string) string {
 }
 
 // sameGroups reports whether usermod -G with desired would leave the
-// supplementary groups as they are. The primary group may be listed in
-// desired: usermod accepts it, but it never shows as a supplementary
-// member, so it is left out of the comparison.
+// supplementary groups as they are. desired may name groups by ID. The
+// primary group (a name) may be listed in desired: usermod accepts it, but
+// it never shows as a supplementary member, so it is left out of the
+// comparison.
 func sameGroups(desired, current []string, primary string) bool {
 	want := map[string]bool{}
 	for _, g := range desired {
-		if g != "" && g != primary {
+		if g = groupName(g); g != "" && g != primary {
 			want[g] = true
 		}
 	}
@@ -344,7 +350,13 @@ func buildUsermodArgs(name, uid, gid, shell, home, comment, passwordHash string,
 			args = append(args, "-p", passwordHash)
 		}
 	}
-	if len(groups) > 0 && !sameGroups(groups, supplementaryGroups(name), primaryGroupName(existing.Gid)) {
+	// The primary group after this usermod: the requested one when -g is
+	// given, so a group it stops being primary still gets -G.
+	primary := existing.Gid
+	if gid != "" {
+		primary = gid
+	}
+	if len(groups) > 0 && !sameGroups(groups, supplementaryGroups(name), groupName(primary)) {
 		args = append(args, "-G", strings.Join(groups, ","))
 	}
 	if len(args) == 0 {
