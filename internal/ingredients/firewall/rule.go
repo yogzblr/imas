@@ -257,6 +257,21 @@ func uint16be(v uint16) []byte {
 	return []byte{byte(v >> 8), byte(v)}
 }
 
+// ruleUserData is the user data a rule named name carries: its name as an
+// nftables comment, NUL-terminated as the nft CLI writes it. nft refuses
+// to show a comment without the NUL, so such a rule was invisible to
+// `nft list` by name (UAT I.firewall.rule_present).
+func ruleUserData(name string) []byte {
+	return userdata.AppendString(nil, userdata.TypeComment, name)
+}
+
+// commentTerminated reports whether the rule's comment ends in the NUL
+// nft needs to show it. Rules written before ruleUserData lack it.
+func commentTerminated(rule *nft.Rule) bool {
+	c := userdata.Get(rule.UserData, userdata.TypeComment)
+	return len(c) > 0 && c[len(c)-1] == 0
+}
+
 func ruleComment(rule *nft.Rule) (string, bool) {
 	c := userdata.Get(rule.UserData, userdata.TypeComment)
 	if c == nil {
@@ -265,21 +280,24 @@ func ruleComment(rule *nft.Rule) (string, bool) {
 	return string(bytes.TrimRight(c, "\x00")), true
 }
 
-// findRuleByName scans every rule in the chain for one whose comment
-// matches spec.name. Comments are how this ingredient makes an otherwise
-// anonymous nftables rule addressable/idempotent by name (nftables rules
-// have no native "name", only a numeric handle assigned on creation).
-func findRuleByName(conn nftConn, table *nft.Table, chain *nft.Chain, name string) (*nft.Rule, error) {
+// findRulesByName returns every rule in the chain whose comment is name.
+// Comments are how this ingredient makes an otherwise anonymous nftables
+// rule addressable/idempotent by name (nftables rules have no native
+// "name", only a numeric handle assigned on creation). nftables doesn't
+// keep comments unique, so a name added twice (by hand, or by a
+// script run twice) is held by more than one rule.
+func findRulesByName(conn nftConn, table *nft.Table, chain *nft.Chain, name string) ([]*nft.Rule, error) {
 	rules, err := conn.GetRules(table, chain)
 	if err != nil {
 		return nil, fmt.Errorf("listing rules in chain %s: %w", chain.Name, err)
 	}
+	var found []*nft.Rule
 	for _, r := range rules {
 		if c, ok := ruleComment(r); ok && c == name {
-			return r, nil
+			found = append(found, r)
 		}
 	}
-	return nil, nil
+	return found, nil
 }
 
 func rulePresent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) {
@@ -291,18 +309,30 @@ func rulePresent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) 
 		return cook.Result{Failed: true}, err
 	}
 
-	existing, err := findRuleByName(conn, table, chain, spec.name)
+	named, err := findRulesByName(conn, table, chain, spec.name)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	if existing != nil && reflect.DeepEqual(existing.Exprs, wantExprs) {
+	// The first rule of the name is the one kept; any later ones are
+	// removed, as rule_absent removes them all, so the name ends up on
+	// exactly one rule.
+	var existing *nft.Rule
+	var extra []*nft.Rule
+	if len(named) > 0 {
+		existing, extra = named[0], named[1:]
+	}
+	matches := existing != nil && reflect.DeepEqual(existing.Exprs, wantExprs) && commentTerminated(existing)
+	if matches && len(extra) == 0 {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
 			cook.Snprintf("rule %s in %s/%s is already present and matches", spec.name, spec.table, spec.chain),
 		}}, nil
 	}
 
 	verb := "added"
-	if existing != nil {
+	switch {
+	case matches:
+		verb = "de-duplicated"
+	case existing != nil:
 		verb = "updated"
 	}
 	if dryRun {
@@ -311,21 +341,36 @@ func rulePresent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) 
 		}}, nil
 	}
 
-	if existing != nil {
-		if err := conn.DelRule(existing); err != nil {
-			return cook.Result{Failed: true}, fmt.Errorf("replacing rule %s: %w", spec.name, err)
-		}
-	}
 	newRule := &nft.Rule{
 		Table:    table,
 		Chain:    chain,
 		Exprs:    wantExprs,
-		UserData: userdata.Append(nil, userdata.TypeComment, []byte(spec.name)),
+		UserData: ruleUserData(spec.name),
 	}
-	if spec.hasPosition {
+	for _, r := range extra {
+		if err := conn.DelRule(r); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("removing a second rule named %s: %w", spec.name, err)
+		}
+	}
+	switch {
+	case matches:
+		// Only the extra rules needed removing.
+	case existing != nil && !spec.hasPosition:
+		// Replace it where it is: deleting and appending would move it to
+		// the end of the chain, behind any drop rule that followed it.
+		newRule.Handle = existing.Handle
+		conn.ReplaceRule(newRule)
+	case existing != nil:
+		// position asks for a place of its own: delete, then insert there.
+		if err := conn.DelRule(existing); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("replacing rule %s: %w", spec.name, err)
+		}
 		newRule.Position = spec.position
 		conn.InsertRule(newRule)
-	} else {
+	case spec.hasPosition:
+		newRule.Position = spec.position
+		conn.InsertRule(newRule)
+	default:
 		conn.AddRule(newRule)
 	}
 	if err := conn.Flush(); err != nil {
@@ -340,11 +385,13 @@ func ruleAbsent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) {
 	table := &nft.Table{Name: spec.table, Family: spec.family}
 	chain := &nft.Chain{Name: spec.chain, Table: table}
 
-	existing, err := findRuleByName(conn, table, chain, spec.name)
+	// Every rule of the name goes: removing only the first would leave the
+	// name present, and the next run would remove another.
+	existing, err := findRulesByName(conn, table, chain, spec.name)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	if existing == nil {
+	if len(existing) == 0 {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
 			cook.Snprintf("rule %s in %s/%s is already absent", spec.name, spec.table, spec.chain),
 		}}, nil
@@ -354,13 +401,17 @@ func ruleAbsent(conn nftConn, spec ruleSpec, dryRun bool) (cook.Result, error) {
 			cook.Snprintf("rule %s in %s/%s would be removed", spec.name, spec.table, spec.chain),
 		}}, nil
 	}
-	if err := conn.DelRule(existing); err != nil {
-		return cook.Result{Failed: true}, fmt.Errorf("removing rule %s: %w", spec.name, err)
+	for _, r := range existing {
+		if err := conn.DelRule(r); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("removing rule %s: %w", spec.name, err)
+		}
 	}
 	if err := conn.Flush(); err != nil {
 		return cook.Result{Failed: true}, fmt.Errorf("removing rule %s: %w", spec.name, err)
 	}
-	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{
-		cook.Snprintf("rule %s in %s/%s has been removed", spec.name, spec.table, spec.chain),
-	}}, nil
+	notes := []fmt.Stringer{cook.Snprintf("rule %s in %s/%s has been removed", spec.name, spec.table, spec.chain)}
+	if len(existing) > 1 {
+		notes = append(notes, cook.Snprintf("%d rules carried the name %s; all were removed", len(existing), spec.name))
+	}
+	return cook.Result{Succeeded: true, Changed: true, Notes: notes}, nil
 }

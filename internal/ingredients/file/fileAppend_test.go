@@ -125,13 +125,14 @@ func TestAppend(t *testing.T) {
 			error: nil,
 		},
 		{
-			name:   "AppendFileWithoutContent",
+			// The first run wrote the text, so a second finds it.
+			name:   "AppendFileWithoutContentAgain",
 			params: map[string]interface{}{"name": fileWithoutContent, "text": "test"},
 			expected: cook.Result{
 				Succeeded: true,
 				Failed:    false,
 				Changed:   false,
-				Notes:     []fmt.Stringer{cook.Snprintf("file %s does not contain all specified content", fileWithoutContent), cook.Snprintf("appended to %s", fileWithoutContent)},
+				Notes:     []fmt.Stringer{},
 			},
 			error: nil,
 		},
@@ -171,6 +172,57 @@ func TestAppend(t *testing.T) {
 				}
 			}
 			compareResults(t, result, test.expected)
+		})
+	}
+}
+
+// TestAppendWritesTheText checks the file itself, not only the result:
+// the append used to report "appended" while writing nothing, so every run
+// appended again and the text never reached the file (UAT I.file.append).
+func TestAppendWritesTheText(t *testing.T) {
+	tests := []struct {
+		name, initial string
+		text          interface{}
+		want          string
+	}{
+		{"one line", "line one\n", []interface{}{"imas uat x"}, "line one\nimas uat x\n"},
+		{"string text", "line one\n", "imas uat x", "line one\nimas uat x\n"},
+		{"list items are lines", "line one\n", []interface{}{"a", "b"}, "line one\na\nb\n"},
+		{"only the missing lines", "b\nline one\n", []interface{}{"a", "b", "c"}, "b\nline one\na\nc\n"},
+		{"last line without newline", "line one", []interface{}{"x"}, "line one\nx\n"},
+		{"empty file", "", []interface{}{"x"}, "x\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name := filepath.Join(t.TempDir(), "f.txt")
+			if err := os.WriteFile(name, []byte(tt.initial), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f := File{method: "append", params: map[string]interface{}{"name": name, "text": tt.text}}
+
+			res, err := f.append(context.Background(), true)
+			if err != nil || !res.Changed {
+				t.Fatalf("test mode: changed %v, err %v; want a pending change", res.Changed, err)
+			}
+			if got, _ := os.ReadFile(name); string(got) != tt.initial {
+				t.Fatalf("test mode wrote the file: %q", got)
+			}
+
+			res, err = f.append(context.Background(), false)
+			if err != nil || !res.Succeeded || !res.Changed {
+				t.Fatalf("first run: %+v, err %v; want a change", res, err)
+			}
+			if got, _ := os.ReadFile(name); string(got) != tt.want {
+				t.Fatalf("file holds %q, want %q", got, tt.want)
+			}
+
+			res, err = f.append(context.Background(), false)
+			if err != nil || !res.Succeeded || res.Changed {
+				t.Fatalf("second run: %+v, err %v; want no change", res, err)
+			}
+			if got, _ := os.ReadFile(name); string(got) != tt.want {
+				t.Fatalf("second run changed the file to %q", got)
+			}
 		})
 	}
 }

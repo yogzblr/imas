@@ -129,6 +129,11 @@ out=$(acc sweep log-retention 2>/dev/null) && jq -e '.sweep == "log-retention" a
 	grep -q "create job imas-uat-log-retention-[0-9]* --from=cronjob/imas-core-farmer-log-retention" "$ACC_STATE/calls.log" &&
 	ok "sweep log-retention: a Job from the CronJob, waited for" || bad "sweep log-retention: $out"
 ACC_JOB_RC=1 refused "sweep log-retention fails when the Job doesn't complete" "did not complete" acc sweep log-retention
+# The stub prints the file as it is: it stands in for the jsonpath output.
+printf 'endpoints ready [] not ready [10.244.0.9]' >"$ACC_STATE/get-endpoints-imas-uat-rustfs.json"
+ACC_JOB_RC=1 refused "a failed log retention Job reports the object store's endpoints" \
+	"endpoints ready \[\] not ready \[10.244.0.9\]" acc sweep log-retention
+rm "$ACC_STATE/get-endpoints-imas-uat-rustfs.json"
 
 jq -n '{spec: {selector: {matchLabels: {"app.kubernetes.io/name": "farmer", "app.kubernetes.io/component": "farmer"}},
 	template: {spec: {containers: [{name: "farmer", env: [{name: "IMAS_RECIPE_AUDIT_RETENTION_DAYS", value: "1"},

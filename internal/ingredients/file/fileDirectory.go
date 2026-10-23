@@ -41,6 +41,9 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 		}, ErrDeleteRoot
 	}
 	d := dir{}
+	// changed is set by every step that alters the directory, so a run
+	// that finds it as wanted reports no change.
+	changed := false
 	// create the directory if it doesn't exist
 	{
 		st, statErr := os.Stat(name)
@@ -53,6 +56,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					notes = append(notes, cook.Snprintf("directory %s already exists", name))
 				} else {
 					notes = append(notes, cook.Snprintf("would create directory %s", name))
+					changed = true
 				}
 			} else {
 				if dirExists {
@@ -66,6 +70,7 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 						}, errCreate
 					}
 					notes = append(notes, cook.Snprintf("created directory %s", name))
+					changed = true
 				}
 			}
 		} else if !dirExists {
@@ -84,32 +89,46 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, lookupErr
 			}
-			uid, parseErr := strconv.ParseUint(userL.Uid, 10, 32)
+			uid, parseErr := parseID(userL.Uid)
 			if parseErr != nil {
 				return cook.Result{
 					Succeeded: false, Failed: true, Notes: notes,
 				}, parseErr
 			}
 
-			if test {
-				notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.user))
+			if ownedBy(name, uid, -1) {
+				notes = append(notes, cook.Snprintf("%s is already owned by %s", name, d.user))
 			} else {
-				chownErr := os.Chown(name, int(uint32(uid)), -1)
-				if chownErr != nil {
-					return cook.Result{
-						Succeeded: false, Failed: true, Notes: notes,
-					}, chownErr
+				changed = true
+				if test {
+					notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.user))
+				} else {
+					chownErr := os.Chown(name, uid, -1)
+					if chownErr != nil {
+						return cook.Result{
+							Succeeded: false, Failed: true, Notes: notes,
+						}, chownErr
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", name, d.user))
 				}
-				notes = append(notes, cook.Snprintf("chown %s to %s", name, d.user))
 			}
-			if val, ok := f.params["recurse"].(bool); ok && val {
-				walkErr := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
-					if test {
-						notes = append(notes, cook.Snprintf("would chown %s to %s", name, val))
+			if val, ok := f.params["recurse"].(bool); ok && val && pathExists(name) {
+				walkErr := filepath.WalkDir(name, func(path string, _ fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if ownedBy(path, uid, -1) {
 						return nil
 					}
-					notes = append(notes, cook.Snprintf("chown %s to %s", name, val))
-					return os.Chown(path, int(uint32(uid)), -1)
+					changed = true
+					if test {
+						notes = append(notes, cook.Snprintf("would chown %s to %s", path, d.user))
+						return nil
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", path, d.user))
+					// Lchown: ownedBy reads a link itself, so changing its
+					// target instead would never converge.
+					return os.Lchown(path, uid, -1)
 				})
 				if walkErr != nil {
 					return cook.Result{
@@ -129,31 +148,43 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, lookupErr
 			}
-			gid, parseErr := strconv.ParseUint(group.Gid, 10, 32)
+			gid, parseErr := parseID(group.Gid)
 			if parseErr != nil {
 				return cook.Result{
 					Succeeded: false, Failed: true, Notes: notes,
 				}, parseErr
 			}
-			if test {
-				notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.group))
+			if ownedBy(name, -1, gid) {
+				notes = append(notes, cook.Snprintf("%s is already owned by group %s", name, d.group))
 			} else {
-				chownErr := os.Chown(name, -1, int(uint32(gid)))
-				if chownErr != nil {
-					return cook.Result{
-						Succeeded: false, Failed: true, Notes: notes,
-					}, chownErr
+				changed = true
+				if test {
+					notes = append(notes, cook.Snprintf("would chown %s to %s", name, d.group))
+				} else {
+					chownErr := os.Chown(name, -1, gid)
+					if chownErr != nil {
+						return cook.Result{
+							Succeeded: false, Failed: true, Notes: notes,
+						}, chownErr
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", name, d.group))
 				}
-				notes = append(notes, cook.Snprintf("chown %s to %s", name, d.group))
 			}
-			if val, ok := f.params["recurse"].(bool); ok && val {
-				walkErr := filepath.WalkDir(name, func(path string, d fs.DirEntry, err error) error {
-					if test {
-						notes = append(notes, cook.Snprintf("would chown %s to %s", name, val))
+			if val, ok := f.params["recurse"].(bool); ok && val && pathExists(name) {
+				walkErr := filepath.WalkDir(name, func(path string, _ fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if ownedBy(path, -1, gid) {
 						return nil
 					}
-					notes = append(notes, cook.Snprintf("chown %s to %s", name, val))
-					return os.Chown(path, -1, int(uint32(gid)))
+					changed = true
+					if test {
+						notes = append(notes, cook.Snprintf("would chown %s to %s", path, d.group))
+						return nil
+					}
+					notes = append(notes, cook.Snprintf("chown %s to %s", path, d.group))
+					return os.Lchown(path, -1, gid)
 				})
 				if walkErr != nil {
 					return cook.Result{
@@ -173,9 +204,13 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, fmt.Errorf("invalid dir_mode %q: %w", d.dirMode, parseErr)
 			}
-			if test {
+			if hasPerm(name, os.FileMode(modeVal)) {
+				notes = append(notes, cook.Snprintf("%s already has mode %s", name, val))
+			} else if test {
+				changed = true
 				notes = append(notes, cook.Snprintf("would chmod %s to %s", name, val))
 			} else {
+				changed = true
 				err := os.Chmod(name, os.FileMode(modeVal))
 				if err != nil {
 					return cook.Result{
@@ -196,9 +231,13 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 					Succeeded: false, Failed: true, Notes: notes,
 				}, fmt.Errorf("invalid file_mode %q: %w", d.fileMode, parseErr)
 			}
-			if test {
+			if hasPerm(name, os.FileMode(modeVal)) {
+				notes = append(notes, cook.Snprintf("%s already has mode %s", name, val))
+			} else if test {
+				changed = true
 				notes = append(notes, cook.Snprintf("would chmod %s to %s", name, val))
 			} else {
+				changed = true
 				err := os.Chmod(name, os.FileMode(modeVal))
 				if err != nil {
 					return cook.Result{
@@ -210,6 +249,34 @@ func (f File) directory(ctx context.Context, test bool) (cook.Result, error) {
 	}
 
 	return cook.Result{
-		Succeeded: true, Failed: false, Notes: notes,
+		Succeeded: true, Failed: false, Changed: changed, Notes: notes,
 	}, nil
+}
+
+// parseID parses a numeric user or group ID as an int, the type os.Chown
+// takes. An ID that doesn't fit (over 2^31-1 on a 32-bit build) is an
+// error, never a wrapped-around ID.
+func parseID(s string) (int, error) {
+	id, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if id < 0 {
+		return 0, fmt.Errorf("invalid id %q", s)
+	}
+	return id, nil
+}
+
+// pathExists reports whether name exists. In test mode a directory that
+// would be created doesn't yet, and has no children to walk.
+func pathExists(name string) bool {
+	_, err := os.Lstat(name)
+	return err == nil
+}
+
+// hasPerm reports whether name exists with exactly the permission bits of
+// mode. A missing name (test mode, before it is created) has none.
+func hasPerm(name string, mode os.FileMode) bool {
+	st, err := os.Stat(name)
+	return err == nil && st.Mode().Perm() == mode.Perm()
 }

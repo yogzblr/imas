@@ -26,4 +26,5 @@ var (
 	ErrModifyRoot     = errors.New("cannot modify root directory")
 	ErrMissingTarget  = errors.New("target is missing")
 	ErrPathNotFound   = errors.New("path not found")
+	ErrPathExists     = errors.New("path exists")
 )

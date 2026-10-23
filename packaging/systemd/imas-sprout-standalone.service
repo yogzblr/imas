@@ -20,9 +20,11 @@ NoNewPrivileges=false
 # No PrivateTmp: the sprout manages the host, so what a recipe writes under
 # /tmp or /var/tmp must be the host's own files, visible to admins and to
 # other services (a private /tmp hid every such file from them).
-ReadWritePaths=/usr/local/bin
-ProtectKernelTunables=true
-ProtectKernelModules=true
+# No ProtectKernelTunables, ProtectKernelModules, ProtectControlGroups,
+# ReadWritePaths or other setting that gives the service a mount namespace
+# of its own: the mount ingredient's mounts and unmounts would stay inside
+# it, invisible to the host (UAT I.mount.*), and /proc/sys would be
+# read-only to the sprout. packaging/test checks this.
 
 # Working directory and environment
 WorkingDirectory=/var/cache/imas/sprout

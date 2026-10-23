@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -258,5 +261,121 @@ func TestStartRecipeAuditSweeperZeroKeepsForEver(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if lists != 0 {
 		t.Fatalf("listed %d times with retention 0", lists)
+	}
+}
+
+// TestRunLogRetentionFailsFastWhenUnreachable: a refused connection ends
+// the run within -connect-timeout, exit 1, naming the endpoint, instead of
+// the S3 client retrying until the Job's deadline.
+func TestRunLogRetentionFailsFastWhenUnreachable(t *testing.T) {
+	defer func(d time.Duration) { reachRetry = d }(reachRetry)
+	reachRetry = 10 * time.Millisecond
+	// A port nothing listens on: take one and close it.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := l.Addr().String()
+	l.Close()
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	code := RunLogRetention([]string{"-endpoint", endpoint, "-bucket", "imas-logs",
+		"-credentials-dir", writeCreds(t, "test", "test"), "-connect-timeout", "300ms"}, &stderr)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1: %s", code, stderr.String())
+	}
+	if el := time.Since(start); el > 10*time.Second {
+		t.Fatalf("took %s to give up", el)
+	}
+	for _, want := range []string{endpoint, "did not accept a connection", "Ready"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestWaitReachableRidesOutARestart(t *testing.T) {
+	defer func(d time.Duration) { reachRetry = d }(reachRetry)
+	reachRetry = 10 * time.Millisecond
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := l.Addr().String()
+	l.Close()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		l2, err := net.Listen("tcp", endpoint)
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { l2.Close() })
+		for {
+			c, err := l2.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if err := waitReachable(context.Background(), endpoint, 5*time.Second); err != nil {
+		t.Fatalf("the store came back after 100ms: %v", err)
+	}
+}
+
+func TestDialAddress(t *testing.T) {
+	for _, tt := range []struct {
+		endpoint string
+		ssl      bool
+		want     string
+	}{
+		{"rustfs.svc:9000", false, "rustfs.svc:9000"},
+		{"s3.example.com", true, "s3.example.com:443"},
+		{"s3.example.com", false, "s3.example.com:80"},
+		{"[::1]:9000", false, "[::1]:9000"},
+		{"::1", false, "[::1]:80"},
+	} {
+		if got := dialAddress(tt.endpoint, tt.ssl); got != tt.want {
+			t.Errorf("dialAddress(%q, %v) = %q, want %q", tt.endpoint, tt.ssl, got, tt.want)
+		}
+	}
+}
+
+func TestWaitReachableReportsCancellation(t *testing.T) {
+	defer func(d time.Duration) { reachRetry = d }(reachRetry)
+	reachRetry = 10 * time.Millisecond
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := l.Addr().String()
+	l.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err = waitReachable(ctx, endpoint, time.Minute)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want the parent's context.DeadlineExceeded", err)
+	}
+	if strings.Contains(err.Error(), "for 1m0s") {
+		t.Fatalf("%q claims the connect limit passed", err)
+	}
+}
+
+// TestFirstHopFollowsTheProxy: when HTTP(S)_PROXY applies, the S3 client
+// connects to the proxy, so that is what the readiness check dials.
+func TestFirstHopFollowsTheProxy(t *testing.T) {
+	defer func(f func(*http.Request) (*url.URL, error)) { proxyFor = f }(proxyFor)
+	proxyFor = func(r *http.Request) (*url.URL, error) {
+		if r.URL.Host == "s3.example.com" && r.URL.Scheme == "https" {
+			return url.Parse("http://proxy.corp:3128")
+		}
+		return nil, nil
+	}
+	if got := firstHop("s3.example.com", true); got != "proxy.corp:3128" {
+		t.Errorf("through the proxy: %q, want proxy.corp:3128", got)
+	}
+	if got := firstHop("rustfs.svc:9000", false); got != "rustfs.svc:9000" {
+		t.Errorf("no proxy: %q, want rustfs.svc:9000", got)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 
 	"github.com/gogrlx/snack"
 	"github.com/yogzblr/imas/internal/cook"
@@ -33,14 +35,12 @@ func (p Pkg) keyAdded(ctx context.Context, keyMgr snack.KeyManager, test bool) (
 	if err != nil {
 		return failResult(err)
 	}
-	for _, k := range keys {
-		if k == p.name {
-			return cook.Result{
-				Succeeded: true,
-				Changed:   false,
-				Notes:     []fmt.Stringer{note("key already present: %s", p.name)},
-			}, nil
-		}
+	if keyListed(keys, keyListingName(keyMgr, p.name)) {
+		return cook.Result{
+			Succeeded: true,
+			Changed:   false,
+			Notes:     []fmt.Stringer{note("key already present: %s", p.name)},
+		}, nil
 	}
 	if test {
 		return cook.Result{
@@ -53,11 +53,62 @@ func (p Pkg) keyAdded(ctx context.Context, keyMgr snack.KeyManager, test bool) (
 	if err != nil {
 		return failResult(err)
 	}
+	// A key given as a URL or file is listed by the key's own ID (rpm's
+	// gpg-pubkey-<id>-<date>), not by what the recipe names, so the check
+	// above can't find it. Compare the listing before and after instead:
+	// importing a key that is already there changes nothing.
+	after, err := keyMgr.ListKeys(ctx)
+	if err == nil && !keysAdded(keys, after) {
+		return cook.Result{
+			Succeeded: true,
+			Changed:   false,
+			Notes:     []fmt.Stringer{note("key already present: %s", p.name)},
+		}, nil
+	}
 	return cook.Result{
 		Succeeded: true,
 		Changed:   true,
 		Notes:     []fmt.Stringer{note("added key: %s", p.name)},
 	}, nil
+}
+
+// keyListingName returns the name the key manager lists key as. apt
+// stores a key fetched from a URL in /etc/apt/keyrings/<base>.gpg (the
+// URL's last element without its extension, snack's apt.AddKey) and lists
+// that path; every other key is listed under the name it was given.
+func keyListingName(keyMgr snack.KeyManager, key string) string {
+	m, ok := keyMgr.(interface{ Name() string })
+	if !ok || m.Name() != "apt" {
+		return key
+	}
+	if !strings.HasPrefix(key, "http://") && !strings.HasPrefix(key, "https://") {
+		return key
+	}
+	base := path.Base(key)
+	return path.Join("/etc/apt/keyrings", strings.TrimSuffix(base, path.Ext(base))+".gpg")
+}
+
+func keyListed(keys []string, name string) bool {
+	for _, k := range keys {
+		if k == name {
+			return true
+		}
+	}
+	return false
+}
+
+// keysAdded reports whether after lists a key before doesn't.
+func keysAdded(before, after []string) bool {
+	seen := make(map[string]bool, len(before))
+	for _, k := range before {
+		seen[k] = true
+	}
+	for _, k := range after {
+		if !seen[k] {
+			return true
+		}
+	}
+	return false
 }
 
 func (p Pkg) keyRemoved(ctx context.Context, keyMgr snack.KeyManager, test bool) (cook.Result, error) {

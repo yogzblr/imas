@@ -32,6 +32,7 @@ type nftConn interface {
 	GetRules(t *nft.Table, c *nft.Chain) ([]*nft.Rule, error)
 	AddRule(r *nft.Rule) *nft.Rule
 	InsertRule(r *nft.Rule) *nft.Rule
+	ReplaceRule(r *nft.Rule) *nft.Rule
 	DelRule(r *nft.Rule) error
 
 	Flush() error

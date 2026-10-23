@@ -830,6 +830,21 @@ func TestStringSliceIsSubsetEdgeCases(t *testing.T) {
 		}
 	})
 
+	t.Run("b element matching a later a", func(t *testing.T) {
+		// Skipping "a" must not drop "b" from b too.
+		ok, missing := stringSliceIsSubset([]string{"a", "b"}, []string{"b"})
+		if ok || len(missing) != 1 || missing[0] != "a" {
+			t.Errorf("expected missing [a], got %v %v", ok, missing)
+		}
+	})
+
+	t.Run("repeats count", func(t *testing.T) {
+		ok, missing := stringSliceIsSubset([]string{"x", "x"}, []string{"x"})
+		if ok || len(missing) != 1 || missing[0] != "x" {
+			t.Errorf("expected missing [x], got %v %v", ok, missing)
+		}
+	})
+
 	t.Run("both empty", func(t *testing.T) {
 		ok, missing := stringSliceIsSubset([]string{}, []string{})
 		if !ok {
