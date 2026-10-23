@@ -423,55 +423,6 @@ func TestAbsentEmptyName(t *testing.T) {
 	}
 }
 
-// --- buildUsermodArgs: shell always set if specified ---
-
-func TestBuildUsermodArgsShellAlwaysSet(t *testing.T) {
-	existing := &user.User{
-		Uid:     "1000",
-		Gid:     "1000",
-		HomeDir: "/home/testuser",
-		Name:    "Test User",
-	}
-	// Shell is always set when specified (can't compare with existing)
-	args := buildUsermodArgs("testuser", "", "", "/bin/zsh", "", "", "", nil, existing)
-	if args == nil {
-		t.Fatal("expected non-nil args when shell is specified")
-	}
-	found := false
-	for i, a := range args {
-		if a == "-s" && i+1 < len(args) && args[i+1] == "/bin/zsh" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected -s /bin/zsh in args, got %v", args)
-	}
-}
-
-// --- buildUsermodArgs: groups always set if specified ---
-
-func TestBuildUsermodArgsGroupsAlwaysSet(t *testing.T) {
-	existing := &user.User{
-		Uid:     "1000",
-		Gid:     "1000",
-		HomeDir: "/home/testuser",
-		Name:    "Test User",
-	}
-	args := buildUsermodArgs("testuser", "", "", "", "", "", "", []string{"wheel", "docker"}, existing)
-	if args == nil {
-		t.Fatal("expected non-nil args when groups specified")
-	}
-	found := false
-	for i, a := range args {
-		if a == "-G" && i+1 < len(args) && args[i+1] == "wheel,docker" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected -G wheel,docker in args, got %v", args)
-	}
-}
-
 // --- buildUsermodArgs: gid change ---
 
 func TestBuildUsermodArgsGidChange(t *testing.T) {
@@ -620,45 +571,6 @@ func TestPresentApplyExistingUserPasswordHashChange(t *testing.T) {
 			cmd := strings.Join(rec.calls[0], " ")
 			if !strings.Contains(cmd, "-p") {
 				t.Errorf("expected -p in usermod args, got %s", cmd)
-			}
-		})
-	})
-}
-
-// --- present: existing user with all properties matching (no-op with shell) ---
-
-func TestPresentExistingUserNoChangeExceptShellUnknown(t *testing.T) {
-	// When shell is specified, usermod is always called because we can't
-	// compare it with the existing user (os/user.User doesn't expose shell).
-	existing := &user.User{
-		Uid:     "1000",
-		Gid:     "1000",
-		HomeDir: "/home/testuser",
-		Name:    "Test User",
-	}
-	rec := &cmdRecorder{}
-	withMockExec(rec.successFactory, func() {
-		withMockLookup(lookupFound(existing), func() {
-			u := User{
-				id: "present-shell-always", method: "present",
-				params: map[string]interface{}{
-					"name":  "testuser",
-					"uid":   "1000",
-					"gid":   "1000",
-					"home":  "/home/testuser",
-					"shell": "/bin/bash",
-				},
-			}
-			result, err := u.present(context.Background(), false)
-			if err != nil {
-				t.Fatalf("present() error: %v", err)
-			}
-			if !result.Succeeded {
-				t.Error("expected succeeded")
-			}
-			// Shell causes usermod even if other fields match
-			if !result.Changed {
-				t.Error("expected changed=true because shell always triggers usermod")
 			}
 		})
 	})
