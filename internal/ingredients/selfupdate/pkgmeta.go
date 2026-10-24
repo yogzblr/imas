@@ -1,7 +1,6 @@
 package selfupdate
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // Binding the package to the signed release (security review 2026-10,
@@ -103,22 +103,12 @@ var ErrPackageMismatch = errors.New("selfupdate: the package's own metadata does
 // Seams for tests. Production code always uses these values.
 var (
 	// queryCommand runs a read-only package tool and returns its standard
-	// output; standard error (warnings) is only quoted in an error. The C
-	// locale keeps the output parseable.
+	// output; standard error (warnings) is only quoted in an error, with
+	// standard output. The C locale keeps the output parseable.
 	queryCommand = func(ctx context.Context, name string, args []string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.Env = append(os.Environ(), "LC_ALL=C")
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if len(msg) > 512 {
-				msg = msg[:512] + "..."
-			}
-			return out, fmt.Errorf("%s: %w: %s", name, err, msg)
-		}
-		return out, nil
+		return ingredients.RunCommand(cmd)
 	}
 	// msiProperties reads the named properties from the MSI database at
 	// file (msi_windows.go; refused on other systems).

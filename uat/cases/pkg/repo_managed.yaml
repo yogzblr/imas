@@ -7,12 +7,11 @@ skip_os:
   windows: |
     pkg uses snack, whose only Windows manager is winget; Windows Server 2022 Core doesn't ship winget (App Installer), so every pkg method can only fail there. A Desktop Experience or Server 2025 image would be needed (owner decision).
 notes: |
-  The repository is an empty local one the setup builds: a trusted file: repository on Ubuntu (add-apt-repository), a disabled one on AlmaLinux (dnf config-manager --add-repo with a .repo file), so no package ever comes from it. The revert removes it.
+  The repository is an empty local one the setup builds: a trusted flat file: repository on Ubuntu (the ingredient writes /etc/apt/sources.list.d/<name>.list itself and runs apt-get update), a disabled one on AlmaLinux (dnf config-manager --add-repo with a .repo file), so no package ever comes from it. The revert removes it.
 ubuntu:
   setup: |
     d=/var/tmp/imas-uat-repo-@NONCE@
     mkdir -p $d && : > $d/Packages && (cd $d && apt-ftparchive release . > Release)
-    command -v add-apt-repository >/dev/null
   recipe: |
     steps:
       uat pkg repo_managed:

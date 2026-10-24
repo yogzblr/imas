@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // execCommandContext is a test-overridable factory for exec.Cmd.
@@ -28,7 +30,7 @@ func readUserCrontab(ctx context.Context, user string) ([]Line, error) {
 		if isNoCrontabErr(stderr.String()) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("crontab -l failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("crontab -l failed: %w", ingredients.CommandError("crontab", err, stdout.Bytes(), stderr.Bytes()))
 	}
 	return ParseCrontab(&stdout)
 }
@@ -51,10 +53,13 @@ func writeUserCrontab(ctx context.Context, user string, lines []Line) error {
 	args = append(args, "-")
 	cmd := execCommandContext(ctx, "crontab", args...)
 	cmd.Stdin = &body
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
+	if cmd.Stdout == nil { // a test fake may collect it itself
+		cmd.Stdout = &stdout
+	}
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("crontab install failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("crontab install failed: %w", ingredients.CommandError("crontab", err, stdout.Bytes(), stderr.Bytes()))
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // execCommandContext is a test-overridable factory for exec.Cmd.
@@ -251,7 +252,7 @@ func (u User) present(ctx context.Context, test bool) (cook.Result, error) {
 				cook.SimpleNote(fmt.Sprintf("would create user with command: %s", cmd.String())))
 			return result, nil
 		}
-		if err := cmd.Run(); err != nil {
+		if _, err := ingredients.RunCommand(cmd); err != nil {
 			result.Failed = true
 			result.Notes = append(result.Notes,
 				cook.SimpleNote(fmt.Sprintf("failed to create user: %s", err.Error())))
@@ -282,7 +283,7 @@ func (u User) present(ctx context.Context, test bool) (cook.Result, error) {
 			cook.SimpleNote(fmt.Sprintf("would modify user with command: %s", cmd.String())))
 		return result, nil
 	}
-	if err := cmd.Run(); err != nil {
+	if _, err := ingredients.RunCommand(cmd); err != nil {
 		result.Failed = true
 		result.Notes = append(result.Notes,
 			cook.SimpleNote(fmt.Sprintf("failed to modify user: %s", err.Error())))
