@@ -95,7 +95,7 @@ func isPPAURI(u, owner, name string) bool {
 
 // sourceURIs returns the repository URIs of a sources file's active
 // entries: the URI of each uncommented one-line entry (after its type and
-// [options]) and every value of a deb822 URIs field, continuation lines
+// [options], unquoted) and every value of a deb822 URIs field, continuation lines
 // included.
 func sourceURIs(b []byte) []string {
 	var uris []string
@@ -132,7 +132,8 @@ func sourceURIs(b []byte) []string {
 			}
 		}
 		if len(rest) > 0 {
-			uris = append(uris, rest[0])
+			// apt drops double quotes around a one-line entry's URI.
+			uris = append(uris, strings.Trim(rest[0], `"`))
 		}
 	}
 	return uris

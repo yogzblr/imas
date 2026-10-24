@@ -135,6 +135,7 @@ func TestPPAURIMatch(t *testing.T) {
 		"one-line, old host":      {"deb http://ppa.launchpad.net/deadsnakes/ppa/ubuntu/ jammy main", true},
 		"one-line with options":   {"deb [arch=amd64 signed-by=/k.gpg] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", true},
 		"deb822":                  {noblePPA, true},
+		"one-line, quoted URI":    {`deb "https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu" noble main`, true},
 		"deb822 continuation URI": {"Types: deb\nURIs: https://archive.ubuntu.com/ubuntu\n https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu\nSuites: noble\n", true},
 		"another archive":         {"deb http://ppa.launchpad.net/deadsnakes/ppa2/ubuntu jammy main", false},
 		"a mirror's path":         {"deb https://mirror.example.org/ppa.launchpad.net/deadsnakes/ppa/ubuntu jammy main", false},
