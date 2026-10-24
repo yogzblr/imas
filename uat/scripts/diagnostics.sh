@@ -7,6 +7,10 @@
 #   diagnostics.sh full <out-dir>     the hubs, the sprouts' service logs and
 #                                     Azure's run-command state (the
 #                                     workflow, after a failed test step)
+#   diagnostics.sh vm <out-dir> <vm> [<job id>...]
+#                                     one VM's side of a failure (the
+#                                     harness, after a failed cook or a
+#                                     channel failure on it; W10)
 #
 # For each hub (core and dmz, through their kubeconfigs and so through the
 # Bastion kube tunnels), into <out-dir>/<hub>/:
@@ -29,6 +33,19 @@
 #                      view's power state, guest agent and run-command
 #                      extension status ("execution is in progress" shows
 #                      there)
+# vm writes <out-dir>/<epoch>.txt (the harness passes
+# <report>/diagnostics/<vm>), read through az vm run-command and never the
+# test channel (vmctl.sh with VMCTL_CHANNEL=runcommand), so it works when
+# the tunnel is what failed: the sprout service's state, the last
+# DIAG_VM_LOG_LINES (300) lines of its log (journalctl -u imas-sprout on
+# Linux, %ProgramData%\imas\logs\sprout.log and the end of
+# sprout-crash.log on Windows) and each job id's record (the sprout's
+# <joblogdir>/<id>.jsonl: /var/cache/imas/sprout/jobs on Linux,
+# %ProgramData%\imas\cache\sprout\jobs on Windows). Azure keeps only the
+# last 4096 bytes of a run-command's output, so the VM packs it all
+# (gzip, base64) into a file and hands it over in pieces, one call each, at
+# most DIAG_VM_CHUNKS (6) of them; when it does not fit, it is made again
+# with fewer log lines.
 #
 # Every command is bounded (DIAG_TIMEOUT seconds; kubectl
 # --request-timeout too), a failure is written into the file it was for,
@@ -49,6 +66,10 @@
 #   DIAG_MAX_PODS      pods described per hub (default 25)
 #   DIAG_KEYCLOAK_LINES  Keycloak log lines kept per section (default 2000)
 #   DIAG_SPROUT_SERVICE  the sprout service (default imas-sprout)
+#   DIAG_VM_LOG_LINES  sprout log lines for vm (default 300)
+#   DIAG_VM_CHUNKS     run-command calls for vm's pieces (default 6)
+#   DIAG_VM_JOBDIR     the Linux sprout's joblogdir (default
+#                      /var/cache/imas/sprout/jobs, as packaged)
 #   KUBECTL, AZ        the tools (default kubectl, az)
 set -uo pipefail
 
@@ -63,27 +84,26 @@ kc_lines=${DIAG_KEYCLOAK_LINES:-2000}
 
 usage() {
   echo "usage: $prog kube|full <out-dir>" >&2
+  echo "       $prog vm <out-dir> <vm> [<job id>...]" >&2
   exit 2
 }
 log() { echo "$prog: $*" >&2; }
 
-[ $# -eq 2 ] || usage
+[ $# -ge 2 ] || usage
 mode=$1 out=$2
-case "$mode" in kube | full) ;; *) usage ;; esac
+case "$mode" in
+  kube | full) [ $# -eq 2 ] || usage ;;
+  vm) [ $# -ge 3 ] || usage ;;
+  *) usage ;;
+esac
 [[ "$secs" =~ ^[1-9][0-9]*$ && "$max_pods" =~ ^[0-9]+$ && "$kc_lines" =~ ^[1-9][0-9]*$ ]] || { log "DIAG_TIMEOUT, DIAG_MAX_PODS and DIAG_KEYCLOAK_LINES must be numbers"; exit 2; }
 [[ "$service" =~ ^[A-Za-z0-9._@-]+$ ]] || { log "DIAG_SPROUT_SERVICE has unexpected characters"; exit 2; }
 mkdir -p "$out"
 
-# redact: stdin to stdout with anything secret-shaped replaced.
-redact() {
-  sed -E \
-    -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\[redacted private key]' \
-    -e 's/(Bearer[[:space:]]+)[^[:space:]",;}]+/\1[redacted]/Ig' \
-    -e 's/(Authorization"?[[:space:]]*[:=][[:space:]]*"?Basic[[:space:]]+)[^[:space:]",;}]+/\1[redacted]/Ig' \
-    -e 's/((pass(word|wd)?|secret|token|access[_-]?key|secret[_-]?key|api[_-]?key|credential|client-key-data|client-certificate-data|root[_-]?(user|pass(word)?))[A-Za-z0-9_.-]*"?[[:space:]]*[:=][[:space:]]*)("[^"]*"|[^[:space:],;}]+)/\1[redacted]/Ig' \
-    -e 's/eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/[redacted jwt]/g' \
-    -e 's/(^|[^A-Z0-9])S[OAUNCX][A-Z2-7]{56}([^A-Z2-7]|$)/\1[redacted seed]\2/g'
-}
+# redact: stdin to stdout with anything secret-shaped replaced (shared
+# with collect-artifacts.sh, run.sh and the channel's captures).
+# shellcheck source=redact.sh
+. "$here/redact.sh"
 
 # section FILE TITLE CMD...: appends "== TITLE" and the bounded command's
 # output (redacted) to FILE; a failure is noted there, not fatal.
@@ -104,6 +124,149 @@ section() {
   } >>"$file"
   rm -f "$tmp"
 }
+
+# vm_bundle_linux <lines> <limit> <file> <job id>...: the Linux script that
+# packs the sprout's state, log and job records into <file> (gzip, base64),
+# with fewer log lines until it fits <limit> characters, and prints its size.
+vm_bundle_linux() {
+  local lines=$1 limit=$2 file=$3 jobs="" jobdir=${DIAG_VM_JOBDIR:-/var/cache/imas/sprout/jobs}
+  shift 3
+  [ $# -eq 0 ] || jobs=$(printf "'%s' " "$@")
+  cat <<EOF
+for n in $lines 150 60 20; do
+  {
+    echo "== the sprout service"; systemctl status '$service' --no-pager -l 2>&1 | head -n 20
+    echo "== journalctl -u $service (last \$n lines)"; journalctl -u '$service' --no-pager -n "\$n" -o short-iso 2>&1
+    for j in $jobs; do
+      echo "== job \$j ($jobdir/\$j.jsonl)"
+      cat "$jobdir/\$j.jsonl" 2>&1 || echo "(no record)"
+    done
+  } | gzip -9 | base64 -w0 >'$file'
+  [ "\$(wc -c <'$file')" -le $limit ] && break
+done
+echo "__IMAS_DIAG_SIZE=\$(wc -c <'$file')"
+EOF
+}
+
+# vm_bundle_windows: the same in PowerShell.
+vm_bundle_windows() {
+  local lines=$1 limit=$2 file=$3 jobs="" j
+  shift 3
+  for j in "$@"; do jobs="$jobs'$j',"; done
+  jobs=${jobs%,}
+  cat <<EOF
+\$f = Join-Path \$env:TEMP '$file'
+foreach (\$n in @($lines, 150, 60, 20)) {
+  \$sb = New-Object Text.StringBuilder
+  [void]\$sb.AppendLine('== the sprout service')
+  [void]\$sb.AppendLine((Get-Service -Name '$service' -ErrorAction SilentlyContinue | Format-List Name, Status, StartType | Out-String))
+  \$d = Join-Path \$env:ProgramData 'imas\\logs'
+  foreach (\$p in @(@((Join-Path \$d 'sprout.log'), \$n), @((Join-Path \$d 'sprout-crash.log'), 50))) {
+    if (Test-Path -LiteralPath \$p[0]) {
+      [void]\$sb.AppendLine("== \$(\$p[0]) (last \$(\$p[1]) lines)")
+      Get-Content -LiteralPath \$p[0] -Tail \$p[1] | ForEach-Object { [void]\$sb.AppendLine(\$_) }
+    } else { [void]\$sb.AppendLine("== \$(\$p[0]): none") }
+  }
+  foreach (\$j in @($jobs)) {
+    \$p = Join-Path \$env:ProgramData "imas\\cache\\sprout\\jobs\\\$j.jsonl"
+    [void]\$sb.AppendLine("== job \$j (\$p)")
+    if (Test-Path -LiteralPath \$p) { [void]\$sb.AppendLine((Get-Content -LiteralPath \$p -Raw)) } else { [void]\$sb.AppendLine('(no record)') }
+  }
+  \$bytes = [Text.Encoding]::UTF8.GetBytes(\$sb.ToString())
+  \$ms = New-Object IO.MemoryStream
+  \$gz = New-Object IO.Compression.GzipStream(\$ms, [IO.Compression.CompressionMode]::Compress)
+  \$gz.Write(\$bytes, 0, \$bytes.Length)
+  \$gz.Close()
+  \$b64 = [Convert]::ToBase64String(\$ms.ToArray())
+  if (\$b64.Length -le $limit) { break }
+}
+[IO.File]::WriteAllText(\$f, \$b64)
+Write-Output ('__IMAS_DIAG_SIZE=' + \$b64.Length)
+EOF
+}
+
+# vm_chunk <os> <file> <start> <length> <last>: prints one piece of the
+# bundle; the last call removes it.
+vm_chunk() {
+  local os=$1 file=$2 start=$3 len=$4 last=$5
+  if [ "$os" = windows ]; then
+    cat <<EOF
+\$f = Join-Path \$env:TEMP '$file'
+\$s = [IO.File]::ReadAllText(\$f)
+\$n = [Math]::Max(0, [Math]::Min($len, \$s.Length - $start))
+Write-Output ('__IMAS_DIAG_CHUNK=' + \$s.Substring([Math]::Min($start, \$s.Length), \$n))
+if ($last) { Remove-Item -Force -LiteralPath \$f -ErrorAction SilentlyContinue }
+EOF
+  else
+    printf '%s\n' "printf '__IMAS_DIAG_CHUNK=%s\\n' \"\$(cut -c$((start + 1))-$((start + len)) '$file')\""
+    [ "$last" = 1 ] && echo "rm -f '$file'"
+  fi
+  return 0
+}
+
+# vm_mode <out-dir> <vm> <job id>...: see the header.
+vm_mode() {
+  local dir=$1 vm=$2 uat vmctl os j f stamp size chunk=3000 max lines i n data part rc=0
+  shift 2
+  uat=${DIAG_UAT:-${UAT_SESSION_UAT:-}}
+  vmctl=${DIAG_VMCTL:-$here/../access/vmctl.sh}
+  lines=${DIAG_VM_LOG_LINES:-300}
+  max=${DIAG_VM_CHUNKS:-6}
+  [[ "$lines" =~ ^[1-9][0-9]*$ && "$max" =~ ^[1-9][0-9]*$ ]] || { log "DIAG_VM_LOG_LINES and DIAG_VM_CHUNKS must be numbers"; exit 2; }
+  [[ "$vm" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { log "bad VM name"; exit 2; }
+  local -a jids=()
+  for j in "$@"; do
+    if [[ "$j" =~ ^[A-Za-z0-9_.:-]{1,128}$ ]]; then jids+=("$j"); else log "skipping a malformed job id"; fi
+  done
+  if [ -z "$uat" ] || [ ! -r "$uat" ]; then
+    log "no uat.json (DIAG_UAT, UAT_SESSION_UAT); no VM diagnostics"
+    exit 0
+  fi
+  os=$(jq -r --arg vm "$vm" '.sprouts[$vm].os // "ubuntu"' "$uat")
+  mkdir -p "$dir"
+  stamp=$(date +%s)
+  f="$dir/$stamp.txt"
+  local file="imas-diag-$stamp-$RANDOM.b64" script
+  [ "$os" = windows ] || file="/tmp/$file"
+  local tmp
+  tmp=$(mktemp -d)
+  # Through run-command, not the tunnel: VMCTL_CHANNEL=runcommand.
+  run_vm() { VMCTL_CHANNEL=runcommand timeout -k 10 "$((secs * 4))" "$vmctl" "$uat" run "$vm" "$1" >"$tmp/out" 2>"$tmp/err"; }
+  if [ "$os" = windows ]; then
+    script=$(vm_bundle_windows "$lines" $((chunk * max)) "$file" "${jids[@]}")
+  else
+    script=$(vm_bundle_linux "$lines" $((chunk * max)) "$file" "${jids[@]}")
+  fi
+  run_vm "$script" || rc=$?
+  size=$(sed -n 's/^__IMAS_DIAG_SIZE=\([0-9][0-9]*\).*/\1/p' "$tmp/out" | tail -n 1)
+  {
+    echo "== $vm, through az vm run-command (not the test channel), at $(date -u -d "@$stamp" +%Y-%m-%dT%H:%M:%SZ); jobs: ${jids[*]:-none}"
+    if [ -z "$size" ]; then
+      echo "(the VM did not pack its diagnostics: vmctl.sh exited $rc)"
+      redact <"$tmp/err" | tail -n 20
+    else
+      n=$(((size + chunk - 1) / chunk))
+      [ "$n" -le "$max" ] || n=$max
+      data=""
+      for ((i = 0; i < n; i++)); do
+        run_vm "$(vm_chunk "$os" "$file" $((i * chunk)) "$chunk" "$([ $((i + 1)) -eq "$n" ] && echo 1 || echo 0)")" || true
+        part=$(sed -n 's/^__IMAS_DIAG_CHUNK=//p' "$tmp/out" | tr -d '\r\n' | tail -c "$chunk")
+        data+=$part
+      done
+      if ! printf '%s' "$data" | base64 -d 2>/dev/null | gunzip 2>/dev/null | redact; then
+        echo "(the pieces did not unpack: $size characters packed, ${#data} received)"
+      fi
+    fi
+  } >"$f"
+  rm -rf "$tmp"
+  log "$vm: $f"
+}
+
+if [ "$mode" = vm ]; then
+  shift 2
+  vm_mode "$out" "$@"
+  exit 0
+fi
 
 kubeconfigs=${DIAG_KUBECONFIGS:-}
 if [ -z "$kubeconfigs" ]; then

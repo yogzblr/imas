@@ -348,7 +348,7 @@ check "collect succeeds on a run's state" test "$rc" -eq 0
 listing=$(cd "$o" && find . -type f | sort)
 expected=$(printf '%s\n' ./outputs/dmz/dmz.json ./outputs/enroll/keys.json ./outputs/enroll/sprouts.json \
   ./outputs/hub/core/out/core.json ./outputs/k0s/endpoints.json ./outputs/k0s/k0sctl-dmz.yaml ./outputs/k0s/uat-ca.crt \
-  ./outputs/ha_node_names.json ./outputs/object_store.json ./outputs/run.json ./outputs/uat.json ./report/events.json ./report/junit.xml ./report/summary.txt \
+  ./outputs/ha_node_names.json ./outputs/object_store.json ./outputs/run.json ./outputs/uat.json ./report/build.log ./report/events.json ./report/junit.xml ./report/summary.txt \
   ./report/diagnostics/final/core/pods.txt ./report/diagnostics/final/core/pods/imas-uat.rustfs-0.txt | sort)
 check "exactly the allowlisted, present, regular files (and the diagnostics, no symlink) are copied" test "$listing" = "$expected"
 [ "$listing" = "$expected" ] || diff <(echo "$expected") <(echo "$listing")
@@ -368,6 +368,25 @@ leak_case() { # leak_case NAME STATE-REL OUT-REL CONTENT
   check "... while clean files are kept" test -s "$STUB_STATE/out/report/summary.txt"
 }
 leak_case "JWT" report/events.json report/events.json "{\"Output\":\"Authorization: Bearer $(fake_jwt)\"}"
+# build.log and the channel logs are redacted on the way, not deleted (W10:
+# UAT Run 2 #6 lost its build.log to the login token of a ::add-mask:: line).
+new_state redact-logs
+mkdir -p "$STUB_STATE/state/report" "$STUB_STATE/state/access/logs"
+printf 'run.sh: TestIngredients: 11352s of the budget left\n--- PASS: TestSmokeC1_CmdRunEverySprout (0.12s)\n::add-mask::%s\nAuthorization: Bearer %s\n' "$(fake_jwt)" "$(rep Q 24)" >"$STUB_STATE/state/report/build.log"
+printf 'Opening tunnel on port: 20106\ntoken=%s\n' "$(rep Q 24)" >"$STUB_STATE/state/access/logs/t1-win-winrm.log"
+printf '2026-10-24T17:21:00Z session.sh: t1-win winrm tunnel reopened\n' >"$STUB_STATE/state/access/logs/supervisor.log"
+run collect-artifacts.sh "$STUB_STATE/state" "$STUB_STATE/out"
+check "a build.log with a token is redacted and uploaded, and the step passes" test "$rc" -eq 0 -a -s "$STUB_STATE/out/report/build.log"
+check "... the run's lines kept" grep -q "11352s of the budget left" "$STUB_STATE/out/report/build.log"
+check "... go test's own lines untouched" grep -q -- "--- PASS: TestSmokeC1_CmdRunEverySprout (0.12s)" "$STUB_STATE/out/report/build.log"
+check "... the token and the Bearer credential gone" test -z "$(grep -E 'eyJ|QQQQQQQQ' "$STUB_STATE/out/report/build.log")"
+check "the tunnels' logs go to diagnostics/channel/tunnels, redacted" \
+  test -s "$STUB_STATE/out/report/diagnostics/channel/tunnels/t1-win-winrm.log" -a -z "$(grep QQQQ "$STUB_STATE/out/report/diagnostics/channel/tunnels/t1-win-winrm.log")"
+check "the supervisor's log goes to diagnostics/channel" grep -q "reopened" "$STUB_STATE/out/report/diagnostics/channel/supervisor.log"
+new_state no-build-log
+mkdir -p "$STUB_STATE/state/report"
+run collect-artifacts.sh "$STUB_STATE/state" "$STUB_STATE/out"
+check "without a build.log there is still one, saying why" grep -q "the run wrote no report/build.log" "$STUB_STATE/out/report/build.log"
 leak_case "JSON password" enroll/run.json outputs/enroll/run.json '{"password": "placeholder"}'
 leak_case "client secret" hub/core/out/core.json outputs/hub/core/out/core.json '{"keycloak":{"client_secret":"placeholder"}}'
 leak_case "NKey seed" uat.json outputs/uat.json "{\"x\":\"$(fake_nkey SO)\"}"
@@ -440,6 +459,36 @@ DIAG_KUBECONFIGS="core=$STUB_STATE/core.kubeconfig" run diagnostics.sh kube "$ST
 check "a hub that does not answer: still exit 0, the failure noted" test "$rc" -eq 0 -a -n "$(grep 'exited 1' "$STUB_STATE/out/core/pods.txt")"
 run diagnostics.sh bogus "$STUB_STATE/out"
 check "an unknown mode is a usage error" test "$rc" -eq 2
+
+# vm: one VM's side of a failure through run-command, in pieces (W10).
+new_state diag-vm
+mkdir -p "$STUB_STATE/bin" "$STUB_STATE/jobs"
+cat >"$STUB_STATE/vmctl" <<'VMCTL'
+#!/usr/bin/env bash
+echo "vmctl $2 $3 channel=${VMCTL_CHANNEL:-tunnel}" >>"$STUB_STATE/calls.log"
+PATH="$STUB_STATE/bin:$PATH" bash -c "$4"
+echo "vmctl.sh: exit_code=0" >&2
+VMCTL
+printf '#!/usr/bin/env bash\necho "imas-sprout.service - active (running); password=stub-value-9"\n' >"$STUB_STATE/bin/systemctl"
+# 400 log lines that do not compress, so the bundle needs several pieces
+# and is made again with fewer lines.
+# shellcheck disable=SC2016 # the stub's own script
+printf '#!/usr/bin/env bash\nn=400; while [ $# -gt 0 ]; do [ "$1" = -n ] && n=$2; shift; done\nfor i in $(seq $((401 - n)) 400); do echo "log line $i $(head -c 45 /dev/urandom | base64)"; done\n' >"$STUB_STATE/bin/journalctl"
+chmod +x "$STUB_STATE/bin/systemctl" "$STUB_STATE/bin/journalctl" "$STUB_STATE/vmctl"
+echo '{"ID":"uat firewall rule_present","CompletionStatus":3,"Error":"netsh.exe: exit status 1"}' >"$STUB_STATE/jobs/ace3f2c3-0862.jsonl"
+d="$STUB_STATE/out/t1-ubuntu"
+DIAG_UAT="$access_uat" DIAG_VMCTL="$STUB_STATE/vmctl" DIAG_VM_JOBDIR="$STUB_STATE/jobs" DIAG_VM_CHUNKS=4 \
+  run diagnostics.sh vm "$d" t1-ubuntu ace3f2c3-0862 'bad;id'
+f=$(find "$d" -name '*.txt' | head -n 1)
+check "vm: exits 0 and writes one file into the VM's directory" test "$rc" -eq 0 -a -s "$f"
+check "vm: every call goes through run-command, never the tunnel" test -z "$(grep -v 'channel=runcommand' "$STUB_STATE/calls.log")"
+check "vm: the bundle comes in several pieces (Azure keeps 4096 bytes a call)" test "$(grep -c '^vmctl run t1-ubuntu' "$STUB_STATE/calls.log")" -ge 3
+check "vm: the sprout's log ends with its last line" grep -q "^log line 400 " "$f"
+check "vm: ... shortened to fit the pieces" test -z "$(grep '^log line 1 ' "$f")"
+check "vm: the failed job's record" grep -q '"Error":"netsh.exe: exit status 1"' "$f"
+check "vm: a malformed job id is never sent" test -z "$(grep -F 'bad;id' "$f")"
+check "vm: redacted" test -z "$(grep 'stub-value-9' "$f")"
+check "vm: the VM's temporary file is removed" test -z "$(find /tmp -maxdepth 1 -name 'imas-diag-*.b64' -newer "$STUB_STATE/vmctl" 2>/dev/null)"
 
 ###############################################################################
 echo "# verify-teardown.sh"
