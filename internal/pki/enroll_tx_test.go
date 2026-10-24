@@ -280,6 +280,7 @@ func TestIsRetryableTxError(t *testing.T) {
 		{"server gone", driverError(2006, "MySQL server has gone away"), false, true},
 		{"wsrep not ready", driverError(1047, "WSREP has not yet prepared node for application use"), false, true},
 		{"duplicate entry", driverError(1062, "Duplicate entry"), false, false},
+		{"sqlite unique", sqliteCodedError(2067), false, false},
 		{"no rows", sql.ErrNoRows, false, false},
 		// The number is what counts, not the text.
 		{"text only", errors.New("Error 1213 (40001): Deadlock found"), false, false},
@@ -321,6 +322,23 @@ func TestEnrollDBError(t *testing.T) {
 // as they were.
 func TestAcceptEnrolledNKeyTx(t *testing.T) {
 	newTestDB(t)
+	testAcceptEnrolledNKeyTx(t)
+}
+
+// On MySQL, and with clientFoundRows set in the DSN, under which a no-op
+// ON DUPLICATE KEY UPDATE reports a conflict as one row affected: the
+// duplicate is told by its error, so a row another NKey holds is never
+// taken for this one's.
+func TestMySQLAcceptEnrolledNKeyTx(t *testing.T) {
+	for name, foundRows := range map[string]bool{"default DSN": false, "clientFoundRows": true} {
+		t.Run(name, func(t *testing.T) {
+			setupMySQLEnrollTestDSN(t, func(c *mysql.Config) { c.ClientFoundRows = foundRows })
+			testAcceptEnrolledNKeyTx(t)
+		})
+	}
+}
+
+func testAcceptEnrolledNKeyTx(t *testing.T) {
 	a, b := testNKeyPub(t, testEnrollNKey(t)), testNKeyPub(t, testEnrollNKey(t))
 	accept := func(id, nkey string) error {
 		return db.Transaction(func(tx *gorm.DB) error {
@@ -355,5 +373,26 @@ func TestAcceptEnrolledNKeyTx(t *testing.T) {
 	want := []nkeyRow{{TenantID: "t_1", SproutID: "web-01", NKey: a, State: stateAccepted}, {TenantID: "t_2", SproutID: "web-01", NKey: b, State: stateAccepted}}
 	if fmt.Sprint(rows) != fmt.Sprint(want) {
 		t.Errorf("rows = %+v, want %+v", rows, want)
+	}
+}
+
+func TestIsDuplicateKeyError(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{driverError(1062, "Duplicate entry"), true},
+		{fmt.Errorf("insert: %w", driverError(1062, "Duplicate entry")), true},
+		{sqliteCodedError(1555), true},  // SQLITE_CONSTRAINT_PRIMARYKEY
+		{sqliteCodedError(2067), true},  // SQLITE_CONSTRAINT_UNIQUE
+		{sqliteCodedError(1299), false}, // SQLITE_CONSTRAINT_NOTNULL
+		{sqliteCodedError(19), false},
+		{errDeadlock, false},
+		{errors.New("Error 1062 (23000): Duplicate entry"), false},
+	} {
+		if got := isDuplicateKeyError(tc.err); got != tc.want {
+			t.Errorf("isDuplicateKeyError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }

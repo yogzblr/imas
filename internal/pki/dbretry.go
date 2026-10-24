@@ -36,6 +36,7 @@ var ErrEnrollmentUnavailable = errors.New("pki: enrollment temporarily unavailab
 const (
 	mysqlLockWaitTimeout  = 1205 // ER_LOCK_WAIT_TIMEOUT
 	mysqlDeadlock         = 1213 // ER_LOCK_DEADLOCK; also a Galera certification conflict
+	mysqlDuplicateEntry   = 1062 // ER_DUP_ENTRY
 	mysqlServerShutdown   = 1053 // ER_SERVER_SHUTDOWN
 	mysqlWSREPNotReady    = 1047 // ER_UNKNOWN_COM_ERROR: PXC's "WSREP has not yet prepared node for application use"
 	mysqlQueryInterrupted = 1317 // ER_QUERY_INTERRUPTED: aborted by a replicated DDL on PXC
@@ -49,6 +50,13 @@ const (
 const (
 	sqliteBusy   = 5
 	sqliteLocked = 6
+)
+
+// SQLite's extended result codes for a primary key or unique index
+// violation (SQLITE_CONSTRAINT_PRIMARYKEY, SQLITE_CONSTRAINT_UNIQUE).
+const (
+	sqliteConstraintPrimaryKey = 1555
+	sqliteConstraintUnique     = 2067
 )
 
 // isDeadlockError reports whether err is, or wraps, the driver's error
@@ -80,6 +88,27 @@ func sqliteErrorCode(err error) int {
 		return coded.Code() & 0xff
 	}
 	return 0
+}
+
+// isDuplicateKeyError reports whether err is, or wraps, a primary key or
+// unique index violation: MySQL's 1062 or SQLite's extended
+// PRIMARYKEY/UNIQUE constraint codes. No other constraint (NOT NULL,
+// CHECK, a foreign key) counts.
+func isDuplicateKeyError(err error) bool {
+	if mysqlErrorNumber(err) == mysqlDuplicateEntry {
+		return true
+	}
+	var coded interface {
+		error
+		Code() int
+	}
+	if errors.As(err, &coded) {
+		switch coded.Code() {
+		case sqliteConstraintPrimaryKey, sqliteConstraintUnique:
+			return true
+		}
+	}
+	return false
 }
 
 // isRetryableTxError reports whether err means the database gave up on the

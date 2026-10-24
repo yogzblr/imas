@@ -117,6 +117,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
@@ -1145,24 +1146,28 @@ func redeemAndAccept(tenantID, keyID, hostname, nkey string) (string, error) {
 var enrollTxFault func() error
 
 // acceptEnrolledNKeyTx writes row (an accepted sprout) inside tx. It tries
-// a plain insert first, a no-op on any conflict: on MySQL, an insert into
-// a gap takes only an insert intention lock, which concurrent inserts
-// don't block, where upsertNKeyRowTx's locking read takes next-key locks
-// over the tenant's range that every other first enrolment's insert then
-// waits on (the deadlock of rc.16-rc.18). Only when a row is already
-// there (an NKey re-enrolling, or a race) does it fall back to
-// upsertNKeyRowTx, after checking the ID is not now another NKey's
-// (errSproutIDTaken): upsertNKeyRowTx would move it to this NKey.
+// a plain INSERT first: on MySQL, an insert into a gap takes only an
+// insert intention lock, which concurrent inserts don't block, where
+// upsertNKeyRowTx's locking read takes next-key locks over the tenant's
+// range that every other first enrolment's insert then waits on (the
+// deadlock of rc.16-rc.18). Only when the insert hits a duplicate key (an
+// NKey re-enrolling, or a race) does it fall back to upsertNKeyRowTx,
+// after checking the ID is not now another NKey's (errSproutIDTaken):
+// upsertNKeyRowTx would move it to this NKey.
+//
+// The duplicate is told by its error (isDuplicateKeyError), not by rows
+// affected: an INSERT ... ON DUPLICATE KEY UPDATE no-op reports one row
+// for a conflict when the DSN sets clientFoundRows, which would pass a
+// conflicting row off as this one. A failed INSERT rolls back only that
+// statement, on MySQL and SQLite alike, so the transaction goes on.
 func acceptEnrolledNKeyTx(tx *gorm.DB, row nkeyRow) error {
-	// gorm's MySQL dialect writes DoNothing as ON DUPLICATE KEY UPDATE
-	// tenant_id = tenant_id, which changes no row (so it is not the
-	// rewrite upsertNKeyRowTx's comment warns about) and reports 0 rows.
-	res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 1 {
+	// Silent: the expected duplicate is not an error worth gorm's log line.
+	err := tx.Session(&gorm.Session{Logger: tx.Logger.LogMode(gormlogger.Silent)}).Create(&row).Error
+	if err == nil {
 		return nil
+	}
+	if !isDuplicateKeyError(err) {
+		return err
 	}
 	var held []nkeyRow
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).

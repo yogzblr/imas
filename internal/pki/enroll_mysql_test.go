@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/nacl/box"
 	gormmysql "gorm.io/driver/mysql"
@@ -35,6 +36,13 @@ import (
 // reads and redeems. It returns a root handle on the saas schema for the
 // test's own key rows. Both schemas are dropped when the test ends.
 func setupMySQLEnrollTest(t *testing.T) (saas *sql.DB) {
+	t.Helper()
+	return setupMySQLEnrollTestDSN(t, nil)
+}
+
+// setupMySQLEnrollTestDSN is setupMySQLEnrollTest with tweak applied to
+// the DSN of the farmer handle this package uses, if not nil.
+func setupMySQLEnrollTestDSN(t *testing.T, tweak func(*mysql.Config)) (saas *sql.DB) {
 	t.Helper()
 	cfg := mysqltest.RootConfig(t)
 	setupEnrollTest(t)
@@ -75,6 +83,9 @@ func setupMySQLEnrollTest(t *testing.T) (saas *sql.DB) {
 
 	c := cfg.Clone()
 	c.DBName, c.ParseTime, c.Loc = farmerSchema, true, time.UTC
+	if tweak != nil {
+		tweak(c)
+	}
 	g, err := gorm.Open(gormmysql.Open(c.FormatDSN()), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
 	if err != nil {
 		t.Fatal(err)
