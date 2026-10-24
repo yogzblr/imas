@@ -113,8 +113,13 @@ func sourceURIs(b []byte, deb822 bool) []string {
 	for sc.Scan() {
 		raw := sc.Text()
 		l := strings.TrimSpace(raw)
-		if l == "" || strings.HasPrefix(l, "#") {
-			inURIs = false
+		if l == "" {
+			inURIs = false // a stanza ends
+			continue
+		}
+		if strings.HasPrefix(l, "#") {
+			// apt skips a comment line inside a deb822 field: a URIs
+			// continuation after it still belongs to the field.
 			continue
 		}
 		if deb822 {
