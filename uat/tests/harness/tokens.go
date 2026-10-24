@@ -31,8 +31,20 @@ const (
 // admin identity.
 var ErrNoKeycloakAdmin = errors.New("keycloak.json has no Keycloak admin identity for the admin REST API")
 
+// lockoutWait bounds how long Password waits out what looks like a
+// Keycloak temporary lockout. Keycloak 26's quick-login rule locks a user
+// for minimumQuickLoginWaitSeconds (60 by default) after two failed
+// logins less than quickLoginCheckMilliSeconds (1000) apart, whatever the
+// failureFactor; waitIncrementSeconds (60) applies otherwise.
+const (
+	lockoutWait  = 150 * time.Second
+	lockoutRetry = 10 * time.Second
+)
+
 // Tokens gets Keycloak access tokens. Tokens are cached per user and
-// client until 30 seconds before they expire. Safe for concurrent use.
+// client until 30 seconds before they expire, and one user's token is
+// fetched once at a time however many tests ask for it. Safe for
+// concurrent use.
 type Tokens struct {
 	cfg  KeycloakConfig
 	http *http.Client
@@ -40,9 +52,18 @@ type Tokens struct {
 	// realm is the test realm, from the issuer.
 	realm string
 	now   func() time.Time
+	// sleep waits d or until ctx ends. For tests.
+	sleep func(ctx context.Context, d time.Duration) error
+	// Logf, when set, reports a lockout being waited out.
+	Logf func(format string, args ...any)
 
-	mu    sync.Mutex
-	cache map[string]cachedToken
+	mu       sync.Mutex
+	cache    map[string]cachedToken
+	inflight map[string]chan struct{}
+	// granted holds the client, user and password triples that got a
+	// token during the run: a password known to work that Keycloak then
+	// refuses is a lockout, not a wrong password.
+	granted map[grantKey]bool
 }
 
 type cachedToken struct {
@@ -56,7 +77,19 @@ func NewTokens(cfg KeycloakConfig, hc *http.Client) (*Tokens, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tokens{cfg: cfg, http: hc, base: base, realm: realm, now: time.Now, cache: map[string]cachedToken{}}, nil
+	return &Tokens{cfg: cfg, http: hc, base: base, realm: realm, now: time.Now, sleep: sleepCtx,
+		cache: map[string]cachedToken{}, inflight: map[string]chan struct{}{}, granted: map[grantKey]bool{}}, nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // Forget drops every cached token, so the next ones are fetched afresh
@@ -104,7 +137,8 @@ func (k *Tokens) Fresh(ctx context.Context, tenant int, role Role) (string, erro
 	if err != nil {
 		return "", err
 	}
-	tok, _, err := k.grant(ctx, k.tokenURL(k.realm), passwordForm(ClientCreds{ClientID: k.cfg.ClientID, ClientSecret: k.cfg.ClientSecret}, c))
+	client := ClientCreds{ClientID: k.cfg.ClientID, ClientSecret: k.cfg.ClientSecret}
+	tok, _, err := k.passwordGrant(ctx, client, c)
 	return tok, err
 }
 
@@ -124,23 +158,115 @@ func (k *Tokens) OtherAudience(ctx context.Context, tenant int) (tok string, ok 
 }
 
 // Password returns a token for a user from a client of the test realm
-// (password grant), cached.
+// (password grant), cached. Concurrent calls for the same user and client
+// share one request: parallel tests that all miss the cache would
+// otherwise send a burst of password grants for one user.
 func (k *Tokens) Password(ctx context.Context, client ClientCreds, user Credentials) (string, error) {
-	key := client.ClientID + "\x00" + user.Username
-	k.mu.Lock()
-	if c, ok := k.cache[key]; ok && k.now().Add(30*time.Second).Before(c.exp) {
+	key := passwordKey(client, user)
+	for {
+		k.mu.Lock()
+		if c, ok := k.cache[key]; ok && k.now().Add(30*time.Second).Before(c.exp) {
+			k.mu.Unlock()
+			return c.token, nil
+		}
+		if wait, ok := k.inflight[key]; ok {
+			k.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return "", fmt.Errorf("token for %s from client %s: %w", user.Username, client.ClientID, ctx.Err())
+			}
+		}
+		done := make(chan struct{})
+		k.inflight[key] = done
 		k.mu.Unlock()
-		return c.token, nil
+
+		tok, exp, err := k.passwordGrant(ctx, client, user)
+		k.mu.Lock()
+		delete(k.inflight, key)
+		if err == nil {
+			k.cache[key] = cachedToken{token: tok, exp: exp}
+		}
+		k.mu.Unlock()
+		close(done)
+		if err != nil {
+			return "", fmt.Errorf("token for %s from client %s: %w", user.Username, client.ClientID, err)
+		}
+		return tok, nil
 	}
-	k.mu.Unlock()
-	tok, exp, err := k.grant(ctx, k.tokenURL(k.realm), passwordForm(client, user))
-	if err != nil {
-		return "", fmt.Errorf("token for %s from client %s: %w", user.Username, client.ClientID, err)
+}
+
+// grantKey names the exact credentials of a grant, so a changed password
+// isn't taken for a known-good one.
+type grantKey struct{ client, user, password string }
+
+func passwordKey(client ClientCreds, user Credentials) string {
+	return client.ClientID + "\x00" + user.Username
+}
+
+// passwordGrant gets a token by password grant. When Keycloak refuses a
+// user whose password already got a token from this client during the
+// run, it is waiting out a temporary brute-force lockout (Keycloak answers
+// a locked-out user with the same invalid_grant "Invalid user
+// credentials" as a wrong password, and doesn't count a refused attempt
+// as another failure): it retries for up to lockoutWait.
+func (k *Tokens) passwordGrant(ctx context.Context, client ClientCreds, user Credentials) (string, time.Time, error) {
+	key := grantKey{client.ClientID, user.Username, user.Password}
+	form := passwordForm(client, user)
+	start := k.now()
+	for attempt := 1; ; attempt++ {
+		tok, exp, err := k.grant(ctx, k.tokenURL(k.realm), form)
+		if err == nil {
+			k.mu.Lock()
+			k.granted[key] = true
+			k.mu.Unlock()
+			if attempt > 1 {
+				k.logf("Keycloak gave %s a token from client %s again after %s (%d attempts): it was a temporary lockout",
+					user.Username, client.ClientID, k.now().Sub(start).Round(time.Second), attempt)
+			}
+			return tok, exp, nil
+		}
+		k.mu.Lock()
+		known := k.granted[key]
+		k.mu.Unlock()
+		if !known || !isInvalidGrant(err) {
+			return "", time.Time{}, err
+		}
+		waited := k.now().Sub(start)
+		if waited >= lockoutWait {
+			return "", time.Time{}, fmt.Errorf("%w; this password got a token earlier in the run and Keycloak still refuses it after %s: a brute-force lockout (look for user_temporarily_disabled in the Keycloak log) or a changed password",
+				err, waited.Round(time.Second))
+		}
+		if attempt == 1 {
+			k.logf("Keycloak refused %s's password from client %s (%v) although it got a token earlier in the run: waiting up to %s for a temporary lockout to end",
+				user.Username, client.ClientID, err, lockoutWait)
+		}
+		if serr := k.sleep(ctx, lockoutRetry); serr != nil {
+			return "", time.Time{}, fmt.Errorf("%w (while waiting out a possible Keycloak temporary lockout: %v)", err, serr)
+		}
 	}
-	k.mu.Lock()
-	k.cache[key] = cachedToken{token: tok, exp: exp}
-	k.mu.Unlock()
-	return tok, nil
+}
+
+func (k *Tokens) logf(format string, args ...any) {
+	if k.Logf != nil {
+		k.Logf(format, args...)
+	}
+}
+
+// grantError is Keycloak's refusal of a token request.
+type grantError struct {
+	status      int
+	code, descr string
+}
+
+func (e *grantError) Error() string {
+	return fmt.Sprintf("keycloak answered HTTP %d %s %s", e.status, e.code, e.descr)
+}
+
+func isInvalidGrant(err error) bool {
+	var g *grantError
+	return errors.As(err, &g) && g.status == http.StatusUnauthorized && g.code == "invalid_grant"
 }
 
 func passwordForm(client ClientCreds, user Credentials) url.Values {
@@ -183,7 +309,7 @@ func (k *Tokens) grant(ctx context.Context, endpoint string, form url.Values) (s
 	}
 	_ = json.Unmarshal(body, &out)
 	if resp.StatusCode != http.StatusOK || out.AccessToken == "" {
-		return "", time.Time{}, fmt.Errorf("keycloak answered HTTP %d %s %s", resp.StatusCode, out.Error, out.Description)
+		return "", time.Time{}, &grantError{status: resp.StatusCode, code: out.Error, descr: out.Description}
 	}
 	exp := k.now().Add(time.Duration(out.ExpiresIn) * time.Second)
 	if e, err := ExpiresAt(out.AccessToken); err == nil {

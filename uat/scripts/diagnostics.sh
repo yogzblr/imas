@@ -15,7 +15,11 @@
 #   and the RustFS ones in full), and pods/<ns>.<pod>.txt with describe,
 #   logs and logs --previous of: every RustFS pod, every pod of a failed or
 #   unfinished Job, and every pod that is not Running or Succeeded, has a
-#   container not ready, or restarted (at most DIAG_MAX_PODS per hub).
+#   container not ready, or restarted (at most DIAG_MAX_PODS per hub);
+#   keycloak/<ns>.<pod>.txt for every Keycloak pod, healthy or not: its
+#   login-error, brute-force and lockout lines from the whole log (a token
+#   refused as user_temporarily_disabled is explained there), then the last
+#   DIAG_KEYCLOAK_LINES lines and logs --previous.
 # full also writes:
 #   sprouts/<vm>.txt   the sprout service's state and last log lines, through
 #                      vmctl.sh run: journalctl -u imas-sprout on Linux,
@@ -43,6 +47,7 @@
 #   DIAG_VMCTL         vmctl.sh, for full (default uat/access/vmctl.sh)
 #   DIAG_TIMEOUT       seconds per command (default 60)
 #   DIAG_MAX_PODS      pods described per hub (default 25)
+#   DIAG_KEYCLOAK_LINES  Keycloak log lines kept per section (default 2000)
 #   DIAG_SPROUT_SERVICE  the sprout service (default imas-sprout)
 #   KUBECTL, AZ        the tools (default kubectl, az)
 set -uo pipefail
@@ -54,6 +59,7 @@ AZ=${AZ:-az}
 secs=${DIAG_TIMEOUT:-60}
 max_pods=${DIAG_MAX_PODS:-25}
 service=${DIAG_SPROUT_SERVICE:-imas-sprout}
+kc_lines=${DIAG_KEYCLOAK_LINES:-2000}
 
 usage() {
   echo "usage: $prog kube|full <out-dir>" >&2
@@ -64,7 +70,7 @@ log() { echo "$prog: $*" >&2; }
 [ $# -eq 2 ] || usage
 mode=$1 out=$2
 case "$mode" in kube | full) ;; *) usage ;; esac
-[[ "$secs" =~ ^[1-9][0-9]*$ && "$max_pods" =~ ^[0-9]+$ ]] || { log "DIAG_TIMEOUT and DIAG_MAX_PODS must be numbers"; exit 2; }
+[[ "$secs" =~ ^[1-9][0-9]*$ && "$max_pods" =~ ^[0-9]+$ && "$kc_lines" =~ ^[1-9][0-9]*$ ]] || { log "DIAG_TIMEOUT, DIAG_MAX_PODS and DIAG_KEYCLOAK_LINES must be numbers"; exit 2; }
 [[ "$service" =~ ^[A-Za-z0-9._@-]+$ ]] || { log "DIAG_SPROUT_SERVICE has unexpected characters"; exit 2; }
 mkdir -p "$out"
 
@@ -127,6 +133,19 @@ pick_pods() {
   } 2>/dev/null | awk '!seen[$0]++' | head -n "$max_pods"
 }
 
+# The Keycloak pods, as "<namespace> <pod>" lines, by their
+# app.kubernetes.io/name label or, without one, their name.
+keycloak_pods() {
+  jq -r '.items[]
+    | select((.metadata.labels["app.kubernetes.io/name"] // .metadata.name) | test("keycloak"))
+    | "\(.metadata.namespace) \(.metadata.name)"' "$1" 2>/dev/null
+}
+
+# What in a Keycloak log explains a refused token: login and token errors
+# (the jboss-logging event listener's WARN lines), and the brute-force
+# protector's lockouts and failure counts (debug, uat/hub/core's chart).
+kc_pattern='LOGIN_ERROR|CODE_TO_TOKEN_ERROR|REFRESH_TOKEN_ERROR|CLIENT_LOGIN_ERROR|user_temporarily_disabled|invalid_user_credentials|BruteForce|brute.force|quick login|num failures|notBefore|lockout'
+
 hub() {
   local name=$1 kc=$2 dir=$out/$1 pods jobs ns pod
   local -a k=("$KUBECTL" --kubeconfig "$kc" --request-timeout=30s)
@@ -156,6 +175,19 @@ hub() {
     section "$f" "logs -n $ns $pod (all containers, last 500 lines each)" "${k[@]}" logs -n "$ns" "$pod" --all-containers --tail=500 --timestamps
     section "$f" "logs --previous -n $ns $pod" "${k[@]}" logs -n "$ns" "$pod" --all-containers --previous --tail=500 --timestamps
   done < <(pick_pods "$pods" "$jobs")
+  while read -r ns pod; do
+    [ -n "${pod:-}" ] || continue
+    mkdir -p "$dir/keycloak"
+    local f="$dir/keycloak/$ns.$pod.txt"
+    # shellcheck disable=SC2016 # expanded by the inner bash
+    section "$f" "logs -n $ns $pod: login errors and brute-force lines (whole log, last $kc_lines)" bash -c '
+      set -o pipefail
+      n=$1 pattern=$2
+      shift 2
+      "$@" | { grep -Ei -- "$pattern" || true; } | tail -n "$n"' _ "$kc_lines" "$kc_pattern" "${k[@]}" logs -n "$ns" "$pod" --all-containers --timestamps
+    section "$f" "logs -n $ns $pod (all containers, last $kc_lines lines)" "${k[@]}" logs -n "$ns" "$pod" --all-containers --tail="$kc_lines" --timestamps
+    section "$f" "logs --previous -n $ns $pod" "${k[@]}" logs -n "$ns" "$pod" --all-containers --previous --tail="$kc_lines" --timestamps
+  done < <(keycloak_pods "$pods")
   rm -f "$pods" "$jobs"
 }
 

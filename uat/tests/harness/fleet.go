@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +55,9 @@ func NewFleet(env *Env) (*Fleet, error) {
 	tok, err := NewTokens(env.Keycloak, hc)
 	if err != nil {
 		return nil, err
+	}
+	tok.Logf = func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "uat harness: "+format+"\n", args...)
 	}
 	sprouts := make([]Sprout, len(env.Sprouts))
 	copy(sprouts, env.Sprouts)

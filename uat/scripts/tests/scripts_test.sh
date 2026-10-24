@@ -412,6 +412,13 @@ check "kube: top nodes and pods" test "$(grep -c '^== top' "$d/core/top.txt")" -
 check "kube: secret-looking values are redacted (opaque Bearer and Basic credentials too)" test -z "$(grep -rE 'stub-value|eyJstub|opaqueStubValue|c3R1YlVzZXI6|dTpw' "$d")"
 check "kube: ... and say so" grep -q "RUSTFS_SECRET_KEY:  \[redacted\]" "$d/core/pods/imas-uat.imas-uat-rustfs-0.txt"
 check "kube: every kubectl call is bounded by --request-timeout" test -z "$(grep '^kubectl' "$STUB_STATE/calls.log" | grep -v -- '--request-timeout=30s')"
+kc="$d/core/keycloak/imas-uat.imas-uat-keycloak-6f4.txt"
+check "kube: the healthy Keycloak pod's log is kept, not described as unhealthy" test -s "$kc" -a ! -e "$d/core/pods/imas-uat.imas-uat-keycloak-6f4.txt"
+check "kube: its lockout and login-error lines come first" \
+  test "$(sed -n '2p;3p' "$kc" | grep -c -E 'quick login|user_temporarily_disabled')" -eq 2
+check "kube: ... without the unrelated lines" test -z "$(sed -n '/^== logs -n imas-uat imas-uat-keycloak-6f4: login errors/,/^$/p' "$kc" | grep 'started')"
+check "kube: then its last lines and logs --previous" test "$(grep -c '^== logs' "$kc")" -eq 3
+check "kube: the Keycloak log is redacted too" test -z "$(grep 'stub-value-6' "$kc")"
 check "kube: no sprout or Azure call" test -z "$(grep -E '^(vmctl|az) ' "$STUB_STATE/calls.log")"
 
 new_state diag-full

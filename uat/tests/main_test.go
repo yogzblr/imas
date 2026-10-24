@@ -73,7 +73,9 @@ func ctxFor(t *testing.T, d time.Duration) context.Context {
 // won't give one.
 func token(t *testing.T, sc *harness.Scenario, tenant int, role harness.Role) string {
 	t.Helper()
-	tok, err := fleet.Tokens.Tenant(ctxFor(t, time.Minute), tenant, role)
+	// Long enough for the harness to wait out a Keycloak temporary
+	// lockout (harness.Tokens.Password).
+	tok, err := fleet.Tokens.Tenant(ctxFor(t, 3*time.Minute), tenant, role)
 	sc.NoErr(err, "getting tenant %d's %s token", tenant, role)
 	return tok
 }

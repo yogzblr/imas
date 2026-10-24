@@ -445,6 +445,16 @@ nothing in the artifacts said why.
    describe, the node's memory in `top.txt`) is a restart or OOM; a pod
    Running but not Ready is a readiness problem; endpoints that name
    another pod or port are a wrong Service.
+5. `diagnostics/<Test>/core/keycloak/<ns>.<pod>.txt`: the Keycloak log's
+   login errors and brute-force lines from the whole log, then its last
+   lines. A token refused with `invalid_grant Invalid user credentials`
+   for a tenant user whose password worked earlier is a temporary lockout
+   when the log shows `user_temporarily_disabled`. The harness waits that
+   out (up to 150 s, and logs `uat harness: Keycloak refused ...`). The
+   `LOGIN_ERROR` lines name the user and error of each failed login; the
+   brute-force protector's debug lines (`new num failures`, `quick login,
+   set min wait seconds`) carry no user, only the failure count and
+   timing, so match them to those lines by time.
 
 ## 5. After the runs
 

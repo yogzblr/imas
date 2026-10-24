@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stub kubectl for uat/scripts/tests/scripts_test.sh (diagnostics.sh). Logs
 # its arguments; answers like a hub with a RustFS pod, a failed Job's pod, a
-# restarting pod and a healthy one. The failed Job's pod is Running and
+# restarting pod, a healthy one and a healthy Keycloak pod. The failed Job's pod is Running and
 # ready, so only the failed Job selects it. kubectl_fail in $STUB_STATE: every call
 # fails.
 set -u
@@ -19,6 +19,7 @@ case "$args" in
       pod imas-uat imas-uat-log-retention-1-abcde Running true 0 imas-uat-log-retention-1
       pod imas-uat imas-uat-farmer-7d9 Running false 4
       pod imas-uat imas-uat-saasapi-5c8 Running true 0
+      pod imas-uat imas-uat-keycloak-6f4 Running true 0
       pod imas-uat imas-uat-done-1-xyz Succeeded false 0 imas-uat-done-1; } | jq -s '{items: .}'
     ;;
   *" get jobs -A -o json "*)
@@ -35,6 +36,11 @@ case "$args" in
   *" logs "*"--previous"*)
     echo "Error from server (BadRequest): previous terminated container not found" >&2
     exit 1
+    ;;
+  *" logs -n imas-uat imas-uat-keycloak-6f4 "*)
+    echo "2026-10-22T03:12:58Z INFO  [io.quarkus] Keycloak 26.4.0 started"
+    echo "2026-10-22T03:12:59Z DEBUG [org.keycloak.services.managers.DefaultBruteForceProtector] quick login, set min wait seconds"
+    echo "2026-10-22T03:13:00Z WARN  [org.keycloak.events] type=\"LOGIN_ERROR\", realmId=\"r\", clientId=\"imas-uat-tests\", userId=\"u\", error=\"user_temporarily_disabled\", password=stub-value-6"
     ;;
   *" logs "*)
     echo "2026-10-22T03:13:00Z dial tcp 10.99.61.204:9000: connect: connection refused"

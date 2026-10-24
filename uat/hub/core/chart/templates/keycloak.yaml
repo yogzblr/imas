@@ -84,6 +84,12 @@ spec:
               value: xforwarded
             - name: KC_HEALTH_ENABLED
               value: "true"
+            # The brute-force protector logs at debug each failure count and
+            # each quick-login lockout it sets (no user; match them to the
+            # LOGIN_ERROR lines by time): the timing evidence for a
+            # user_temporarily_disabled with no failed login in the events.
+            - name: KC_LOG_LEVEL
+              value: "info,org.keycloak.services.managers.DefaultBruteForceProtector:debug"
             - name: KC_DB
               value: dev-file
             - name: UAT_KEYCLOAK_URL
