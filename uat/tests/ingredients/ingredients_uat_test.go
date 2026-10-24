@@ -65,7 +65,7 @@ func TestIngredients(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), runDeadline(t))
 	defer cancel()
 	runner := &Runner{
-		Driver: harnessDriver{f},
+		Driver: harnessDriver{f: f, diag: harness.VMDiagFromEnv()},
 		Ready:  f.Ready,
 		Nonce:  func() string { return harness.Nonce(8) },
 		Selected: func(id, name string) bool {

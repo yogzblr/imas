@@ -33,7 +33,7 @@ type node struct {
 // Line is one row of the summary: a scenario id, an OS and a tenant.
 type Line struct {
 	ID, OS, Tenant string
-	Status         string // PASS, FAIL, SKIP
+	Status         string // PASS, FAIL, CHAN, SKIP
 	Tests          []string
 	Detail         string
 	Elapsed        float64
@@ -54,13 +54,29 @@ type Report struct {
 	NoTests       bool
 }
 
+// StatusChan is a line whose tests failed only because the test channel to
+// their VM (its Bastion tunnel, SSH or WinRM) was unavailable: a gate
+// problem, not a product result (W10). It fails the run like FAIL, and is
+// counted and reported apart from it.
+const StatusChan = "CHAN"
+
+// channelTag is what harness.ChannelError's message starts with
+// (harness.ChannelUnavailableTag; uatreport does not import the harness).
+const channelTag = "UAT CHANNEL UNAVAILABLE"
+
+// channelOnly reports whether a failed test failed on the channel: its
+// first failure is a ChannelError.
+func channelOnly(n *node) bool {
+	return strings.Contains(failureDetail(n), channelTag)
+}
+
 // Failed reports whether the run must exit non-zero.
 func (r *Report) Failed() bool {
 	if r.NoTests || len(r.Missing) > 0 || len(r.Unreasoned) > 0 || len(r.PackageErrors) > 0 || len(r.Unfinished) > 0 {
 		return true
 	}
 	for _, l := range r.Lines {
-		if l.Status == "FAIL" {
+		if l.Status == "FAIL" || l.Status == StatusChan {
 			return true
 		}
 	}
@@ -173,7 +189,14 @@ func Summarize(cat *Catalogue, sel *Selection, events []Event) *Report {
 			case "fail":
 				failedTests[c.pkg] = true
 				l.Output = append(l.Output, outputOf(c)...)
-				if l.Status != "FAIL" {
+				// A product failure outranks a channel one on the
+				// same line; either outranks a pass or a skip.
+				switch {
+				case channelOnly(c):
+					if l.Status != "FAIL" && l.Status != StatusChan {
+						l.Status, l.Detail = StatusChan, failureDetail(c)
+					}
+				case l.Status != "FAIL":
 					l.Status = "FAIL"
 					l.Detail = failureDetail(c)
 				}
@@ -427,13 +450,15 @@ func catIndex(cat *Catalogue, id string) int {
 func (r *Report) Print(w io.Writer) {
 	fmt.Fprintf(w, "UAT summary, tier %s\n", r.Tier)
 	fmt.Fprintf(w, "%-6s %-22s %-8s %-6s %8s  %s\n", "STATUS", "ID", "OS", "TENANT", "SECONDS", "DETAIL")
-	var pass, fail, skip int
+	var pass, fail, chans, skip int
 	for _, l := range r.Lines {
 		switch l.Status {
 		case "PASS":
 			pass++
 		case "FAIL":
 			fail++
+		case StatusChan:
+			chans++
 		case "SKIP":
 			skip++
 		}
@@ -460,8 +485,12 @@ func (r *Report) Print(w io.Writer) {
 	if r.NoTests {
 		fmt.Fprintf(w, "NO TEST MATCHED tier %s: a run that runs nothing is a failure\n", r.Tier)
 	}
-	fmt.Fprintf(w, "\nlines: %d pass, %d fail, %d skip; missing scenarios: %d; top-level tests run: %d\n",
-		pass, fail, skip, len(r.Missing), r.TopLevelRun)
+	if chans > 0 {
+		fmt.Fprintf(w, "\nCHAN (%d): channel unavailable: the test channel to the VM (its Bastion tunnel, SSH or WinRM) was down, "+
+			"so these did not test the product; read report/diagnostics/channel/ and diagnostics/<vm>/ (uat/RUNBOOK.md, \"The test channel\")\n", chans)
+	}
+	fmt.Fprintf(w, "\nlines: %d pass, %d fail, %d channel unavailable, %d skip; missing scenarios: %d; top-level tests run: %d\n",
+		pass, fail, chans, skip, len(r.Missing), r.TopLevelRun)
 	if r.Failed() {
 		fmt.Fprintln(w, "RESULT: FAIL")
 	} else {
@@ -486,20 +515,26 @@ type junitSuite struct {
 	Name     string      `xml:"name,attr"`
 	Tests    int         `xml:"tests,attr"`
 	Failures int         `xml:"failures,attr"`
+	Errors   int         `xml:"errors,attr"`
 	Skipped  int         `xml:"skipped,attr"`
 	Cases    []junitCase `xml:"testcase"`
 }
 
+// junitCase: a product failure is a <failure>, a channel unavailable line
+// an <error type="channel-unavailable"> (JUnit's "could not run"), so a
+// JUnit reader tells them apart too.
 type junitCase struct {
 	Class   string        `xml:"classname,attr"`
 	Name    string        `xml:"name,attr"`
 	Time    string        `xml:"time,attr"`
 	Failure *junitMessage `xml:"failure,omitempty"`
+	Error   *junitMessage `xml:"error,omitempty"`
 	Skipped *junitMessage `xml:"skipped,omitempty"`
 }
 
 type junitMessage struct {
 	Message string `xml:"message,attr"`
+	Type    string `xml:"type,attr,omitempty"`
 	Body    string `xml:",chardata"`
 }
 
@@ -510,10 +545,15 @@ func (r *Report) WriteJUnit(w io.Writer) error {
 	for _, l := range r.Lines {
 		c := junitCase{Class: "uat." + l.ID, Name: fmt.Sprintf("%s os=%s tenant=%s", l.ID, l.OS, l.Tenant), Time: fmt.Sprintf("%.1f", l.Elapsed)}
 		switch l.Status {
-		case "FAIL":
+		case "FAIL", StatusChan:
 			body := l.Detail + "\ntests: " + strings.Join(l.Tests, ", ")
 			if len(l.Output) > 0 {
 				body += "\n\noutput:\n" + strings.Join(l.Output, "\n")
+			}
+			if l.Status == StatusChan {
+				c.Error = &junitMessage{Message: oneLine("channel unavailable: "+l.Detail, 300), Type: "channel-unavailable", Body: body}
+				s.Errors++
+				break
 			}
 			c.Failure = &junitMessage{Message: oneLine(l.Detail, 300), Body: body}
 			s.Failures++

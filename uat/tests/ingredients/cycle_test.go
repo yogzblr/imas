@@ -102,6 +102,7 @@ func TestCycleFindings(t *testing.T) {
 		"not idempotent":             {b: behaviour{alwaysChanges: true}, want: []string{"the second real cook (job j4): step \"uat one\" reported a change", "not idempotent"}},
 		"no change reported":         {b: behaviour{neverChanges: true}, want: []string{"the first real cook (job j2): no step reported a change"}},
 		"test mode fails":            {b: behaviour{testFails: true}, want: []string{"cook in test mode: want the item succeeded, got asset a-t1u sprout ubuntu-01: failed", "cook in test mode again"}},
+		"test mode step error":       {b: behaviour{testFails: true}, want: []string{"step=cook in test mode] FAIL: cook in test mode: want the item succeeded, got asset a-t1u sprout ubuntu-01: failed error=job_failed (); the job's failed steps: step \"uat one\": boom"}},
 		"real cook fails":            {b: behaviour{realFails: true}, want: []string{"step=cook for real] FAIL: cook for real: want the item succeeded"}, fatal: true},
 		"no job log":                 {b: behaviour{noJobLog: true}, want: []string{"the sprout has no job log for it"}},
 		"setup fails":                {b: behaviour{setupFails: true}, want: []string{"the setup script exited 1 (not the ingredient's fault"}, fatal: true},
@@ -135,6 +136,34 @@ func TestCycleFindings(t *testing.T) {
 				t.Errorf("the revert must run whatever happened: %d", d.hosts[sp.VM].reverts)
 			}
 		})
+	}
+}
+
+// A failed cook whose job log can't be read over the test channel (the
+// tunnel is down) is read through az vm run-command, so the step's error
+// still reaches the report, and the VM's side is collected (W10).
+func TestCycleExplainsPastADeadChannel(t *testing.T) {
+	o, d := runCycle(t, cycleCase, behaviour{testFails: true, logChannelDown: true}, t1Ubuntu, nil)
+	e := errorsOf(o)
+	if !strings.Contains(e, "the job's failed steps: step \"uat one\": boom") {
+		t.Errorf("the step's error is not in the failure:\n%s", e)
+	}
+	var logs []string
+	for _, l := range o.Lines {
+		logs = append(logs, l.Text)
+	}
+	all := strings.Join(logs, "\n")
+	for _, w := range []string{
+		"reading job j1's log over the test channel: " + harness.ChannelUnavailableTag,
+		"read job j1's log through az vm run-command instead",
+		"the VM's side of this failure (sprout log, job records, through az vm run-command): diagnostics/t1-ubuntu",
+	} {
+		if !strings.Contains(all, w) {
+			t.Errorf("missing %q in:\n%s", w, all)
+		}
+	}
+	if d.outOfBand == 0 || len(d.diagnosed) == 0 || d.diagnosed[0] != "t1-ubuntu:j1" {
+		t.Errorf("out of band reads %d, diagnosed %v", d.outOfBand, d.diagnosed)
 	}
 }
 

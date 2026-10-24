@@ -219,8 +219,8 @@ func TestVMCtlTimeoutFromEnv(t *testing.T) {
 		t.Errorf("Timeout = %s, want 7m", got)
 	}
 	t.Setenv(EnvVMCtlTimeout, "bogus")
-	if got := NewVMCtl("x", "u").Timeout; got != 15*time.Minute {
-		t.Errorf("Timeout = %s, want the 15m default", got)
+	if got := NewVMCtl("x", "u").Timeout; got != DefaultVMCtlTimeout {
+		t.Errorf("Timeout = %s, want the %s default", got, DefaultVMCtlTimeout)
 	}
 }
 
@@ -363,5 +363,43 @@ esac`)
 	calls, _ := os.ReadFile(log)
 	if string(calls) != "/run/uat.json|stop-vm|uat-core-2\n/run/uat.json|start-vm|uat-core-9\n" {
 		t.Errorf("calls:\n%s", calls)
+	}
+}
+
+func TestVMCtlChannelUnavailable(t *testing.T) {
+	// vmctl.sh's line when the channel stayed down after its recovery, or
+	// the VM is marked dead: a ChannelError, which the report counts apart.
+	v, _ := fakeVMCtl(t, `echo "vmctl.sh: t1-win is marked dead" >&2
+echo "vmctl.sh: CHANNEL UNAVAILABLE: t1-win is marked dead after 3 channel failures in a row" >&2
+echo "vmctl.sh: exit_code=255" >&2
+exit 255`)
+	_, err := v.Run(context.Background(), "t1-win", FamilyWindows, "hostname")
+	if !IsChannelUnavailable(err) {
+		t.Fatalf("Run: want a ChannelError, got %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), ChannelUnavailableTag+": vmctl.sh run t1-win: t1-win is marked dead after 3") {
+		t.Errorf("message = %q", err)
+	}
+	if err := v.StopSprout(context.Background(), "t1-win"); !IsChannelUnavailable(err) {
+		t.Errorf("StopSprout: want a ChannelError, got %v", err)
+	}
+	// Exit 255 without the line (vmctl.sh's own failure) is not one.
+	v2, _ := fakeVMCtl(t, `echo "vmctl.sh: other vmctl.sh calls held the slots of t1-win for 900s; giving up" >&2; exit 255`)
+	if _, err := v2.Run(context.Background(), "t1-win", FamilyWindows, "hostname"); err == nil || IsChannelUnavailable(err) {
+		t.Errorf("want a plain error, got %v", err)
+	}
+}
+
+func TestVMCtlRunWithOptions(t *testing.T) {
+	// The options reach vmctl.sh as its environment.
+	v, _ := fakeVMCtl(t, `echo "env:${VMCTL_CALL_TIMEOUT:-unset}:${VMCTL_CHANNEL:-unset}"
+echo "__IMAS_UAT_RC=0"`)
+	res, err := v.RunWith(context.Background(), "t1-ubuntu", FamilyLinux, "true", RunOptions{CallTimeout: 5 * time.Minute, OutOfBand: true})
+	if err != nil || !strings.Contains(res.Output, "env:300:runcommand") {
+		t.Fatalf("RunWith: %v, output %q", err, res.Output)
+	}
+	res, err = v.Run(context.Background(), "t1-ubuntu", FamilyLinux, "true")
+	if err != nil || !strings.Contains(res.Output, "env:unset:unset") {
+		t.Fatalf("Run: %v, output %q", err, res.Output)
 	}
 }
