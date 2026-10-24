@@ -26,6 +26,8 @@ type mockManager struct {
 	unholdCalled          []string
 	groupInstallCalled    string
 	addRepoCalled         *snack.Repository
+	addRepoHook           func(snack.Repository) // runs on AddRepo, if set
+	removeRepoHook        func(string)           // runs on RemoveRepo, if set
 	removeRepoCalled      string
 	addKeyCalled          string
 	removeKeyCalled       string
@@ -168,11 +170,17 @@ func (m *mockManager) ListRepos(_ context.Context) ([]snack.Repository, error) {
 
 func (m *mockManager) AddRepo(_ context.Context, repo snack.Repository) error {
 	m.addRepoCalled = &repo
+	if m.addRepoHook != nil && m.addRepoErr == nil {
+		m.addRepoHook(repo)
+	}
 	return m.addRepoErr
 }
 
 func (m *mockManager) RemoveRepo(_ context.Context, id string) error {
 	m.removeRepoCalled = id
+	if m.removeRepoHook != nil && m.removeRepoErr == nil {
+		m.removeRepoHook(id)
+	}
 	return m.removeRepoErr
 }
 
