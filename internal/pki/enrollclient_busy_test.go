@@ -80,7 +80,7 @@ func TestBusyDelayJitterIsAtMostTwentyPercent(t *testing.T) {
 
 func TestBusyMessage(t *testing.T) {
 	got := busyMessage("/v1/enroll", 5500*time.Millisecond)
-	if !strings.Contains(got, "server busy (lease held), retrying in 5.5s") {
+	if !strings.Contains(got, "server busy or temporarily unavailable, retrying in 5.5s") {
 		t.Errorf("busy message %q", got)
 	}
 	if strings.Contains(got, "token") || strings.Contains(got, "clock") {
@@ -104,6 +104,7 @@ func TestEnrollSprout_BusyHonoursRetryAfter(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store, _ := setupEnrollTest(t)
 			newJWSGatewayMinter(t)
+			config.GatewayJWTTTL = time.Hour
 			store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 			setupSproutFiles(t)
 			srv := startEnrollServer(t)
@@ -146,7 +147,7 @@ func TestEnrollSprout_BusyGivesUpAtTheAttemptLimit(t *testing.T) {
 	if !errors.Is(err, ErrFarmerBusy) {
 		t.Fatalf("err = %v, want ErrFarmerBusy", err)
 	}
-	if msg := err.Error(); !strings.Contains(msg, "server busy (lease held)") || strings.Contains(msg, "join token") || strings.Contains(msg, "clock") {
+	if msg := err.Error(); !strings.Contains(msg, "server busy or temporarily unavailable") || strings.Contains(msg, "join token") || strings.Contains(msg, "clock") {
 		t.Errorf("error %q", msg)
 	}
 	if got := waits(); len(got) != enrollStep2Attempts-1 {
@@ -165,6 +166,7 @@ func TestEnrollSprout_BusyGivesUpAtTheAttemptLimit(t *testing.T) {
 func TestEnrollSprout_BusySecondRequest(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	newJWSGatewayMinter(t)
+	config.GatewayJWTTTL = time.Hour
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 	setupSproutFiles(t)
 	srv := startEnrollServer(t)
@@ -208,6 +210,7 @@ func TestEnrollSprout_BusySecondRequest(t *testing.T) {
 func TestEnrollClient_TimestampsIncrease(t *testing.T) {
 	store, _ := setupEnrollTest(t)
 	newJWSGatewayMinter(t)
+	config.GatewayJWTTTL = time.Hour
 	store.rows["ek_1"] = &enrollmentKeyRow{TenantID: "t_1", KeyHash: hashSecret("s"), Expiry: time.Now().Add(time.Hour), MaxUses: 1}
 	setupSproutFiles(t)
 	srv := startEnrollServer(t)

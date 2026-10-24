@@ -115,6 +115,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nkeys"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/yogzblr/imas/internal/config"
 	"github.com/yogzblr/imas/internal/gatewayjwt"
@@ -174,14 +176,21 @@ type enrollmentKeyRow struct {
 // instead of standing up a real MySQL instance.
 type enrollmentKeyStore interface {
 	lookup(keyID string) (*enrollmentKeyRow, error)
-	// redeem performs design doc §3.3 step 4's atomic check-and-increment,
-	// returning whether this call actually redeemed a use (false means the
-	// WHERE guard didn't match — the key was exhausted/revoked/expired by
-	// the time this ran, including losing a race to a concurrent redeemer).
-	redeem(keyID string) (bool, error)
+	// redeem performs design doc §3.3 step 4's atomic check-and-increment
+	// inside tx, the transaction that also accepts the sprout
+	// (redeemAndAccept), so a rollback gives the use back. It returns
+	// whether this call actually redeemed a use (false means the WHERE
+	// guard didn't match — the key was exhausted/revoked/expired by the
+	// time this ran, including losing a race to a concurrent redeemer).
+	redeem(tx *gorm.DB, keyID string) (bool, error)
 }
 
 var enrollKeyStore enrollmentKeyStore = mysqlEnrollmentKeyStore{}
+
+// enrollmentKeysTable is the schema-qualified saas.enrollment_keys the
+// production store reads and redeems. A variable only so the MySQL tests
+// can point it at a schema of their own.
+var enrollmentKeysTable = "saas.enrollment_keys"
 
 type mysqlEnrollmentKeyStore struct{}
 
@@ -189,7 +198,7 @@ func (mysqlEnrollmentKeyStore) lookup(keyID string) (*enrollmentKeyRow, error) {
 	var row enrollmentKeyRow
 	err := db.Raw(
 		`SELECT tenant_id, key_hash, expiry, max_uses, used_count, revoked
-		 FROM saas.enrollment_keys WHERE key_id = ?`, keyID,
+		 FROM `+enrollmentKeysTable+` WHERE key_id = ?`, keyID,
 	).Row().Scan(&row.TenantID, &row.KeyHash, &row.Expiry, &row.MaxUses, &row.UsedCount, &row.Revoked)
 	if err != nil {
 		return nil, err
@@ -197,9 +206,9 @@ func (mysqlEnrollmentKeyStore) lookup(keyID string) (*enrollmentKeyRow, error) {
 	return &row, nil
 }
 
-func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
-	res := db.Exec(
-		`UPDATE saas.enrollment_keys
+func (mysqlEnrollmentKeyStore) redeem(tx *gorm.DB, keyID string) (bool, error) {
+	res := tx.Exec(
+		`UPDATE `+enrollmentKeysTable+`
 		 SET used_count = used_count + 1, last_used_at = NOW()
 		 WHERE key_id = ? AND used_count < max_uses AND revoked = FALSE AND expiry > NOW()`,
 		keyID,
@@ -218,7 +227,9 @@ func (mysqlEnrollmentKeyStore) redeem(keyID string) (bool, error) {
 // (internal/api/handlers): the production store's cross-schema MySQL
 // can't run on their SQLite database, and since SEC.7b a sprout's first
 // box key can only be recorded through the join token path, so those tests
-// can no longer start from a sprout accepted outside it. It panics unless
+// can no longer start from a sprout accepted outside it. The store is not
+// part of the database transaction: a use it redeems stays spent if that
+// transaction rolls back. It panics unless
 // testing.Testing reports a test binary, so a production build cannot
 // swap the join token store out.
 func UseInMemoryJoinToken(joinToken, tenantID string, maxUses int) (restore func()) {
@@ -254,7 +265,7 @@ func (m *memoryEnrollmentKeyStore) lookup(keyID string) (*enrollmentKeyRow, erro
 	return &row, nil
 }
 
-func (m *memoryEnrollmentKeyStore) redeem(keyID string) (bool, error) {
+func (m *memoryEnrollmentKeyStore) redeem(_ *gorm.DB, keyID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if keyID != m.keyID || m.row.Revoked || m.row.UsedCount >= m.row.MaxUses || time.Now().After(m.row.Expiry) {
@@ -472,7 +483,7 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	replayTenantID, sproutID, err := SproutIDAndTenantForNKey(nkeyPub)
 	if err != nil && !errors.Is(err, ErrSproutIDNotFound) {
 		log.Warnf("enroll: refused nkey_pub %s: its accepted sprout could not be looked up, or its tenant is deprovisioned: %v", nkeyPub, err)
-		return nil, ErrEnrollmentFailed
+		return nil, enrollDBError(err)
 	}
 	if err == nil {
 		if err := claimSignedPayload(ctx, signedPayload, sig, req.Timestamp); err != nil {
@@ -522,7 +533,7 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	}
 	if err != nil {
 		log.Errorf("enroll: looking up key_id %s: %v", keyID, err)
-		return nil, ErrEnrollmentFailed
+		return nil, enrollDBError(err)
 	}
 
 	if subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(row.KeyHash)) != 1 {
@@ -564,7 +575,7 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	sproutID, err = resolveEnrollSproutID(row.TenantID, hostname, nkeyPub)
 	if err != nil {
 		log.Errorf("enroll: resolving sprout id for hostname %q: %v", hostname, err)
-		return nil, ErrEnrollmentFailed
+		return nil, enrollDBError(err)
 	}
 	// An NKey revoked by deleting or replacing its sprout (H1) stays
 	// revoked: enrolling it again would clear its revocation on the
@@ -572,14 +583,14 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 	// redeeming, like the ID above.
 	if revoked, err := isNKeyRevoked(row.TenantID, nkeyPub); err != nil || revoked {
 		log.Warnf("enroll: nkey_pub %s is revoked in tenant %s, or the check failed (%v)", nkeyPub, row.TenantID, err)
-		return nil, ErrEnrollmentFailed
+		return nil, enrollDBError(err)
 	}
 	// A deprovisioned tenant's join token enrols nothing (L10), checked
 	// before redeeming like the two above. A tenant with no row yet is
 	// provisioned lazily by this enrollment (grantEnrolledSprout).
 	if err := refuseDeprovisionedTenant(row.TenantID); err != nil {
 		log.Warnf("enroll: key_id %s: %v", keyID, err)
-		return nil, ErrEnrollmentFailed
+		return nil, enrollDBError(err)
 	}
 
 	// A token carrying a tenant key fingerprint (L24, U2) was minted for
@@ -619,27 +630,34 @@ func Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult, error) {
 		log.Warnf("enroll: rejected resubmitted or unrecordable signed request for nkey_pub %s: %v", nkeyPub, err)
 		return nil, ErrEnrollmentFailed
 	}
-	redeemed, err := enrollKeyStore.redeem(keyID)
+	// The tenant's X25519 key is read (and, for a tenant's first
+	// enrollment, created fresh: tenantbox.go) before anything is spent:
+	// a failure here leaves the join token's use and the sprout unaccepted.
+	tenantPub, err := GetTenantX25519PublicKey(row.TenantID)
 	if err != nil {
-		log.Errorf("enroll: redeeming key_id %s: %v", keyID, err)
-		return nil, ErrEnrollmentFailed
-	}
-	if !redeemed {
-		log.Warnf("enroll: key_id %s lost the atomic redemption race (exhausted/revoked/expired between lookup and redeem)", keyID)
+		log.Errorf("enroll: failed to load tenant %s X25519 key for sprout %s: %v", row.TenantID, sproutID, err)
 		return nil, ErrEnrollmentFailed
 	}
 
-	if err := acceptEnrolledNKey(row.TenantID, sproutID, nkeyPub); err != nil {
-		log.Errorf("enroll: accepting sprout %s for tenant %s: %v", sproutID, row.TenantID, err)
+	// Redeeming a use of the join token and accepting the sprout are one
+	// transaction, retried as a whole on contention (redeemAndAccept): a
+	// deadlock used to come after the use was spent, which left the sprout
+	// unaccepted and its single-use token exhausted for good.
+	sproutID, err = redeemAndAccept(row.TenantID, keyID, hostname, nkeyPub)
+	switch {
+	case errors.Is(err, errKeyNotRedeemed):
+		log.Warnf("enroll: key_id %s lost the atomic redemption race (exhausted/revoked/expired between lookup and redeem)", keyID)
 		return nil, ErrEnrollmentFailed
+	case err != nil:
+		log.Errorf("enroll: redeeming key_id %s and accepting sprout %s for tenant %s (nothing was spent): %v", keyID, hostname, row.TenantID, err)
+		return nil, enrollDBError(err)
 	}
-	// The tenant's X25519 key is read (and, for a tenant's first
-	// enrollment, created fresh: tenantbox.go). This sprout's box key is
-	// not recorded on this path at all (see below), so a failure here
-	// leaves no box key behind.
-	tenantPub, err := GetTenantX25519PublicKey(row.TenantID)
-	if err != nil {
-		log.Errorf("enroll: sprout %s accepted but failed to load tenant %s X25519 key: %v", sproutID, row.TenantID, err)
+	// From here on the use is spent and the sprout accepted with no box
+	// key: a failure strands it (the replay path refuses an accepted
+	// sprout with no box key), so it is the generic refusal, not a
+	// retryable answer.
+	if err := grantAcceptedSprout(row.TenantID, sproutID, nkeyPub); err != nil {
+		log.Errorf("enroll: sprout %s accepted for tenant %s (key_id %s spent) but not granted on its Account: %v", sproutID, row.TenantID, keyID, err)
 		return nil, ErrEnrollmentFailed
 	}
 	// sprout_pub is NOT recorded here: the sprout hasn't proved it holds
@@ -1043,10 +1061,19 @@ func resolveEnrollSproutID(tenantID, hostname, nkeyPub string) (string, error) {
 // could still be issued an identity when the database failed at that
 // moment; a failed re-check (errTenantRecheckFailed) and a deprovisioned
 // tenant are returned now.
+//
+// Enroll itself accepts the sprout in redeemAndAccept's transaction and
+// then calls grantAcceptedSprout; this is the two together, for tests.
 func acceptEnrolledNKey(tenantID, id, nkey string) error {
 	if err := upsertNKeyRow(nkeyRow{TenantID: tenantID, SproutID: id, NKey: nkey, State: stateAccepted}); err != nil {
 		return err
 	}
+	return grantAcceptedSprout(tenantID, id, nkey)
+}
+
+// grantAcceptedSprout is acceptEnrolledNKey's grant, for a sprout id whose
+// NKey nkey is already accepted in tenantID.
+func grantAcceptedSprout(tenantID, id, nkey string) error {
 	if err := grantEnrolledSprout(tenantID, nkey); err != nil {
 		if !errors.Is(err, errAccountPushFailed) {
 			return fmt.Errorf("granting enrolled sprout %s on tenant %s's Account: %w", id, tenantID, err)
@@ -1054,6 +1081,111 @@ func acceptEnrolledNKey(tenantID, id, nkey string) error {
 		log.Errorf("failed to push tenant %s's Account after granting enrolled sprout %s (the tenant is live; the next push carries it): %v", tenantID, id, err)
 	}
 	return nil
+}
+
+// errKeyNotRedeemed is redeemAndAccept's error when the join token's
+// guarded UPDATE matched no row: it was exhausted, revoked or expired
+// after Enroll's lookup, including by a concurrent redeemer.
+var errKeyNotRedeemed = errors.New("pki: the join token could not be redeemed")
+
+// errSproutIDTaken is acceptEnrolledNKeyTx's error when the sprout ID
+// resolveEnrollSproutID chose has meanwhile been taken by another NKey
+// (two hosts of one name enrolling into a tenant at once). redeemAndAccept
+// resolves the ID again and retries.
+var errSproutIDTaken = errors.New("pki: the sprout ID was taken by another NKey")
+
+// redeemAndAccept redeems one use of keyID and accepts nkey in tenantID
+// under the sprout ID resolveEnrollSproutID gives hostname, in one
+// transaction, and returns that ID. On contention (isRetryableTxError) or
+// a lost race for the ID (errSproutIDTaken) the whole transaction is run
+// again, the ID resolved afresh, up to txRetries times with jittered
+// back-off (retryTx). A transaction that fails rolls back with nothing
+// spent: the use stays on the token and the sprout unaccepted.
+//
+// Locks are taken in one order, the enrolment key's row first (the
+// guarded UPDATE), then pki_nkeys, so enrolments on one key queue on its
+// row rather than deadlocking with each other. Enrolments on different
+// keys can still deadlock on pki_nkeys' index gaps; acceptEnrolledNKeyTx
+// makes that rare and the retry handles it.
+func redeemAndAccept(tenantID, keyID, hostname, nkey string) (string, error) {
+	var sproutID string
+	err := retryTx(func(err error) bool {
+		return isRetryableTxError(err) || errors.Is(err, errSproutIDTaken)
+	}, func() error {
+		id, err := resolveEnrollSproutID(tenantID, hostname, nkey)
+		if err != nil {
+			return err
+		}
+		sproutID = id
+		return db.Transaction(func(tx *gorm.DB) error {
+			redeemed, err := enrollKeyStore.redeem(tx, keyID)
+			if err != nil {
+				return err
+			}
+			if !redeemed {
+				return errKeyNotRedeemed
+			}
+			if enrollTxFault != nil {
+				if err := enrollTxFault(); err != nil {
+					return err
+				}
+			}
+			return acceptEnrolledNKeyTx(tx, nkeyRow{TenantID: tenantID, SproutID: id, NKey: nkey, State: stateAccepted})
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	return sproutID, nil
+}
+
+// enrollTxFault, when set, runs inside redeemAndAccept's transaction
+// between the redeem and the accept, and its error fails that attempt: a
+// test seam for a database failure mid-transaction. Nil in production.
+var enrollTxFault func() error
+
+// acceptEnrolledNKeyTx writes row (an accepted sprout) inside tx. It tries
+// a plain insert first, a no-op on any conflict: on MySQL, an insert into
+// a gap takes only an insert intention lock, which concurrent inserts
+// don't block, where upsertNKeyRowTx's locking read takes next-key locks
+// over the tenant's range that every other first enrolment's insert then
+// waits on (the deadlock of rc.16-rc.18). Only when a row is already
+// there (an NKey re-enrolling, or a race) does it fall back to
+// upsertNKeyRowTx, after checking the ID is not now another NKey's
+// (errSproutIDTaken): upsertNKeyRowTx would move it to this NKey.
+func acceptEnrolledNKeyTx(tx *gorm.DB, row nkeyRow) error {
+	// gorm's MySQL dialect writes DoNothing as ON DUPLICATE KEY UPDATE
+	// tenant_id = tenant_id, which changes no row (so it is not the
+	// rewrite upsertNKeyRowTx's comment warns about) and reports 0 rows.
+	res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 1 {
+		return nil
+	}
+	var held []nkeyRow
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("tenant_id = ? AND sprout_id = ?", row.TenantID, row.SproutID).
+		Find(&held).Error; err != nil {
+		return err
+	}
+	if len(held) > 0 && held[0].NKey != row.NKey {
+		return fmt.Errorf("pki: tenant %q sprout %q: %w", row.TenantID, row.SproutID, errSproutIDTaken)
+	}
+	return upsertNKeyRowTx(tx, row)
+}
+
+// enrollDBError is the error Enroll returns for a failed database step:
+// ErrEnrollmentFailed, wrapping ErrEnrollmentUnavailable too when err is
+// transient (isTransientDBError), so the sprout is told to retry rather
+// than refused. Only a step before the join token's use is spent may
+// return it.
+func enrollDBError(err error) error {
+	if isTransientDBError(err) || errors.Is(err, errSproutIDTaken) {
+		return fmt.Errorf("%w: %w", ErrEnrollmentFailed, ErrEnrollmentUnavailable)
+	}
+	return ErrEnrollmentFailed
 }
 
 // errAccountPushFailed marks a grantEnrolledSprout error that happened

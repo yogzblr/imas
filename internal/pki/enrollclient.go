@@ -30,7 +30,9 @@ package pki
 //     POST /v1/refresh), so a refresh can only re-issue an existing
 //     identity, never redeem a token or create a sprout.
 //   - A 503 is the one retryable answer: another farmer replica holds
-//     the sprout's User JWT mint lease. The client waits its Retry-After
+//     the sprout's User JWT mint lease, or farmer hit a transient
+//     database failure (a deadlock that outlasted its own retries)
+//     before spending anything. The client waits its Retry-After
 //     (5 s when absent or invalid, at most 60 s) plus up to 20 percent
 //     jitter, and retries with a freshly signed or sealed request, at most
 //     enrollStep2Attempts times (retryWhileBusy). Envoy must not retry a
@@ -566,9 +568,33 @@ func (c *EnrollClient) postEnroll(ctx context.Context, kp nkeys.KeyPair, nkeyPub
 
 // ErrFarmerBusy is what a request farmer answered 503 matches
 // (errors.Is): another farmer replica holds the sprout's User JWT mint
-// lease (pki.ErrSproutJWTBusy on farmer's side). It is retryable; the
-// answer's Retry-After says when.
-var ErrFarmerBusy = errors.New("pki: server busy (lease held)")
+// lease (pki.ErrSproutJWTBusy on farmer's side), or a transient database
+// failure stopped the request before anything was spent
+// (ErrEnrollmentUnavailable). It is retryable; the answer's Retry-After
+// says when.
+var ErrFarmerBusy = errors.New("pki: server busy or temporarily unavailable")
+
+// ErrFarmerRejected is what a request farmer answered 401 matches
+// (errors.Is): farmer refused the credential, a join token that is
+// invalid, expired, revoked or used up, or a request it would not accept
+// (a signature outside the clock skew window, an unproven box key).
+// Farmer gives every refusal the same generic answer on purpose (design
+// doc §3.4); its own log names the reason. Retrying the same request soon
+// gets the same answer.
+var ErrFarmerRejected = errors.New("pki: refused by farmer")
+
+// farmerRejectedError is a 401 from farmer on path. Its message is the
+// one every rejection carried before it had a type of its own.
+type farmerRejectedError struct {
+	path   string
+	status int
+}
+
+func (e *farmerRejectedError) Error() string {
+	return fmt.Sprintf("pki: %s rejected: HTTP %d (see farmer's log for the reason; check the join token or enrollment state, and that this host's clock is within %s of farmer's)", e.path, e.status, EnrollSigMaxSkew)
+}
+
+func (e *farmerRejectedError) Is(target error) bool { return target == ErrFarmerRejected }
 
 // farmerBusyError is a 503 from farmer on path, with the wait its
 // Retry-After asked for (parseRetryAfter).
@@ -578,7 +604,7 @@ type farmerBusyError struct {
 }
 
 func (e *farmerBusyError) Error() string {
-	return fmt.Sprintf("pki: %s: server busy (lease held)", e.path)
+	return fmt.Sprintf("pki: %s: server busy or temporarily unavailable", e.path)
 }
 
 func (e *farmerBusyError) Is(target error) bool { return target == ErrFarmerBusy }
@@ -636,7 +662,7 @@ func logBusy(path string, delay time.Duration) {
 
 // busyMessage is logBusy's message.
 func busyMessage(path string, delay time.Duration) string {
-	return fmt.Sprintf("enroll: %s: server busy (lease held), retrying in %.1fs", path, delay.Seconds())
+	return fmt.Sprintf("enroll: %s: server busy or temporarily unavailable, retrying in %.1fs", path, delay.Seconds())
 }
 
 // retryWhileBusy runs send, which must build a fresh request each time
@@ -673,7 +699,8 @@ func postToFarmer(ctx context.Context, path string, body, out any) error {
 
 // postJSON POSTs body as JSON to baseURL+path over client and decodes a
 // 200 response into out. A 503 is a *farmerBusyError (ErrFarmerBusy)
-// carrying its Retry-After; any other status is a rejection.
+// carrying its Retry-After, a 401 a *farmerRejectedError
+// (ErrFarmerRejected); any other status is an error of neither kind.
 func postJSON(ctx context.Context, client *http.Client, baseURL, path string, body, out any) error {
 	if client == nil {
 		return ErrNKeyClientNotReady
@@ -703,9 +730,12 @@ func postJSON(ctx context.Context, client *http.Client, baseURL, path string, bo
 		// token or clock hint below.
 		return &farmerBusyError{path: path, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode == http.StatusUnauthorized {
 		// Farmer returns the same generic enrollment_failed for every
-		// failure (design doc §3.4); its own log has the reason.
+		// refusal (design doc §3.4); its own log has the reason.
+		return &farmerRejectedError{path: path, status: resp.StatusCode}
+	}
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("pki: %s rejected: HTTP %d (see farmer's log for the reason; check the join token or enrollment state, and that this host's clock is within %s of farmer's)", path, resp.StatusCode, EnrollSigMaxSkew)
 	}
 	if err := json.Unmarshal(respBody, out); err != nil {
@@ -795,7 +825,13 @@ var ErrNoJoinToken = errors.New("pki: sprout is not enrolled and no join token i
 // EnsureEnrolled makes sure the sprout holds a NATS User JWT, enrolling
 // through POST /v1/enroll with joinToken and persisting the result if it
 // doesn't. It retries failures with exponential backoff from retryDelay
-// until ctx is done. Retrying is safe: farmer answers a retry with the
+// until ctx is done. A busy or temporarily unavailable farmer
+// (ErrFarmerBusy) is logged as a warning. A refusal (ErrFarmerRejected:
+// the join token is invalid, expired, revoked or used up, or the clock
+// is off) is logged once at error level with what to do about it, and
+// then tried again only every maxEnrollRetryDelay, each refusal after the
+// first logged as a one-line warning: the same token gets the same
+// answer, so a fleet of sprouts with a bad token doesn't hammer farmer. Retrying is safe: farmer answers a retry with the
 // same NKey from its idempotent replay path, without spending another use
 // of the join token. It returns the sprout ID to run as, which on a first
 // enrollment is farmer's: farmer may assign a suffixed ID when the
@@ -812,8 +848,9 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 		retryDelay = 5 * time.Second
 	}
 	backoff := retryDelay
+	refusals := 0
 	for {
-		resp, err := EnrollSprout(ctx, joinToken, requestedID, sproutPub)
+		resp, err := enrollSprout(ctx, joinToken, requestedID, sproutPub)
 		if errors.Is(err, ErrJoinTokenNoFingerprint) || errors.Is(err, ErrTenantKeyFingerprintMismatch) {
 			// Not retried: the same token gets the same answer.
 			return "", err
@@ -825,14 +862,46 @@ func EnsureEnrolled(ctx context.Context, joinToken, requestedID, sproutPub strin
 			log.Infof("enroll: enrolled as sprout %s", resp.SproutID)
 			return resp.SproutID, nil
 		}
-		log.Errorf("enroll: enrollment failed, retrying in %s: %v", backoff, err)
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(backoff):
+		wait := backoff
+		switch {
+		case errors.Is(err, ErrFarmerRejected):
+			refusals++
+			wait = maxEnrollRetryDelay
+			if refusals == 1 {
+				log.Errorf("%s", refusedMessage(joinToken, wait, err))
+			} else {
+				log.Warnf("enroll: still refused by farmer (%d refusals in a row), next try in %s", refusals, wait)
+			}
+		case errors.Is(err, ErrFarmerBusy):
+			refusals = 0
+			log.Warnf("enroll: farmer is busy or temporarily unavailable, retrying in %s: %v", wait, err)
+		default:
+			refusals = 0
+			log.Errorf("enroll: enrollment failed, retrying in %s: %v", wait, err)
+		}
+		if err := busyWait(ctx, wait); err != nil {
+			return "", err
 		}
 		backoff = min(backoff*2, maxEnrollRetryDelay)
 	}
+}
+
+// enrollSprout is EnrollSprout, swappable in tests.
+var enrollSprout = EnrollSprout
+
+// refusedMessage is EnsureEnrolled's error-level message for the first
+// refusal of joinToken: what farmer's 401 can mean and what to do about
+// it. It names the token by its key_id only, never its secret.
+func refusedMessage(joinToken string, wait time.Duration, err error) string {
+	keyID := "unknown"
+	if tok, perr := jointoken.Parse(joinToken); perr == nil {
+		keyID = tok.KeyID
+	}
+	return fmt.Sprintf("enroll: farmer refused this sprout's enrollment with join token key_id %s: %v. "+
+		"The token is invalid, expired, revoked or used up, or this host's clock is more than %s off farmer's; "+
+		"farmer's log names which (search it for the key_id). Retrying the same token will not help: "+
+		"set a valid join token and restart the sprout. Trying again every %s meanwhile",
+		keyID, err, EnrollSigMaxSkew, wait)
 }
 
 // PersistEnrollment writes a validated enrollment response next to the

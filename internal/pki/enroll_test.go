@@ -43,7 +43,7 @@ func (f *fakeEnrollmentKeyStore) lookup(keyID string) (*enrollmentKeyRow, error)
 // redeem mirrors the production UPDATE ... WHERE guard (enroll.go's
 // mysqlEnrollmentKeyStore.redeem): it only increments used_count when the
 // same conditions that WHERE clause checks all still hold.
-func (f *fakeEnrollmentKeyStore) redeem(keyID string) (bool, error) {
+func (f *fakeEnrollmentKeyStore) redeem(_ *gorm.DB, keyID string) (bool, error) {
 	row, ok := f.rows[keyID]
 	if !ok {
 		return false, nil

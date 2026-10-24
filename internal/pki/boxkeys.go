@@ -32,7 +32,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -185,46 +184,6 @@ func upsertSproutBoxKeyActive(tenantID, sproutID, pub string) error {
 			}).Create(newActiveBoxKeyRow(tenantID, sproutID, pub)).Error
 		})
 	})
-}
-
-// deadlockRetries is how many times retryOnDeadlock runs a write, and
-// deadlockBackoff the pause after the first failed attempt (it grows with
-// each one). Variables for tests.
-var (
-	deadlockRetries = 6
-	deadlockBackoff = 25 * time.Millisecond
-)
-
-// retryOnDeadlock runs write, again if it fails with MySQL/PXC's deadlock
-// error 1213 (ER_LOCK_DEADLOCK, which Galera also returns for a
-// certification conflict), up to deadlockRetries times. write must be one
-// whole transaction: the server rolled the failed one back, so repeating
-// it is safe. Any other error is returned at once. The pause grows with
-// each attempt and differs per call, so two transactions that collided
-// don't collide again in step.
-func retryOnDeadlock(write func() error) error {
-	var err error
-	for attempt := range deadlockRetries {
-		if err = write(); err == nil || !isDeadlockError(err) {
-			return err
-		}
-		if pause := deadlockBackoff * time.Duration(attempt+1); pause > 0 && attempt < deadlockRetries-1 {
-			time.Sleep(pause + time.Duration(rand.Int64N(int64(pause))))
-		}
-	}
-	return err
-}
-
-// mysqlDeadlock is MySQL's ER_LOCK_DEADLOCK.
-const mysqlDeadlock = 1213
-
-// isDeadlockError reports whether err is, or wraps, the driver's error
-// number 1213. The number is checked, not the message text. The driver is
-// MPL-2.0, used unmodified as internal/migrations already does
-// (CLAUDE.md, licensing).
-func isDeadlockError(err error) bool {
-	var me *mysql.MySQLError
-	return errors.As(err, &me) && me.Number == mysqlDeadlock
 }
 
 // mysqlNoSuchTable is the driver's error number for a table that does

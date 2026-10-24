@@ -19,9 +19,9 @@ var errDeadlock = driverError(1213, "Deadlock found when trying to get lock; try
 
 func fastDeadlockRetries(t *testing.T) {
 	t.Helper()
-	oldRetries, oldBackoff := deadlockRetries, deadlockBackoff
-	deadlockBackoff = 0
-	t.Cleanup(func() { deadlockRetries, deadlockBackoff = oldRetries, oldBackoff })
+	oldRetries, oldBackoff := txRetries, txBackoff
+	txBackoff = 0
+	t.Cleanup(func() { txRetries, txBackoff = oldRetries, oldBackoff })
 }
 
 func TestIsDeadlockError(t *testing.T) {
@@ -72,11 +72,11 @@ func TestRetryOnDeadlock(t *testing.T) {
 		}
 	})
 
-	t.Run("gives up after deadlockRetries and returns the deadlock", func(t *testing.T) {
+	t.Run("gives up after txRetries and returns the deadlock", func(t *testing.T) {
 		calls := 0
 		err := retryOnDeadlock(func() error { calls++; return errDeadlock })
-		if !isDeadlockError(err) || calls != deadlockRetries {
-			t.Fatalf("err = %v after %d calls, want the deadlock after %d", err, calls, deadlockRetries)
+		if !isDeadlockError(err) || calls != txRetries {
+			t.Fatalf("err = %v after %d calls, want the deadlock after %d", err, calls, txRetries)
 		}
 	})
 
