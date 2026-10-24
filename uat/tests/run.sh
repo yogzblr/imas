@@ -42,6 +42,13 @@
 #                         IMAS_UAT_DIAG_SECONDS (default 300). Its time
 #                         counts against IMAS_UAT_TIMEOUT.
 #
+# The test channel (W10): run.sh exports IMAS_UAT_REPORT_DIR (the report
+# directory, for the harness's per-VM diagnostics) and VMCTL_DIAG_DIR
+# (<report>/diagnostics, where vmctl.sh captures a failed channel), and
+# AZ_RELOGIN_ADD_MASK=0: a login made under it prints no ::add-mask:: line
+# with its token, as everything printed here is kept in build.log. Everything
+# that goes into build.log goes through redact (uat/scripts/redact.sh).
+#
 # It builds the report tool and one test binary per package under
 # uat/tests with the uat tag, runs them with the tier's -run pattern, and
 # prints one line per scenario id, OS and tenant. The report directory
@@ -86,6 +93,8 @@ if [ ! -d "$IMAS_UAT_DIR" ]; then
 fi
 IMAS_UAT_DIR=$(cd "$IMAS_UAT_DIR" && pwd)
 export IMAS_UAT_DIR
+# shellcheck source-path=SCRIPTDIR source=../scripts/redact.sh
+. "$repo/uat/scripts/redact.sh"
 export IMAS_UAT_VMCTL_DEFAULT="$repo/uat/access/vmctl.sh"
 export IMAS_UAT_BIND_TENANT_DEFAULT="$repo/uat/hub/core/bind-tenant.sh"
 export IMAS_UAT_CORE_CHECK_DEFAULT="$repo/uat/hub/core/check.sh"
@@ -105,6 +114,9 @@ events="$report/events.json"
 : >"$events"
 build_log="$report/build.log"
 : >"$build_log"
+export IMAS_UAT_REPORT_DIR="$report"
+export VMCTL_DIAG_DIR="$report/diagnostics"
+export AZ_RELOGIN_ADD_MASK=0
 
 # say TEXT: a message of run.sh's, on stderr and in build.log.
 say() {
@@ -153,7 +165,7 @@ fail_event() {
 run_bin() {
 	(cd "$2" && go tool test2json -t -p "$1" "$3" -test.v=test2json \
 		-test.run "$4" -test.timeout "$5" -test.count=1) |
-		tee -a "$events" | "$uatreport" follow | tee -a "$build_log"
+		tee -a "$events" | "$uatreport" follow | redact | tee -a "$build_log"
 }
 
 # diagnose NAME: runs IMAS_UAT_DIAG_HOOK after a failure, if set, bounded.
@@ -161,7 +173,7 @@ diagnose() {
 	[ -n "${IMAS_UAT_DIAG_HOOK:-}" ] || return 0
 	local dir="$report/diagnostics/$1" started=$SECONDS
 	say "$1 failed; collecting the hubs' state into $dir"
-	timeout -k 10 "${IMAS_UAT_DIAG_SECONDS:-300}" "$IMAS_UAT_DIAG_HOOK" kube "$dir" >>"$build_log" 2>&1 ||
+	timeout -k 10 "${IMAS_UAT_DIAG_SECONDS:-300}" "$IMAS_UAT_DIAG_HOOK" kube "$dir" 2>&1 | redact >>"$build_log" ||
 		say "the diagnostics for $1 exited $? (see build.log)"
 	say "diagnostics for $1 took $((SECONDS - started))s"
 }
@@ -219,7 +231,7 @@ for entry in "${pkgs[@]}"; do
 		left=$((budget - (SECONDS - started)))
 		if [ "$left" -le 0 ]; then
 			stopped="the tests' time budget ($timeout) ran out before $test"
-		elif ! "$UAT_SESSION_HOOK" phase "tests: $test" 2>&1 | tee -a "$build_log" >&2; then
+		elif ! "$UAT_SESSION_HOOK" phase "tests: $test" 2>&1 | redact | tee -a "$build_log" >&2; then
 			stopped="the session refresh before $test failed (see the log above)"
 		else
 			# A refresh can take minutes: the test gets what is left after it.
