@@ -256,6 +256,11 @@ type Settings struct {
 	BindTenant BindConfig `json:"bind_tenant,omitempty"`
 	// HA says how the ha tier reaches the hubs' clusters (HAConfig).
 	HA HAConfig `json:"ha,omitempty"`
+	// ContainerSprouts says the sprouts are containers sharing the host's
+	// kernel, not VMs: the local rig (uat/lite) sets it, the Azure
+	// material never does. The ingredients tier then skips, with a reason,
+	// the cases that need what a container can't have (needs: selinux).
+	ContainerSprouts bool `json:"container_sprouts,omitempty"`
 }
 
 // SproutOverride is one entry of sprouts.json, keyed by VM name.

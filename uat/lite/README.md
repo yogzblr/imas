@@ -52,7 +52,7 @@ run green against the in-memory fake stack (`uat/tests/README.md`).
 | The real `imas-sprout` deb and rpm installed by `ansible/site.yml` over SSH, enrolment through Envoy, the same sproutid in both tenants (S2) | **Azure Bastion**, `uat/access/tunnels.sh` and the Azure `vmctl.sh`, the Private DNS zone, public IPs and FQDNs, a LoadBalancer |
 | The smoke and core scenarios on Ubuntu 24.04 and AlmaLinux 9 in two tenants; the harness, `uatreport`, the no silent green rule, the `vmctl.sh` interface | **k0s** itself: kind is not k0s (kindnet, not kube-router; kubeadm, not k0s's CoreDNS patch) |
 | The charts' NetworkPolicies in each cluster (kind v0.24 and later enforce them), with cross-cluster traffic arriving from the other node's address, as on Azure | RHEL (AlmaLinux stands in, as on Azure), sizing, load, **HA** (one node per hub: the `ha` tier skips) |
-| The S, T and U fixes on the deployed stack (brief W1, tier core): B1 (the action backlog cap, S3), E1 (tenant erasure by the operator route and the retention sweeper, S6), D1 (retention of recipe audit days, log days with Fluent Bit shipping, and terminal rows, U4), U1 (sealed facts and step events and the "needs upgrade" mark, U3), RB1 (the per-cook render budget, S4). They use the core hub's short settings (`uat/hub/core/values/farmer-uat.yaml`) and look inside it with `uat/hub/core/acceptance.sh`, which `run.sh` reaches through the core kubeconfig it already passes | **N1** (the proof of possession on `PUT /pki/putnkey`, T6 and L12): standalone installs only. The rig is a hosted stack, which serves neither route, so N1 checks the route is refused and skips, saying so. **A kernel reboot**: L1's reboot is a container restart |
+| The S, T and U fixes on the deployed stack (brief W1, tier core): B1 (the action backlog cap, S3), E1 (tenant erasure by the operator route and the retention sweeper, S6), D1 (retention of recipe audit days, log days with Fluent Bit shipping, and terminal rows, U4), U1 (sealed facts and step events and the "needs upgrade" mark, U3), RB1 (the per-cook render budget, S4). They use the core hub's short settings (`uat/hub/core/values/farmer-uat.yaml`) and look inside it with `uat/hub/core/acceptance.sh`, which `run.sh` reaches through the core kubeconfig it already passes | **N1** (the proof of possession on `PUT /pki/putnkey`, T6 and L12): standalone installs only. The rig is a hosted stack, which serves neither route, so N1 checks the route is refused and skips, saying so. **A kernel reboot**: L1's reboot is a container restart. **SELinux**: the ingredients tier's selinux cases skip (the sprouts are containers) |
 
 ## Files
 
@@ -264,7 +264,7 @@ until you remove them (`sudo apt-get purge imas-sprout`, then the
    | `uat.json` | the tofu output `uat` | `connection: ssh` for every sprout; `id` is the container (the hubs' is the kind node); `admin_user` root; `private_dns_zone`; no `public_ip`, since nothing has one and X3 must not probe a made-up address |
    | `access.json` | the Access interface's | each sprout's `host` `127.0.0.1` and `ssh_port`; each hub's `kube_port` (kind's API server port) |
    | `endpoints.json` | what `uat/hub/core` and `uat/hub/dmz` read | both readers' key names: `cluster_issuer` and `ca.cluster_issuer`, `private_dns_zone` and `*.private_fqdn`; `core.exposure: hostPort` |
-   | `harness.json` | `uat/tests/harness` Settings | `envoy_url` and `sprout_envoy_address` on 8443, the rig's `vmctl.sh`, `bind_tenant` |
+   | `harness.json` | `uat/tests/harness` Settings | `envoy_url` and `sprout_envoy_address` on 8443, the rig's `vmctl.sh`, `bind_tenant`, `container_sprouts` |
    | `uat-ca.pem`, `kube/*.kubeconfig`, `rig.json` | | `rig.json` records the settings and what was made, for `down.sh` |
 
 8. **The hubs**, from the release named by `--release-tag`:
@@ -355,7 +355,11 @@ On the rig L1's reboot is a container restart (systemd stops and starts,
 the kernel does not), and the WSL2 fallback's host sprout cannot be
 restarted at all (`vmctl.sh restart` exits 255, so L1 fails there, never
 passes). `ha` runs, and its scenarios skip, each saying it needs
-`hub_nodes` 3 (one node per hub here). The exit status is
+`hub_nodes` 3 (one node per hub here). In `ingredients` the SELinux cases
+(`needs: [selinux]`, AlmaLinux) skip, saying the sprouts are containers: a
+container shares the host's kernel and cannot have SELinux enabled, let
+alone enforcing (`write-material.sh` sets `container_sprouts` in
+`harness.json`; the Azure gate runs them). The exit status is
 `uat/tests/run.sh`'s; the last line says `RIG RESULT: PASS on the Linux
 sprouts only` or `RIG RESULT: FAIL`.
 

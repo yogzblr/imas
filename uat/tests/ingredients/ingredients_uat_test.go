@@ -59,6 +59,9 @@ func TestIngredients(t *testing.T) {
 	sc.NoErr(err, "parsing -test.skip")
 
 	plan := BuildPlan(reg, cases, f.Sprouts())
+	if f.Env.Settings.ContainerSprouts {
+		plan.SkipNeed(NeedSELinux, ContainerSkip)
+	}
 	ctx, cancel := context.WithDeadline(context.Background(), runDeadline(t))
 	defer cancel()
 	runner := &Runner{

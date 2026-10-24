@@ -63,7 +63,7 @@ log (`<joblogdir>/<jid>.jsonl`, by the batch item's jid) through
 | `os` | sprout OSes the case runs on: `ubuntu`, `alma`, `windows` |
 | `skip` | a written reason the whole case doesn't run (a documented skip) |
 | `skip_os` | `{os: reason}`: an OS the method is registered on where the case doesn't run |
-| `needs` | what it depends on beyond a plain sprout: `internet`, `reboot`, `openbao`, `winrm-local`, `windows-feature:<name>`, `second-nic`, ... |
+| `needs` | what it depends on beyond a plain sprout: `internet`, `reboot`, `openbao`, `winrm-local`, `windows-feature:<name>`, `second-nic`, `selinux` (an SELinux-enabled kernel: skipped, with the reason, where harness.json sets `container_sprouts`, the local rig), ... |
 | `order` | default 100. A case that needs `reboot` must be at 900 or more (it runs last) |
 | `tenant2` | repeat on tenant 2 with the cross-tenant check |
 | `changes` | default `true`: the first real cook reports a change. `false` for assertion methods (`file.exists`, probes) |

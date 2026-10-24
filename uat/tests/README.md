@@ -212,7 +212,8 @@ What the suite assumes of the realm (UAT.3b):
     "farmer":    {"vm": "uat-core", "command": "..."},
     "farmerbus": {"vm": "uat-dmz",  "command": "..."},
     "envoy":     {"vm": "uat-dmz",  "command": "..."}
-  }
+  },
+  "container_sprouts": false
 }
 ```
 
@@ -221,7 +222,11 @@ host. `saasapi_url` has no `/v1`. The `restart` commands run on a hub through
 `vmctl.sh run` (L2, L3); the defaults use `k0s kubectl` (or `kubectl`) to
 `rollout restart` every workload labelled `app.kubernetes.io/component` =
 `farmer`, `bus` or `envoy`, then wait for the rollout. The local rig overrides
-them if its hubs are named or reached otherwise.
+them if its hubs are named or reached otherwise. `container_sprouts` is
+true only on the local rig (`uat/lite`), whose sprouts are containers on the
+host's kernel: the ingredients tier then skips the cases that need SELinux
+(`needs: [selinux]`), saying why. The Azure material leaves it out, so they
+run there.
 
 ## vmctl.sh, as the harness uses it
 

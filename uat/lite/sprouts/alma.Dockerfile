@@ -18,11 +18,13 @@ ENV container=docker
 
 # systemd and sshd; python3 (dnf's own bindings come with dnf) for Ansible;
 # sudo for become; gnupg2 for the role's repo_gpgcheck; iproute and
-# procps-ng for the checks the tests run.
+# procps-ng for the checks the tests run; diffutils for the cmp of the
+# file.copy, file.managed and file.sync cases (uat/cases/file), which an
+# AlmaLinux 9 VM has and the container image doesn't.
 RUN dnf -y install \
       systemd openssh-server openssh-clients \
       python3 sudo ca-certificates gnupg2 \
-      iproute procps-ng hostname \
+      iproute procps-ng hostname diffutils \
  && dnf clean all \
  && rm -f /etc/ssh/ssh_host_*
 

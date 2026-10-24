@@ -51,6 +51,32 @@ func TestBuildPlan(t *testing.T) {
 	}
 }
 
+// TestPlanSkipNeed: only the jobs of a case with the need are skipped,
+// with the reason, and a job's own skip reason is kept.
+func TestPlanSkipNeed(t *testing.T) {
+	reg := NewRegistry([]Method{
+		{Ingredient: "file", Method: "content", GOOS: []string{GOOSLinux, GOOSWindows}},
+	}, nil)
+	selinux := mustCase(t, strings.Replace(cycleCase, "os: [", "needs: [selinux]\nos: [", 1))
+	plain := mustCase(t, cycleCase)
+	for name, c := range map[string]*Case{"selinux": selinux, "plain": plain} {
+		p := BuildPlan(reg, []*Case{c}, []harness.Sprout{t1Ubuntu, t1Win})
+		p.SkipNeed(NeedSELinux, ContainerSkip)
+		var got []string
+		for _, j := range p.Jobs[c.ID] {
+			got = append(got, j.Name+"="+j.Skip)
+		}
+		alma := "t1-alma=uat.json has no tenant 1 sprout running alma"
+		want := []string{"t1-ubuntu=", alma, "t1-windows="}
+		if name == "selinux" {
+			want = []string{"t1-ubuntu=" + ContainerSkip, alma, "t1-windows=" + ContainerSkip}
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s: jobs\n got  %q\n want %q", name, got, want)
+		}
+	}
+}
+
 // TestRunnerOrderAndParallelism runs three cases on two sprouts: each
 // sprout must run them in order, the sprouts must overlap, and a job the
 // selection left out must still run, inline, when its subtest asks.

@@ -17,12 +17,16 @@ ENV container=docker \
 
 # systemd and sshd; python3 and python3-apt for Ansible's apt modules; sudo
 # for become; gnupg and ca-certificates for the role's signed apt
-# repository; iproute2 and procps for the checks the tests run.
+# repository; iproute2 and procps for the checks the tests run;
+# apt-utils (apt-ftparchive, the case's setup) and
+# software-properties-common (add-apt-repository, which pkg.repo_managed
+# runs) for I.pkg.repo_managed, both on an Ubuntu 24.04 VM, not in the
+# container image.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus openssh-server \
       python3 python3-apt sudo ca-certificates gnupg curl \
-      iproute2 procps \
+      iproute2 procps apt-utils software-properties-common \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/ssh/ssh_host_*

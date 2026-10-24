@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -71,6 +73,144 @@ func shadowPasswordHash(username string) (string, error) {
 		return "", fmt.Errorf("cannot scan shadow file: %w", err)
 	}
 	return "", nil
+}
+
+// passwdFilePath and groupFilePath are the files usermod edits; tests
+// point them at fixtures.
+var (
+	passwdFilePath = "/etc/passwd"
+	groupFilePath  = "/etc/group"
+)
+
+// passwdShell returns the login shell (field 7) of username in
+// passwdFilePath, or "" when the user or the file can't be read. A ""
+// never matches a configured shell, so the caller sets it.
+func passwdShell(username string) string {
+	shell := ""
+	scanColonFile(passwdFilePath, func(fields []string) bool {
+		if len(fields) >= 7 && fields[0] == username {
+			shell = fields[6]
+			return false
+		}
+		return true
+	})
+	return shell
+}
+
+// sameShell reports whether the configured shell is the one the system
+// reports. Equal paths match. So do two paths to the same file with the
+// same base name: /bin/sh and /usr/bin/sh on a merged-/usr system, or a
+// symlink to the reported shell under its own name. Two names for one
+// binary do not match (/bin/sh linked to bash is not /bin/bash): the
+// shell sees the name it was started with, and bash run as sh runs in
+// POSIX mode, so changing the name is a real change.
+func sameShell(configured, current string) bool {
+	if configured == current {
+		return true
+	}
+	if current == "" || filepath.Base(configured) != filepath.Base(current) {
+		return false
+	}
+	a, err := os.Stat(configured)
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(current)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(a, b)
+}
+
+// supplementaryGroups returns the groups in groupFilePath that list
+// username as a member, the set `usermod -G` replaces.
+func supplementaryGroups(username string) []string {
+	var names []string
+	scanColonFile(groupFilePath, func(fields []string) bool {
+		if len(fields) < 4 {
+			return true
+		}
+		for _, m := range strings.Split(fields[3], ",") {
+			if m == username {
+				names = append(names, fields[0])
+				break
+			}
+		}
+		return true
+	})
+	return names
+}
+
+// groupName returns the name of the group id names: a group ID, as usermod
+// reads an all-digit -g or -G entry (a decimal number, so 010 is 10),
+// becomes the name of the group with that ID in groupFilePath; a name, or
+// an ID no group has, is returned as is.
+func groupName(id string) string {
+	want, err := strconv.ParseUint(id, 10, 32)
+	if err != nil || strings.Trim(id, "0123456789") != "" {
+		return id
+	}
+	name := id
+	scanColonFile(groupFilePath, func(fields []string) bool {
+		if len(fields) < 3 {
+			return true
+		}
+		if got, err := strconv.ParseUint(fields[2], 10, 32); err == nil && got == want {
+			name = fields[0]
+			return false
+		}
+		return true
+	})
+	return name
+}
+
+// sameGroups reports whether usermod -G with desired would leave the
+// supplementary groups as they are. desired may name groups by ID. The
+// primary group (a name) may be listed in desired: usermod accepts it, but
+// it never shows as a supplementary member, so it is left out of the
+// comparison.
+func sameGroups(desired, current []string, primary string) bool {
+	want := map[string]bool{}
+	for _, g := range desired {
+		if g = groupName(g); g != "" && g != primary {
+			want[g] = true
+		}
+	}
+	have := map[string]bool{}
+	for _, g := range current {
+		if g != primary {
+			have[g] = true
+		}
+	}
+	if len(want) != len(have) {
+		return false
+	}
+	for g := range want {
+		if !have[g] {
+			return false
+		}
+	}
+	return true
+}
+
+// scanColonFile calls fn with the colon-separated fields of each line of
+// path until fn returns false. An unreadable file reads as empty.
+func scanColonFile(path string, fn func(fields []string) bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !fn(strings.Split(line, ":")) {
+			return
+		}
+	}
 }
 
 func (u User) present(ctx context.Context, test bool) (cook.Result, error) {
@@ -196,8 +336,7 @@ func buildUsermodArgs(name, uid, gid, shell, home, comment, passwordHash string,
 	if gid != "" && gid != existing.Gid {
 		args = append(args, "-g", gid)
 	}
-	if shell != "" {
-		// user.User doesn't expose shell, so always set if specified
+	if shell != "" && !sameShell(shell, passwdShell(name)) {
 		args = append(args, "-s", shell)
 	}
 	if home != "" && home != existing.HomeDir {
@@ -216,7 +355,13 @@ func buildUsermodArgs(name, uid, gid, shell, home, comment, passwordHash string,
 			args = append(args, "-p", passwordHash)
 		}
 	}
-	if len(groups) > 0 {
+	// The primary group after this usermod: the requested one when -g is
+	// given, so a group it stops being primary still gets -G.
+	primary := existing.Gid
+	if gid != "" {
+		primary = gid
+	}
+	if len(groups) > 0 && !sameGroups(groups, supplementaryGroups(name), groupName(primary)) {
 		args = append(args, "-G", strings.Join(groups, ","))
 	}
 	if len(args) == 0 {

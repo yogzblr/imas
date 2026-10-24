@@ -1,6 +1,7 @@
 id: I.selinux.boolean_on
 title: 'turn httpd_can_sendmail on at runtime'
 os: [alma]
+needs: [selinux]
 skip_os:
   ubuntu: |
     Ubuntu uses AppArmor; SELinux isn't enabled there, so the selinux methods can only fail. They run on AlmaLinux.
