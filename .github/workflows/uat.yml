@@ -20,7 +20,12 @@ name: UAT gate
 # either is still older than UAT_SESSION_MAX_AGE_MIN (40, so only when no
 # refresh happened), and prints "azure login age Xm, tunnels age Ym". Enrolment and the tests always refresh first and probe
 # every tunnel, and refresh again between their own steps (enroll.sh between
-# Ansible runs, run.sh between top-level tests), never during one.
+# Ansible runs, run.sh between top-level tests), never during one. During the
+# tests a supervisor (session.sh supervise, W10) also renews the login and
+# reopens one tunnel at a time, on its port and never under a running
+# command, once either is UAT_REFRESH_AFTER_MIN (10) minutes old or a tunnel
+# stops answering its protocol probe: UAT Run 2 #6's tunnels went stale
+# about 20 minutes into one 15-minute top-level test.
 # Core is installed before the DMZ: the bus needs core's public NATS trust
 # (with the loader's JWT), the loader's seed and the accounts bucket's
 # read-only credential when it starts, all made by the core install (owner
@@ -189,6 +194,14 @@ jobs:
             # falls back to az vm run-command.
             echo "VMCTL_SSH_KEY=$RUNNER_TEMP/uat-secrets/ssh_key"
             echo "VMCTL_WINRM_PASSWORD_FILE=$RUNNER_TEMP/uat-secrets/winrm_password"
+            # The test channel (W10, uat/RUNBOOK.md): REFRESH_AFTER for the
+            # supervisor, vmctl.sh and the harness; a failed channel's state
+            # goes into the report. az-relogin.sh masks its token in this
+            # job log; run.sh, vmctl.sh and the supervisor, whose output is
+            # kept in files, turn that off.
+            echo "UAT_REFRESH_AFTER_MIN=10"
+            echo "VMCTL_DIAG_DIR=$RUNNER_TEMP/uat-state/report/diagnostics"
+            echo "AZ_RELOGIN_ADD_MASK=1"
             # When the job started: the tests' budget is what the job has
             # left (the Tests step).
             echo "JOB_STARTED_AT=$(date +%s)"
@@ -505,6 +518,11 @@ jobs:
           TEARDOWN_RESERVE_MIN: "60"
         run: |
           set -euo pipefail
+          # The supervisor (W10) renews the login and the tunnels every
+          # minute from here until the tunnels are closed, one tunnel at a
+          # time and never under a running command (uat/access/session.sh,
+          # "supervise"). Its log goes into the report's diagnostics/channel/.
+          uat/access/session.sh supervise start
           export IMAS_UAT_DIR="$STATE/hub"
           export IMAS_UAT_REPORT_DIR="$STATE/report"
           export IMAS_UAT_CORE_KUBECONFIG="$STATE/k0s/core.kubeconfig"
@@ -570,7 +588,9 @@ jobs:
 
       - name: Close the Bastion tunnels
         if: always() && steps.tunnels.outcome != 'skipped'
-        run: uat/access/tunnels.sh close "$STATE/access"
+        run: |
+          uat/access/session.sh supervise stop || true
+          uat/access/tunnels.sh close "$STATE/access"
 
       # Allowlisted, non-secret files only, scanned for anything that looks
       # like a credential (a match fails this step and is not uploaded).
