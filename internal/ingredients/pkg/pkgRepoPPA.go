@@ -51,6 +51,10 @@ func ppaArchive(shortcut string) (owner, name string, err error) {
 	return m[1], name, nil
 }
 
+// aptReadsFile is apt's rule for the sources.list.d files it reads; it
+// silently ignores any other name.
+var aptReadsFile = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
 // ppaHosts are the hosts Launchpad serves PPAs from, new and old.
 var ppaHosts = map[string]bool{"ppa.launchpadcontent.net": true, "ppa.launchpad.net": true}
 
@@ -63,7 +67,11 @@ func ppaConfigured(owner, name string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, m...)
+		for _, f := range m {
+			if aptReadsFile.MatchString(filepath.Base(f)) {
+				files = append(files, f)
+			}
+		}
 	}
 	var found []string
 	for _, f := range files {

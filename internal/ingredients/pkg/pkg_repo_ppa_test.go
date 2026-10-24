@@ -118,6 +118,18 @@ func TestPPAFoundInOneLineSources(t *testing.T) {
 	}
 }
 
+func TestPPAIgnoredFileName(t *testing.T) {
+	r := ppaRig(t)
+	line := []byte("deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main\n")
+	if err := os.WriteFile(filepath.Join(r.dir, "my repo.list"), line, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ppaStep(false).Apply(context.Background())
+	if err != nil || !res.Changed || r.mock.addRepoCalled == nil {
+		t.Fatalf("a file apt ignores must not count as configured: %+v, %v", res, err)
+	}
+}
+
 func TestPPAURIMatch(t *testing.T) {
 	src := func(s string) bool {
 		for _, u := range sourceURIs([]byte(s)) {
