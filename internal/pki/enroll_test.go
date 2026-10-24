@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,11 +70,17 @@ func withFakeEnrollmentKeyStore(t *testing.T, f *fakeEnrollmentKeyStore) {
 // tests (mint_test.go) already cover the real signing/JWKS path against
 // a mock Transit server and jwx's independent verifier.
 type fakeGatewayMinter struct {
+	// mu guards calls against concurrent enrolments
+	// (TestMySQLEnroll_ConcurrentSproutsAcrossTenants); tests read calls
+	// once their enrolments have returned.
+	mu    sync.Mutex
 	calls int
 }
 
 func (f *fakeGatewayMinter) MintGatewayJWT(_ context.Context, claims gatewayjwt.GatewayClaims) (string, error) {
+	f.mu.Lock()
 	f.calls++
+	f.mu.Unlock()
 	return "fake-gateway-jwt-for-" + claims.SproutID, nil
 }
 

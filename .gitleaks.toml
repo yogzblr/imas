@@ -59,4 +59,9 @@ regexes = [
   # commit stays in history. A throwaway container's, never a credential
   # anywhere.
   '''--user uatroot:uatrootsecret1234''',
+  # The tenant ID of the rc.18 rig's enrolment deadlock, which
+  # internal/pki/enrollclient_retry_test.go replays (ENR); generic-api-key
+  # reads it as a credential because it follows "token,". A tenant ID,
+  # never a secret.
+  '''token, "t_hydbugp7pz2jjd7t"''',
 ]
