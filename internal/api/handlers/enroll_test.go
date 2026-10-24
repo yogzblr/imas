@@ -345,8 +345,31 @@ func TestEnroll_SproutJWTBusyIs503WithRetryAfter(t *testing.T) {
 	}
 }
 
+// A transient database failure (pki.ErrEnrollmentUnavailable: a deadlock
+// that outlasted pki's retries, a lost connection) is retryable too: 503
+// with its own Retry-After and the generic body, never the 401 that tells
+// a sprout its credential was refused.
+func TestEnroll_TransientDatabaseErrorIs503WithRetryAfter(t *testing.T) {
+	withPKIEnroll(t, fmt.Errorf("%w: %w", pki.ErrEnrollmentFailed, pki.ErrEnrollmentUnavailable))
+	w := postValidEnroll(t)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "3" {
+		t.Errorf("Retry-After = %q, want \"3\"", got)
+	}
+	var resp enrollErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if resp.Error != "enrollment_failed" {
+		t.Errorf("expected generic enrollment_failed error, got %q", resp.Error)
+	}
+}
+
 // Every other pki.Enroll failure keeps the generic 401, with no
-// Retry-After.
+// Retry-After: among them an invalid, expired or exhausted join token,
+// which pki returns as the bare ErrEnrollmentFailed.
 func TestEnroll_OtherErrorsStay401(t *testing.T) {
 	for name, err := range map[string]error{
 		"enrollment failed": pki.ErrEnrollmentFailed,

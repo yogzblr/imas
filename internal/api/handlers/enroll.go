@@ -124,16 +124,27 @@ const maxEnrollRequestBytes = 64 << 10
 // normally stored the JWT a retry reuses.
 const enrollBusyRetryAfter = 5 * time.Second
 
+// enrollUnavailableRetryAfter is the Retry-After of an answer to a request
+// that failed on a transient database condition
+// (pki.ErrEnrollmentUnavailable): pki has already retried the
+// transaction for about a second, so the contention or failover behind
+// it needs a little longer to clear. The sprout adds jitter of its own.
+const enrollUnavailableRetryAfter = 3 * time.Second
+
 // Enroll handles POST /v1/enroll. Every failure path — a malformed
 // request body, a missing field, or any failure inside pki.Enroll (a bad
 // or stale nkey_sig, unknown/malformed token, hash mismatch, revoked,
 // expired, exhausted, a lost redemption race) — writes the exact same
 // status and body, by design (§3.4): distinguishing them would hand an
 // attacker a free oracle for enumerating key_ids or timing a race against
-// expiry. The one exception is a failure that wraps pki.ErrSproutJWTBusy
-// (another farmer replica holds the sprout's User JWT mint lease): it is
-// retryable, so it answers 503 with a Retry-After (writeEnrollError). A
-// body over maxEnrollRequestBytes answers 413, with the same body.
+// expiry. The exceptions are retryable failures, which answer 503 with a
+// Retry-After (writeEnrollError): one that wraps pki.ErrSproutJWTBusy
+// (another farmer replica holds the sprout's User JWT mint lease), and one
+// that wraps pki.ErrEnrollmentUnavailable (a transient database failure,
+// such as a deadlock that outlasted pki's retries, before anything was
+// spent). Neither says anything about the join token: such a failure
+// comes before, or regardless of, its checks. A body over
+// maxEnrollRequestBytes answers 413, with the same body.
 func Enroll(w http.ResponseWriter, r *http.Request) {
 	var req enrollRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxEnrollRequestBytes))
@@ -208,15 +219,22 @@ func writeEnrollFailed(w http.ResponseWriter) {
 
 // writeEnrollError writes the answer to a failed pki.Enroll or
 // pki.RefreshSprout: 503 with a Retry-After when err wraps
-// pki.ErrSproutJWTBusy, otherwise the generic 401. The body is the same
-// generic one either way.
+// pki.ErrSproutJWTBusy or pki.ErrEnrollmentUnavailable, otherwise the
+// generic 401 (an invalid, expired, revoked or exhausted credential, or
+// any other refusal). The body is the same generic one either way.
 func writeEnrollError(w http.ResponseWriter, err error) {
-	if errors.Is(err, pki.ErrSproutJWTBusy) {
-		w.Header().Set("Retry-After", strconv.Itoa(int(enrollBusyRetryAfter/time.Second)))
-		writeEnrollFailure(w, http.StatusServiceUnavailable)
+	var retryAfter time.Duration
+	switch {
+	case errors.Is(err, pki.ErrSproutJWTBusy):
+		retryAfter = enrollBusyRetryAfter
+	case errors.Is(err, pki.ErrEnrollmentUnavailable):
+		retryAfter = enrollUnavailableRetryAfter
+	default:
+		writeEnrollFailed(w)
 		return
 	}
-	writeEnrollFailed(w)
+	w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter/time.Second)))
+	writeEnrollFailure(w, http.StatusServiceUnavailable)
 }
 
 // writeEnrollFailure writes the generic enrollment failure body with status.

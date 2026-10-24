@@ -257,6 +257,11 @@ func startEnrollServer(t *testing.T) *enrollServer {
 			return
 		}
 		res, err := Enroll(r.Context(), EnrollRequest(req))
+		if errors.Is(err, ErrEnrollmentUnavailable) {
+			// As internal/api/handlers' writeEnrollError answers it.
+			answerBusy(w, "3")
+			return
+		}
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"enrollment_failed"}`))
@@ -877,10 +882,17 @@ func TestEnsureEnrolled_RetriesUntilCancelled(t *testing.T) {
 	srv := startEnrollServer(t)
 	sproutPub, _ := EnsureSproutBoxKey()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if _, err := EnsureEnrolled(ctx, pinnedToken(t, "ek_unknown.s"), "web-01", sproutPub, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+	waits := cancelAfterWaits(t, cancel, 2)
+	if _, err := EnsureEnrolled(ctx, pinnedToken(t, "ek_unknown.s"), "web-01", sproutPub, 10*time.Millisecond); !errors.Is(err, context.Canceled) {
 		t.Fatalf("EnsureEnrolled = %v, want the context's error", err)
+	}
+	// An unknown key is a refusal: retried, but only at the cap.
+	for _, d := range waits() {
+		if d != maxEnrollRetryDelay {
+			t.Errorf("waited %s after a refusal, want %s", d, maxEnrollRetryDelay)
+		}
 	}
 	srv.mu.Lock()
 	attempts := len(srv.requests)
