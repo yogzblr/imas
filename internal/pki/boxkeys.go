@@ -37,6 +37,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 
 	log "github.com/yogzblr/imas/internal/log"
 	"github.com/yogzblr/imas/internal/payloadbox"
@@ -164,26 +165,52 @@ func upsertSproutBoxKeyActive(tenantID, sproutID, pub string) error {
 	if _, err := decodeBoxPub(pub); err != nil {
 		return err
 	}
-	// Retried on a deadlock (retryOnDeadlock): sprouts enrolled in the same
-	// second run this transaction concurrently, and the revoke above, which
-	// matches no row on a first key, locks an index gap that the other
-	// transactions' inserts then wait on (PXC reports that, and a Galera
-	// certification conflict, as error 1213). The transaction was rolled
-	// back, and the proof and binding were claimed before this call, so a
-	// dropped write would leave the sprout without a way to enrol.
+	// Retried on a deadlock or lock wait timeout (retryOnDeadlock). The
+	// transaction was rolled back, and the proof and binding were claimed
+	// before this call, so a dropped write would leave the sprout without
+	// a way to enrol.
 	return retryOnDeadlock(func() error {
 		return db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&sproutBoxKeyRow{}).
-				Where("tenant_id = ? AND sprout_id = ? AND state = ? AND pub <> ?", tenantID, sproutID, boxKeyStateActive, pub).
-				Updates(boxKeyInactiveColumns(boxKeyStateRevoked, nil)).Error; err != nil {
-				return err
-			}
-			return tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "sprout_id"}, {Name: "pub"}},
-				DoUpdates: clause.AssignmentColumns(boxKeyUpsertColumns),
-			}).Create(newActiveBoxKeyRow(tenantID, sproutID, pub)).Error
+			return upsertSproutBoxKeyActiveTx(tx, tenantID, sproutID, pub)
 		})
 	})
+}
+
+// upsertSproutBoxKeyActiveTx is upsertSproutBoxKeyActive inside tx.
+//
+// It tries a plain INSERT of the active row first. A sprout's first key
+// (step 2 of every first enrolment) has no row to revoke, and on MySQL an
+// insert into a gap takes only an insert intention lock, which concurrent
+// inserts don't block. The revoke used to run first, and matching no row
+// it left a gap lock on idx_pki_sprout_box_keys_one_active that every
+// other sprout's insert then waited on: sprouts enrolling in the same
+// second deadlocked (1213) on each other, across tenants too.
+//
+// Only a duplicate (isDuplicateKeyError) takes the locking path: the row
+// for pub is already there (a replay re-asserting it), or another key is
+// active (the one-active index). Then the other active rows are revoked
+// and pub's row upserted, as before. The fast path is a plain INSERT, not
+// an upsert: MySQL applies ON DUPLICATE KEY UPDATE to a conflict on any
+// unique index, so without the revoke ahead of it, a conflict on the
+// one-active index would update the other key's row and leave pub
+// unrecorded. A failed INSERT rolls back only that statement, on MySQL and
+// SQLite alike, so the transaction goes on.
+func upsertSproutBoxKeyActiveTx(tx *gorm.DB, tenantID, sproutID, pub string) error {
+	// Silent: the expected duplicate is not an error worth gorm's log line.
+	err := tx.Session(&gorm.Session{Logger: tx.Logger.LogMode(gormlogger.Silent)}).
+		Create(newActiveBoxKeyRow(tenantID, sproutID, pub)).Error
+	if err == nil || !isDuplicateKeyError(err) {
+		return err
+	}
+	if err := tx.Model(&sproutBoxKeyRow{}).
+		Where("tenant_id = ? AND sprout_id = ? AND state = ? AND pub <> ?", tenantID, sproutID, boxKeyStateActive, pub).
+		Updates(boxKeyInactiveColumns(boxKeyStateRevoked, nil)).Error; err != nil {
+		return err
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "sprout_id"}, {Name: "pub"}},
+		DoUpdates: clause.AssignmentColumns(boxKeyUpsertColumns),
+	}).Create(newActiveBoxKeyRow(tenantID, sproutID, pub)).Error
 }
 
 // mysqlNoSuchTable is the driver's error number for a table that does
