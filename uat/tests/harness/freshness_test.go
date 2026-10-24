@@ -37,7 +37,7 @@ func freshFixture(t *testing.T, now time.Time, login, core, dmz time.Duration) *
 }
 
 func TestFreshnessDue(t *testing.T) {
-	now := time.Now()
+	now := time.Now().Truncate(time.Second)
 	if got := freshFixture(t, now, 2*time.Minute, 3*time.Minute, 9*time.Minute).Due(); got != "" {
 		t.Errorf("young login and kube tunnels: Due = %q, want nothing (an old SSH tunnel is vmctl.sh's)", got)
 	}
@@ -57,7 +57,7 @@ func TestFreshnessDue(t *testing.T) {
 }
 
 func TestFreshnessEnsureRunsTheHookOnlyWhenDue(t *testing.T) {
-	now := time.Now()
+	now := time.Now().Truncate(time.Second)
 	var calls []string
 	run := func(_ context.Context, hook string, args ...string) error {
 		calls = append(calls, hook+" "+strings.Join(args, " "))
