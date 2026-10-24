@@ -96,6 +96,9 @@ type aptRig struct {
 	dir     string
 	updates int
 	err     error
+	mock    *mockManager
+	// snackOK allows snack's AddRepo/RemoveRepo (the ppa: path).
+	snackOK bool
 }
 
 func newAptRig(t *testing.T) *aptRig {
@@ -103,16 +106,19 @@ func newAptRig(t *testing.T) *aptRig {
 	r := &aptRig{dir: t.TempDir()}
 	mock := newMock()
 	mock.name = "apt"
+	r.mock = mock
 	restore := withManager(mock)
-	origDir, origUpdate := aptSourcesDir, aptUpdate
+	origDir, origUpdate, origList, origLook := aptSourcesDir, aptUpdate, aptSourcesList, lookPath
 	aptSourcesDir = r.dir
+	aptSourcesList = filepath.Join(r.dir, "sources.list.main")
 	aptUpdate = func(context.Context) error { r.updates++; return r.err }
+	lookPath = func(string) (string, error) { return "/usr/bin/add-apt-repository", nil }
 	t.Cleanup(func() {
 		restore()
-		aptSourcesDir, aptUpdate = origDir, origUpdate
+		aptSourcesDir, aptUpdate, aptSourcesList, lookPath = origDir, origUpdate, origList, origLook
 	})
 	t.Cleanup(func() {
-		if mock.addRepoCalled != nil || mock.removeRepoCalled != "" {
+		if !r.snackOK && (mock.addRepoCalled != nil || mock.removeRepoCalled != "") {
 			t.Error("apt repositories must not go through snack's AddRepo/RemoveRepo")
 		}
 	})
@@ -314,7 +320,8 @@ func TestAptRepoManagedRemovePartialFailure(t *testing.T) {
 func TestAptRepoManagedBadInput(t *testing.T) {
 	r := newAptRig(t)
 	for _, p := range []Pkg{
-		repoStep("ppa:deadsnakes/ppa", false),
+		repoStep("cloud-archive:caracal", false),
+		repoStep("ppa:Bad/Name", false),
 		repoStep("", false),
 		{name: "a/b", method: "repo_managed", properties: map[string]interface{}{"name": "a/b", "absent": true}},
 	} {

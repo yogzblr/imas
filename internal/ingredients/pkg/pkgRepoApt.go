@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/gogrlx/snack"
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/ingredients"
 )
@@ -157,7 +158,7 @@ func checkOneLine(lines []string) error {
 func checkOneLineEntry(l string) error {
 	fields := strings.Fields(l)
 	if fields[0] != "deb" && fields[0] != "deb-src" {
-		return errors.New("not an apt source entry: it must start with deb or deb-src (shortcuts such as ppa: are not supported)")
+		return errors.New("not an apt source entry: it must start with deb or deb-src (of the add-apt-repository shortcuts only ppa: is supported)")
 	}
 	rest := fields[1:]
 	if len(rest) > 0 && strings.HasPrefix(rest[0], "[") {
@@ -262,7 +263,11 @@ func writeFileAtomic(path string, content []byte) error {
 	return os.Rename(tmp, path)
 }
 
-func (p Pkg) aptRepoManaged(ctx context.Context, test bool) (cook.Result, error) {
+func (p Pkg) aptRepoManaged(ctx context.Context, mgr snack.Manager, test bool) (cook.Result, error) {
+	url, _ := p.properties["url"].(string)
+	if isPPAShortcut(url) {
+		return p.ppaManaged(ctx, mgr, strings.TrimSpace(url), test)
+	}
 	if getBoolProp(p.properties, "absent", false) {
 		return p.aptRepoRemoved(ctx, test)
 	}
