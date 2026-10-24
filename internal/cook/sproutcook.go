@@ -82,6 +82,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 			// Not the completion itself: its changes and notes can carry
 			// step output.
 			log.Infof("Step %s completed with status %v", completion.ID, completion.CompletionStatus)
+			logStepFailure(envelope.JobID, completion, vars.sensitiveValues())
 			completed++
 			logStepResult(envelope.JobID, completion)
 			completionMap[completion.ID] = completion
@@ -252,6 +253,17 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 
 // logStepResult writes a step completion result to the local job log directory,
 // organized by JID. Each step is appended as a JSON line to <JobLogDir>/<JID>.jsonl.
+// logStepFailure logs a failed step's error at ERROR, with the recipe's
+// sensitive values redacted as in the job log, so the sprout's own log says
+// why a cook failed (UAT Run 2 had only "completed with status 3" there,
+// and the reason only in the job log).
+func logStepFailure(jobID string, completion StepCompletion, sensitive []string) {
+	if completion.CompletionStatus != StepFailed || completion.Error == nil {
+		return
+	}
+	log.Errorf("Step %s of job %s failed: %v", completion.ID, jobID, redactError(completion.Error, sensitive))
+}
+
 func logStepResult(jobID string, completion StepCompletion) {
 	if config.JobLogDir == "" {
 		return
