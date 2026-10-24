@@ -15,7 +15,6 @@ package winfirewall
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/ingredients"
@@ -93,19 +92,20 @@ func (r Rule) Properties() (map[string]interface{}, error) {
 	return r.params, nil
 }
 
-// exists reports whether a rule with this name exists, by parsing
-// `netsh advfirewall firewall show rule name=...` output. When none
-// exist netsh prints "No rules match the specified criteria." (localized)
-// and exits 1, so exit 1 is "absent", not a failure (UAT
-// I.win_firewall.rule_present); the code, not the text, is the signal.
-// Any other failure, a timeout included, stays an error. On a match we
-// check for the "Rule Name:" header netsh prints per rule.
+// exists reports whether a rule with this name exists, by the exit code
+// of `netsh advfirewall firewall show rule name=...`. When none exist
+// netsh prints "No rules match the specified criteria." (localized) and
+// exits 1, so exit 1 is "absent", not a failure (UAT
+// I.win_firewall.rule_present), and exit 0 is "present": the code, not
+// the text, is the signal, in any locale (the "Rule Name:" header netsh
+// prints per match is English only). Any other failure, a timeout
+// included, stays an error.
 func (r Rule) exists(ctx context.Context) (bool, error) {
 	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(r.params, "timeout", ""))
 	if err != nil {
 		return false, err
 	}
-	out, err := runCLI(ctx, "netsh.exe", []string{
+	_, err = runCLI(ctx, "netsh.exe", []string{
 		"advfirewall", "firewall", "show", "rule", "name=" + r.name,
 	}, timeout)
 	if err != nil {
@@ -114,7 +114,7 @@ func (r Rule) exists(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	return strings.Contains(out, "Rule Name:"), nil
+	return true, nil
 }
 
 func (r Rule) Test(ctx context.Context) (cook.Result, error) {

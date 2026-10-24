@@ -127,6 +127,17 @@ func TestRuleCases(t *testing.T) {
 	}
 }
 
+// A rule that exists is found in any locale: exit 0 is the signal, not
+// the English "Rule Name:" header.
+func TestRuleExistsInAnyLocale(t *testing.T) {
+	f := fakeNetsh{showOut: "Regelname:                            Allow RDP\nOK."}
+	f.install(t)
+	res, err := parseRule(t, methodRulePresent).Apply(context.Background())
+	if err != nil || !res.Succeeded || res.Changed || f.called("add") {
+		t.Errorf("got %+v, %v, calls %v; want present, unchanged, no add", res, err, f.calls)
+	}
+}
+
 func TestShowRuleFailureIsError(t *testing.T) {
 	tests := []struct {
 		name string
