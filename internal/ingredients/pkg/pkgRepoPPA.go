@@ -82,7 +82,7 @@ func ppaConfigured(owner, name string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, u := range sourceURIs(b) {
+		for _, u := range sourceURIs(b, filepath.Ext(f) == aptSourcesExt) {
 			if isPPAURI(u, owner, name) {
 				found = append(found, f)
 				break
@@ -102,10 +102,11 @@ func isPPAURI(u, owner, name string) bool {
 }
 
 // sourceURIs returns the repository URIs of a sources file's active
-// entries: the URI of each uncommented one-line entry (after its type and
-// [options], unquoted) and every value of a deb822 URIs field, continuation lines
-// included.
-func sourceURIs(b []byte) []string {
+// entries, read the way apt reads the file: for a deb822 (.sources) file
+// every value of a URIs field, continuation lines included; for a one-line
+// file (sources.list, .list) the URI of each uncommented entry, after its
+// type and [options], unquoted.
+func sourceURIs(b []byte, deb822 bool) []string {
 	var uris []string
 	inURIs := false
 	sc := bufio.NewScanner(bytes.NewReader(b))
@@ -116,14 +117,16 @@ func sourceURIs(b []byte) []string {
 			inURIs = false
 			continue
 		}
-		if inURIs && (raw[0] == ' ' || raw[0] == '\t') {
-			uris = append(uris, strings.Fields(l)...)
-			continue
-		}
-		inURIs = false
-		if f, v, ok := strings.Cut(l, ":"); ok && strings.EqualFold(strings.TrimSpace(f), "URIs") {
-			uris = append(uris, strings.Fields(v)...)
-			inURIs = true
+		if deb822 {
+			if inURIs && (raw[0] == ' ' || raw[0] == '\t') {
+				uris = append(uris, strings.Fields(l)...)
+				continue
+			}
+			f, v, ok := strings.Cut(l, ":")
+			inURIs = ok && strings.EqualFold(strings.TrimSpace(f), "URIs")
+			if inURIs {
+				uris = append(uris, strings.Fields(v)...)
+			}
 			continue
 		}
 		fields := strings.Fields(l)

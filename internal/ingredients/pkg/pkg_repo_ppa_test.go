@@ -131,8 +131,8 @@ func TestPPAIgnoredFileName(t *testing.T) {
 }
 
 func TestPPAURIMatch(t *testing.T) {
-	src := func(s string) bool {
-		for _, u := range sourceURIs([]byte(s)) {
+	src := func(s string, deb822 bool) bool {
+		for _, u := range sourceURIs([]byte(s), deb822) {
 			if isPPAURI(u, "deadsnakes", "ppa") {
 				return true
 			}
@@ -140,22 +140,25 @@ func TestPPAURIMatch(t *testing.T) {
 		return false
 	}
 	for label, tc := range map[string]struct {
-		file string
-		want bool
+		file   string
+		deb822 bool
+		want   bool
 	}{
-		"one-line, new host":      {"deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", true},
-		"one-line, old host":      {"deb http://ppa.launchpad.net/deadsnakes/ppa/ubuntu/ jammy main", true},
-		"one-line with options":   {"deb [arch=amd64 signed-by=/k.gpg] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", true},
-		"deb822":                  {noblePPA, true},
-		"one-line, quoted URI":    {`deb "https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu" noble main`, true},
-		"deb822 continuation URI": {"Types: deb\nURIs: https://archive.ubuntu.com/ubuntu\n https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu\nSuites: noble\n", true},
-		"another archive":         {"deb http://ppa.launchpad.net/deadsnakes/ppa2/ubuntu jammy main", false},
-		"a mirror's path":         {"deb https://mirror.example.org/ppa.launchpad.net/deadsnakes/ppa/ubuntu jammy main", false},
-		"a lookalike host":        {"deb https://ppa.launchpadcontent.net.example.org/deadsnakes/ppa/ubuntu noble main", false},
-		"in a comment":            {"# deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", false},
-		"a suite, not the URI":    {"deb https://archive.ubuntu.com/ubuntu ppa.launchpad.net/deadsnakes/ppa/ubuntu main", false},
+		"one-line, new host":           {"deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", false, true},
+		"one-line, old host":           {"deb http://ppa.launchpad.net/deadsnakes/ppa/ubuntu/ jammy main", false, true},
+		"one-line with options":        {"deb [arch=amd64 signed-by=/k.gpg] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", false, true},
+		"one-line, quoted URI":         {`deb "https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu" noble main`, false, true},
+		"deb822":                       {noblePPA, true, true},
+		"deb822 continuation URI":      {"Types: deb\nURIs: https://archive.ubuntu.com/ubuntu\n https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu\nSuites: noble\n", true, true},
+		"another archive":              {"deb http://ppa.launchpad.net/deadsnakes/ppa2/ubuntu jammy main", false, false},
+		"a mirror's path":              {"deb https://mirror.example.org/ppa.launchpad.net/deadsnakes/ppa/ubuntu jammy main", false, false},
+		"a lookalike host":             {"deb https://ppa.launchpadcontent.net.example.org/deadsnakes/ppa/ubuntu noble main", false, false},
+		"in a comment":                 {"# deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", false, false},
+		"a suite, not the URI":         {"deb https://archive.ubuntu.com/ubuntu ppa.launchpad.net/deadsnakes/ppa/ubuntu main", false, false},
+		"deb822 fields in a .list":     {noblePPA, false, false},
+		"a one-line entry in .sources": {"deb https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu noble main", true, false},
 	} {
-		if got := src(tc.file); got != tc.want {
+		if got := src(tc.file, tc.deb822); got != tc.want {
 			t.Errorf("%s: %v, want %v", label, got, tc.want)
 		}
 	}
