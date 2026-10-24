@@ -28,7 +28,10 @@
 //   - Client (api.go): the saasapi routes of docs/api/saasapi.md, typed,
 //     with both credentials (X-Internal-Auth and the Keycloak bearer).
 //   - Tokens (tokens.go): Keycloak tokens by tenant and role, and scratch
-//     users for tenants a test creates itself (Keycloak admin API).
+//     users for tenants a test creates itself (Keycloak admin API). One
+//     request per user at a time; a password that worked earlier in the
+//     run and is then refused is retried for a while, as a Keycloak
+//     temporary lockout.
 //   - VMCtl (vmctl.go): uat/access/vmctl.sh, the Access interface. Run
 //     wraps a script so its exit code and values survive whatever vmctl
 //     prints around them; HostScript (hostscript.go) has the Linux and
