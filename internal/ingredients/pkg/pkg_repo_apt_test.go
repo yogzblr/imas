@@ -293,6 +293,24 @@ func TestAptRepoManagedRemoveUpdateFailure(t *testing.T) {
 	}
 }
 
+func TestAptRepoManagedRemovePartialFailure(t *testing.T) {
+	r := newAptRig(t)
+	if err := os.WriteFile(filepath.Join(r.dir, "imas-uat-x.list"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A non-empty directory under the .sources name can't be removed.
+	if err := os.MkdirAll(filepath.Join(r.dir, "imas-uat-x.sources", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := repoStep("", true).Apply(context.Background())
+	if err == nil || !res.Failed {
+		t.Fatalf("expected failure: %+v", res)
+	}
+	if r.exists("imas-uat-x.list") || !res.Changed {
+		t.Errorf("the .list was removed, so the result must report a change: %+v", res)
+	}
+}
+
 func TestAptRepoManagedBadInput(t *testing.T) {
 	r := newAptRig(t)
 	for _, p := range []Pkg{

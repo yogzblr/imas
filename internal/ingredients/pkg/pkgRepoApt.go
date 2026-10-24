@@ -354,9 +354,10 @@ func (p Pkg) aptRepoRemoved(ctx context.Context, test bool) (cook.Result, error)
 			Notes:     []fmt.Stringer{note("would remove repository %s: %s", p.name, strings.Join(present, ", "))},
 		}, nil
 	}
-	for _, path := range present {
+	for i, path := range present {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return failResult(err)
+			// An earlier file may already be gone: say so.
+			return cook.Result{Succeeded: false, Failed: true, Changed: i > 0}, err
 		}
 	}
 	// The removal is not rolled back if the update fails: removing a
