@@ -5,7 +5,9 @@ powershell.exe with the stdin bootstrap), decodes the command vmctl.sh
 wrapped, logs it to $STUB_STATE/calls.log as "winrm decoded: <command>"
 and answers like a Windows host. Behaviour comes from files in $STUB_STATE:
 win_rc (the command's exit code, default 0), winrm_open_fail (no shell can
-be opened), winrm_hang (never answers), win_no_marker (no marker line).
+be opened), winrm_hang (never answers), win_no_marker (no marker line),
+stale.<port> (the tunnel hangs: opening a shell times out, as in UAT Run 2
+#6).
 """
 
 import base64
@@ -31,14 +33,23 @@ class Protocol:
         _log(f"winrm endpoint={endpoint} transport={transport} user={username} "
              f"password={'set' if password else 'empty'} cert={server_cert_validation}")
         self.stdin = b""
+        self.port = endpoint.split(":")[2].split("/")[0]
 
     def open_shell(self, codepage=None):
         if _has("winrm_open_fail"):
             raise ConnectionError("stub: connection refused")
+        if _has("stale." + self.port):
+            raise TimeoutError(f"HTTPSConnectionPool(host='127.0.0.1', port={self.port}): Read timed out. (read timeout=30)")
         _log(f"winrm open_shell codepage={codepage}")
         return "shell-1"
 
     def run_command(self, shell, command, args):
+        # A pooled session (winrm_exec.py --pool) runs many commands in one
+        # shell; each has its own stdin. Its tunnel going stale shows here.
+        self.stdin = b""
+        if _has("stale." + self.port):
+            raise TimeoutError(f"HTTPSConnectionPool(host='127.0.0.1', port={self.port}): Read timed out. (read timeout=30)")
+        _log("winrm run_command")
         boot = base64.b64decode(args[-1]).decode("utf-16-le")
         if command != "powershell.exe" or "$input" not in boot:
             raise RuntimeError("stub: unexpected command " + command)

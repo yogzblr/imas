@@ -19,6 +19,14 @@
 #   AZ                     az command (default az)
 #   AZ_RELOGIN_MIN_AGE     seconds (default 60)
 #   AZ_RELOGIN_DIR         lock and stamp directory (default $RUNNER_TEMP or /tmp)
+#   AZ_RELOGIN_ADD_MASK    1: print GitHub's ::add-mask:: command for the
+#                          token on stdout (default 0). Only where stdout
+#                          is the job log and nothing else: GitHub masks the
+#                          token there, but a file that captures the line
+#                          keeps it (UAT Run 2 #6's build.log, W10). The
+#                          workflow sets 1 for its own steps; uat/tests/run.sh,
+#                          vmctl.sh and session.sh's supervisor set 0. The
+#                          token is never printed otherwise.
 set -euo pipefail
 
 prog=$(basename "$0")
@@ -47,7 +55,7 @@ case "$ACTIONS_ID_TOKEN_REQUEST_URL" in *\?*) sep='&' ;; esac
 token=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}${sep}audience=api://AzureADTokenExchange" | jq -r '.value // empty')
 [ -n "$token" ] || { log "no OIDC token in the answer"; exit 1; }
-echo "::add-mask::$token"
+if [ "${AZ_RELOGIN_ADD_MASK:-0}" = 1 ]; then echo "::add-mask::$token"; fi
 
 "$AZ" login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$token" --allow-no-subscriptions -o none

@@ -31,7 +31,10 @@ type behaviour struct {
 	realFails     bool // the real cook fails
 	noJobLog      bool // the sprout keeps no job log
 	setupFails    bool // the setup script exits 1
-	leakTo        string
+	// logChannelDown: reading a job log over the test channel fails
+	// (vmctl.sh: CHANNEL UNAVAILABLE); the out of band path still works
+	logChannelDown bool
+	leakTo         string
 	// leakTo: a real cook also changes this VM (broken tenant scoping)
 }
 
@@ -47,6 +50,25 @@ type fakeDriver struct {
 	events  []string // vm:what, in order
 	running map[string]bool
 	maxPar  int
+	// outOfBand and diagnosed count the OutOfBand and Diagnoser calls.
+	outOfBand int
+	diagnosed []string
+}
+
+// RunOutOfBand is Run past the test channel (OutOfBand).
+func (d *fakeDriver) RunOutOfBand(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
+	d.mu.Lock()
+	d.outOfBand++
+	d.mu.Unlock()
+	return d.run(ctx, sp, script)
+}
+
+// Diagnose records the VM and job ids (Diagnoser).
+func (d *fakeDriver) Diagnose(_ context.Context, sp harness.Sprout, jids ...string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.diagnosed = append(d.diagnosed, sp.VM+":"+strings.Join(jids, ","))
+	return "diagnostics/" + sp.VM
 }
 
 func newFakeDriver(b behaviour) *fakeDriver {
@@ -166,7 +188,14 @@ func (d *fakeDriver) Cook(_ context.Context, sp harness.Sprout, recipe string, t
 
 var fakeJIDRe = regexp.MustCompile(`(j[0-9]+)\.jsonl`)
 
-func (d *fakeDriver) Run(_ context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
+func (d *fakeDriver) Run(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
+	if d.b.logChannelDown && !strings.Contains(script, "_RC=") && fakeJIDRe.MatchString(script) {
+		return nil, &harness.ChannelError{VM: sp.VM, Verb: "run", Detail: sp.VM + " is marked dead after 3 channel failures in a row"}
+	}
+	return d.run(ctx, sp, script)
+}
+
+func (d *fakeDriver) run(_ context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
 	defer d.enter(sp.VM, "run")()
 	d.mu.Lock()
 	defer d.mu.Unlock()

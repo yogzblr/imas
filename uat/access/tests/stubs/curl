@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Stub curl for access_test.sh's probes: the -w '%{http_code}' answer for
 # the URL's port and path. 401 for /wsman, 403 for /version; 000 and exit
-# 28 (timeout) when the port is listed in $STUB_STATE/dead_ports; the code
+# 28 (timeout) when the port is listed in $STUB_STATE/dead_ports or marked
+# $STUB_STATE/stale.<port>; the code
 # in $STUB_STATE/wsman_code when that file exists.
 set -u
 url=${*: -1}
 printf 'curl %s\n' "$*" >>"$STUB_STATE/probes.log"
 port=${url#https://127.0.0.1:}
 port=${port%%/*}
-if grep -qxF "$port" "$STUB_STATE/dead_ports" 2>/dev/null; then
+if grep -qxF "$port" "$STUB_STATE/dead_ports" 2>/dev/null || [ -f "$STUB_STATE/stale.$port" ]; then
   printf '000'
   exit 28
 fi

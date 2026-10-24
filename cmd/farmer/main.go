@@ -1138,14 +1138,24 @@ func watchTenantActivity(nc *nats.Conn, tenantID string, r *tenantconn.Registry)
 // connecting into its Account, or its connection closing. One loop runs
 // per tenant: a tenant already connected or already retrying is left to
 // that. The loop stops if the tenant is dropped (deprovisioned).
+//
+// After each failed connect the loop asks tenantBusStateOf what PXC says
+// of the tenant (tenantRetryAfterFailure). A tenant that is no longer
+// provisioned (deprovisioned, purged, or never given a row: there is no
+// Account for farmer to connect into) is dropped and the loop ends: it
+// can't connect until it is provisioned again, and provisioning starts a
+// new loop (pki.OnTenantProvisioned). This replica's OnTenantDeprovisioned
+// hook only covers a deprovision this replica ran; every other replica
+// finds out here, when the bus closes the tenant's connection and the
+// redial fails. A tenant whose state can't be read is retried every
+// unknownTenantRetryInterval, logged at debug.
 func connectTenantWithRetry(ctx context.Context, tenantID string) {
 	// Counted in GET /ready's tenants_total from here on, so a tenant that
 	// never manages to connect still shows up as the one that isn't.
 	if !tenantRegistry.MarkPending(tenantID) {
 		return
 	}
-	backoff := 5 * time.Second
-	const maxBackoff = 5 * time.Minute
+	backoff := liveTenantRetryInitial
 	for {
 		if ctx.Err() != nil {
 			return
@@ -1158,18 +1168,134 @@ func connectTenantWithRetry(ctx context.Context, tenantID string) {
 		if errors.Is(err, tenantconn.ErrDropped) || !tenantRegistry.Pending(tenantID) {
 			return
 		}
-		log.Errorf("tenant %s: failed to connect to NATS bus, retrying in %s: %v", tenantID, backoff, err)
-		select {
-		case <-ctx.Done():
+		next := tenantRetryAfterFailure(tenantBusStateOf(tenantID), backoff)
+		switch next.action {
+		case tenantRetryStop:
+			// Drop clears the pending mark, so GET /ready stops counting
+			// the tenant and a later provision can start a new loop.
+			tenantRegistry.Drop(tenantID)
+			log.Infof("tenant %s is not provisioned (deprovisioned or erased): stopped connecting it to the NATS bus (last error: %v)", tenantID, err)
 			return
-		case <-time.After(backoff):
+		case tenantRetryUnknown:
+			log.Debugf("tenant %s: failed to connect to NATS bus and its provisioning state could not be read, retrying in %s: %v", tenantID, next.wait, err)
+		default:
+			log.Errorf("tenant %s: failed to connect to NATS bus, retrying in %s: %v", tenantID, next.wait, err)
+		}
+		if !tenantRetryWait(ctx, next.wait) {
+			return
 		}
 		if !tenantRegistry.Pending(tenantID) {
 			return
 		}
-		if backoff *= 2; backoff > maxBackoff {
-			backoff = maxBackoff
+		backoff = next.backoff
+	}
+}
+
+// Tenant bus retry intervals (connectTenantWithRetry). A live tenant
+// starts at liveTenantRetryInitial and doubles up to liveTenantRetryMax;
+// a tenant whose state can't be read waits unknownTenantRetryInterval.
+const (
+	liveTenantRetryInitial     = 5 * time.Second
+	liveTenantRetryMax         = 5 * time.Minute
+	unknownTenantRetryInterval = 30 * time.Minute
+)
+
+// tenantBusState is what PXC says of a tenant whose bus connect failed.
+type tenantBusState int
+
+const (
+	// tenantBusLive: provisioned, or the legacy tenant: keep retrying.
+	tenantBusLive tenantBusState = iota
+	// tenantBusGone: no live pki_tenants row (deprovisioned, purged, or
+	// never provisioned), so there is no Account to connect into.
+	tenantBusGone
+	// tenantBusUnknown: the state couldn't be read (a PXC error).
+	tenantBusUnknown
+)
+
+// tenantRetryAction is what connectTenantWithRetry does after a failure.
+type tenantRetryAction int
+
+const (
+	tenantRetryLive    tenantRetryAction = iota // wait backoff, log at error, double it
+	tenantRetryUnknown                          // wait the long interval, log at debug
+	tenantRetryStop                             // drop the tenant and return
+)
+
+// tenantRetryStep is tenantRetryAfterFailure's answer: the action, how
+// long to wait before the next attempt, and the live backoff to use after
+// that attempt.
+type tenantRetryStep struct {
+	action  tenantRetryAction
+	wait    time.Duration
+	backoff time.Duration
+}
+
+// tenantRetryAfterFailure decides what connectTenantWithRetry does after a
+// failed connect, from the tenant's state and the current live backoff. A
+// live tenant waits backoff, then doubles it up to liveTenantRetryMax (the
+// behaviour from before the state check). An unknown one waits
+// unknownTenantRetryInterval and keeps its backoff, so a tenant found live
+// again resumes where it was. A gone one stops.
+func tenantRetryAfterFailure(state tenantBusState, backoff time.Duration) tenantRetryStep {
+	switch state {
+	case tenantBusGone:
+		return tenantRetryStep{action: tenantRetryStop}
+	case tenantBusUnknown:
+		return tenantRetryStep{action: tenantRetryUnknown, wait: unknownTenantRetryInterval, backoff: backoff}
+	}
+	next := backoff * 2
+	if next > liveTenantRetryMax {
+		next = liveTenantRetryMax
+	}
+	return tenantRetryStep{action: tenantRetryLive, wait: backoff, backoff: next}
+}
+
+// tenantBusStateOf reports tenantID's state for connectTenantWithRetry
+// from PXC's pki_tenants (pki.ListProvisionedTenantIDs: the rows not
+// marked deleted). The legacy tenant is always live: it has no pki_tenants
+// row of its own, and farmer can't run without it. Any other tenant
+// without a live row can't connect at all (farmer's User JWT for it is
+// signed under that row's Account, pki.FarmerUserJWTForTenant), so it is
+// gone. A failed read is unknown. Tests replace it.
+var tenantBusStateOf = func(tenantID string) (state tenantBusState) {
+	if tenantID == pki.CurrentTenantID() {
+		return tenantBusLive
+	}
+	defer func() {
+		// No PXC installed (pki's db is nil): unknown, not a crash.
+		if recover() != nil {
+			state = tenantBusUnknown
 		}
+	}()
+	ids, err := pki.ListProvisionedTenantIDs()
+	if err != nil {
+		return tenantBusUnknown
+	}
+	return tenantStateFromProvisioned(tenantID, ids)
+}
+
+// tenantStateFromProvisioned is live if tenantID is among the provisioned
+// (non-deleted) tenant IDs, else gone.
+func tenantStateFromProvisioned(tenantID string, provisioned []string) tenantBusState {
+	for _, id := range provisioned {
+		if id == tenantID {
+			return tenantBusLive
+		}
+	}
+	return tenantBusGone
+}
+
+// tenantRetryWait waits d or until ctx ends, reporting false if ctx ended.
+// Tests replace it to run the retry loop without waiting.
+var tenantRetryWait = func(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 
