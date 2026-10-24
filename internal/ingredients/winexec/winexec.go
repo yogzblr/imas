@@ -17,6 +17,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // DefaultTimeout bounds how long a single powershell.exe or CLI-tool
@@ -57,7 +59,7 @@ func RunPowerShell(ctx context.Context, script string, timeout time.Duration) (s
 	err := command.Run()
 	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return out, fmt.Errorf("powershell.exe: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return out, ingredients.CommandError("powershell.exe", err, stdout.Bytes(), stderr.Bytes())
 	}
 	return out, nil
 }
@@ -96,7 +98,7 @@ func RunCLI(ctx context.Context, exe string, args []string, timeout time.Duratio
 	err := command.Run()
 	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return out, fmt.Errorf("%s: %w: %s", exe, err, strings.TrimSpace(stderr.String()))
+		return out, ingredients.CommandError(exe, err, stdout.Bytes(), stderr.Bytes())
 	}
 	return out, nil
 }

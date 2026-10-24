@@ -16,6 +16,9 @@ func (p Pkg) repoManaged(ctx context.Context, test bool) (cook.Result, error) {
 	if err != nil {
 		return failResult(err)
 	}
+	if managerName(mgr) == "apt" {
+		return p.aptRepoManaged(ctx, test)
+	}
 	repoMgr, ok := mgr.(snack.RepoManager)
 	if !ok {
 		return failResult(errRepoNotSupported)

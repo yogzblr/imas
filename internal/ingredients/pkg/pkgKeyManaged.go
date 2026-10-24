@@ -77,8 +77,7 @@ func (p Pkg) keyAdded(ctx context.Context, keyMgr snack.KeyManager, test bool) (
 // URL's last element without its extension, snack's apt.AddKey) and lists
 // that path; every other key is listed under the name it was given.
 func keyListingName(keyMgr snack.KeyManager, key string) string {
-	m, ok := keyMgr.(interface{ Name() string })
-	if !ok || m.Name() != "apt" {
+	if managerName(keyMgr) != "apt" {
 		return key
 	}
 	if !strings.HasPrefix(key, "http://") && !strings.HasPrefix(key, "https://") {
@@ -86,6 +85,15 @@ func keyListingName(keyMgr snack.KeyManager, key string) string {
 	}
 	base := path.Base(key)
 	return path.Join("/etc/apt/keyrings", strings.TrimSuffix(base, path.Ext(base))+".gpg")
+}
+
+// managerName returns the package manager's name (snack's "apt", "dnf",
+// ...), or "" when it doesn't say.
+func managerName(m interface{}) string {
+	if n, ok := m.(interface{ Name() string }); ok {
+		return n.Name()
+	}
+	return ""
 }
 
 func keyListed(keys []string, name string) bool {

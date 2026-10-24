@@ -14,12 +14,14 @@ import (
 	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 // execCommand is a test-overridable factory for running groupadd/groupmod/
 // groupdel/gpasswd.
 var execCommand = func(ctx context.Context, name string, args ...string) error {
-	return exec.CommandContext(ctx, name, args...).Run()
+	_, err := ingredients.RunCommand(exec.CommandContext(ctx, name, args...))
+	return err
 }
 
 func (g Group) present(ctx context.Context, test bool) (cook.Result, error) {

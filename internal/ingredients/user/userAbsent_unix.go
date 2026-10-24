@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/yogzblr/imas/internal/cook"
+	"github.com/yogzblr/imas/internal/ingredients"
 )
 
 func (u User) absent(ctx context.Context, test bool) (cook.Result, error) {
@@ -41,7 +42,7 @@ func (u User) absent(ctx context.Context, test bool) (cook.Result, error) {
 	}
 
 	cmd := execCommandContext(ctx, "userdel", args...)
-	if err := cmd.Run(); err != nil {
+	if _, err := ingredients.RunCommand(cmd); err != nil {
 		result.Failed = true
 		result.Notes = append(result.Notes,
 			cook.SimpleNote(fmt.Sprintf("failed to delete user %s: %s", userName, err.Error())))
