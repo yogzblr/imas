@@ -60,10 +60,10 @@ type Tokens struct {
 	mu       sync.Mutex
 	cache    map[string]cachedToken
 	inflight map[string]chan struct{}
-	// granted holds the cache keys that got a token during the run: a
-	// password known to work that Keycloak then refuses is a lockout,
-	// not a wrong password.
-	granted map[string]bool
+	// granted holds the client, user and password triples that got a
+	// token during the run: a password known to work that Keycloak then
+	// refuses is a lockout, not a wrong password.
+	granted map[grantKey]bool
 }
 
 type cachedToken struct {
@@ -78,7 +78,7 @@ func NewTokens(cfg KeycloakConfig, hc *http.Client) (*Tokens, error) {
 		return nil, err
 	}
 	return &Tokens{cfg: cfg, http: hc, base: base, realm: realm, now: time.Now, sleep: sleepCtx,
-		cache: map[string]cachedToken{}, inflight: map[string]chan struct{}{}, granted: map[string]bool{}}, nil
+		cache: map[string]cachedToken{}, inflight: map[string]chan struct{}{}, granted: map[grantKey]bool{}}, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -197,6 +197,10 @@ func (k *Tokens) Password(ctx context.Context, client ClientCreds, user Credenti
 	}
 }
 
+// grantKey names the exact credentials of a grant, so a changed password
+// isn't taken for a known-good one.
+type grantKey struct{ client, user, password string }
+
 func passwordKey(client ClientCreds, user Credentials) string {
 	return client.ClientID + "\x00" + user.Username
 }
@@ -208,7 +212,7 @@ func passwordKey(client ClientCreds, user Credentials) string {
 // credentials" as a wrong password, and doesn't count a refused attempt
 // as another failure): it retries for up to lockoutWait.
 func (k *Tokens) passwordGrant(ctx context.Context, client ClientCreds, user Credentials) (string, time.Time, error) {
-	key := passwordKey(client, user)
+	key := grantKey{client.ClientID, user.Username, user.Password}
 	form := passwordForm(client, user)
 	start := k.now()
 	for attempt := 1; ; attempt++ {

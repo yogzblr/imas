@@ -144,3 +144,19 @@ func TestTokensWrongPasswordFailsAtOnce(t *testing.T) {
 		t.Errorf("a password that never worked was retried: %d requests, slept %v", kc.requests.Load(), *slept)
 	}
 }
+
+func TestTokensChangedPasswordFailsAtOnce(t *testing.T) {
+	kc, k, slept := newLockoutKeycloak(t)
+	if _, err := k.Tenant(ctx(t), 1, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	k.Forget()
+	k.cfg.Tenants["1"] = KeycloakTenant{Admin: Credentials{Username: "t1-admin", Password: "another"}}
+	kc.refuse.Store(1000)
+	if _, err := k.Tenant(ctx(t), 1, RoleAdmin); err == nil || !isInvalidGrant(err) {
+		t.Fatalf("want invalid_grant, got %v", err)
+	}
+	if len(*slept) != 0 {
+		t.Errorf("a password that never worked was retried (slept %v)", *slept)
+	}
+}

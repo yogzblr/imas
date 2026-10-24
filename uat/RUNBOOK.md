@@ -451,8 +451,10 @@ nothing in the artifacts said why.
    for a tenant user whose password worked earlier is a temporary lockout
    when the log shows `user_temporarily_disabled`. The harness waits that
    out (up to 150 s, and logs `uat harness: Keycloak refused ...`). The
+   `LOGIN_ERROR` lines name the user and error of each failed login; the
    brute-force protector's debug lines (`new num failures`, `quick login,
-   set min wait seconds`) name the failed logins that set it.
+   set min wait seconds`) carry no user, only the failure count and
+   timing, so match them to those lines by time.
 
 ## 5. After the runs
 
