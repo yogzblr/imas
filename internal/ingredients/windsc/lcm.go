@@ -77,19 +77,23 @@ func returnValueCheck(method string) string {
 }
 
 // testScript asks the LCM whether the node is in the configuration at
-// path, as JSON: InDesiredState, and the resources that are not
-// (ResourceId).
+// path, as JSON: InDesiredState, the resources that are not (ResourceId),
+// and Detail: which form of the MOF the LCM took and everything it
+// answered, for the step's note when the node is not in the desired state.
 func testScript(path string) string {
 	return withDcomSession(mofData(path) + "\n" +
+		"  $imasForm = 'bare'\n" +
 		"  try {\n" +
 		"    $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }\n" +
 		"  } catch {\n" +
 		"    if ($_.Exception.Message -notmatch 'Syntax Error') { throw }\n" +
+		"    $imasForm = 'length-prefixed'\n" +
 		"    $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasData }\n" +
 		"  }\n" +
 		returnValueCheck("TestConfiguration") +
 		"  if ($null -eq $imasR.InDesiredState) { throw \"win_dsc: TestConfiguration returned no InDesiredState (ReturnValue: $($imasR.ReturnValue))\" }\n" +
-		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @($imasR.ResourceId | Where-Object { $_ }) } | ConvertTo-Json -Compress")
+		"  $imasDetail = 'MOF sent ' + $imasForm + ' (' + $imasBytes.Length + ' bytes, starting ' + ((@($imasBytes | Select-Object -First 4) | ForEach-Object { '{0:x2}' -f $_ }) -join '') + '); the LCM answered ' + ((@($imasR.PSObject.Properties | Where-Object { $_.Name -notlike 'Cim*' -and $_.Name -ne 'PSComputerName' }) | ForEach-Object { $_.Name + '=' + (@($_.Value) -join ',') }) -join '; ')\n" +
+		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @($imasR.ResourceId | Where-Object { $_ }); Detail = $imasDetail } | ConvertTo-Json -Compress")
 }
 
 // applyScript applies the configuration at path; the method returns once
@@ -104,11 +108,13 @@ func applyScript(path string) string {
 type testAnswer struct {
 	InDesiredState *bool    `json:"InDesiredState"`
 	ResourceID     []string `json:"ResourceId"`
+	Detail         string   `json:"Detail"`
 }
 
 // parseInDesiredState reads testScript's output. TestConfiguration
 // answers one object per node; every one must be in the desired state.
-// It also returns the resources reported out of it.
+// It also returns what to say about the nodes that are not: the resources
+// reported out of it, else the LCM's whole answer (testAnswer.Detail).
 func parseInDesiredState(out string) (bool, []string, error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
@@ -137,6 +143,10 @@ func parseInDesiredState(out string) (bool, []string, error) {
 		}
 		if !*n.InDesiredState {
 			ok = false
+			if len(n.ResourceID) == 0 && n.Detail != "" {
+				ids = append(ids, n.Detail)
+				continue
+			}
 			ids = append(ids, n.ResourceID...)
 		}
 	}
@@ -144,7 +154,7 @@ func parseInDesiredState(out string) (bool, []string, error) {
 }
 
 // pendingNote names the configuration and, when the LCM said, the
-// resources not in the desired state.
+// resources not in the desired state, or else its whole answer.
 func (d Dsc) pendingNote(verb string, ids []string) cook.SimpleNote {
 	if len(ids) == 0 {
 		return cook.SimpleNote(fmt.Sprintf("%s %s", d.name, verb))

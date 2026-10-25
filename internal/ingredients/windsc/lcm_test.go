@@ -57,6 +57,8 @@ func TestParseInDesiredState(t *testing.T) {
 		{`{"InDesiredState":false,"ResourceId":["[File]Marker"]}`, false, "[File]Marker", false},
 		{`[{"InDesiredState":true,"ResourceId":["[File]Ignored"]},{"InDesiredState":false,"ResourceId":["[File]B"]}]`, false, "[File]B", false},
 		{`[{"InDesiredState":true}]`, true, "", false},
+		{`{"InDesiredState":false,"ResourceId":[],"Detail":"MOF sent bare; the LCM answered ReturnValue=0"}`, false, "MOF sent bare; the LCM answered ReturnValue=0", false},
+		{`{"InDesiredState":false,"ResourceId":["[File]Marker"],"Detail":"ignored"}`, false, "[File]Marker", false},
 		{``, false, "", true},
 		{`[]`, false, "", true},
 		{`{"Other":1}`, false, "", true},
@@ -144,7 +146,7 @@ func TestNoteNamesTheResourcesNotInTheDesiredState(t *testing.T) {
 // SendConfigurationApply with the bytes alone.
 func TestScriptsCallTheLCMMethods(t *testing.T) {
 	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
-	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }", "-notmatch 'Syntax Error') { throw }", "TestConfiguration -Arguments @{ ConfigurationData = $imasData }", "ResourceId = @($imasR.ResourceId", "localhost.mof"} {
+	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }", "-notmatch 'Syntax Error') { throw }", "TestConfiguration -Arguments @{ ConfigurationData = $imasData }", "ResourceId = @($imasR.ResourceId", "Detail = $imasDetail", "$imasForm = 'length-prefixed'", "localhost.mof"} {
 		if !strings.Contains(test, want) {
 			t.Errorf("test script lacks %q:\n%s", want, test)
 		}
