@@ -19,12 +19,12 @@ type panickingCooker struct {
 	mockRecipeCooker
 	panics  bool
 	applied *atomic.Int32
+	counts  map[string]int // never made: Apply writes to a nil map
 }
 
 func (p *panickingCooker) Apply(ctx context.Context) (Result, error) {
 	if p.panics {
-		var m map[string]int
-		m["boom"]++
+		p.counts["boom"]++
 	}
 	p.applied.Add(1)
 	return Result{Succeeded: true}, nil
