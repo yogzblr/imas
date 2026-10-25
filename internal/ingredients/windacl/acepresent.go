@@ -45,14 +45,18 @@ func acePresent(req aclRequest, test bool) (cook.Result, error) {
 		existing[i] = fromExplicitAccess(e)
 	}
 
+	// Compared as Windows reads the ACE back (decide.go): the generic
+	// rights mapped to the object's specific ones, and no inheritance
+	// flags on a file. The second real cook of UAT I.win_dacl.ace_present
+	// (Run 2 on rc.21) reported the ACE again because the raw values
+	// differed.
 	desired := aceEntry{
 		sidString: sid.String(),
-		sid:       sid,
 		mode:      req.accessMode,
 		rights:    req.rights,
 		inherit:   req.inheritance,
 	}
-	merged, changed := upsertACE(existing, desired)
+	merged, changed := upsertACE(existing, desired, kindOf(req))
 	verb := accessModeVerb(req.accessMode)
 
 	if !changed {

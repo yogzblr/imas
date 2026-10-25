@@ -19,7 +19,21 @@ import (
 var (
 	advapi32                       = windows.MustLoadDLL("advapi32.dll")
 	procGetExplicitEntriesFromAclW = advapi32.MustFindProc("GetExplicitEntriesFromAclW")
+	procInitializeAcl              = advapi32.MustFindProc("InitializeAcl")
 )
+
+// emptyACL returns a valid ACL with no ACE (ACL_REVISION, 8 bytes, DWORD
+// aligned), built with InitializeAcl in Go memory. The caller keeps buf
+// reachable (runtime.KeepAlive) until the call that reads the ACL returns.
+func emptyACL() (buf *[2]uint64, acl windows.Handle, err error) {
+	const aclRevision = 2
+	buf = new([2]uint64)
+	ret, _, callErr := procInitializeAcl.Call(uintptr(unsafe.Pointer(buf)), unsafe.Sizeof(*buf), aclRevision)
+	if ret == 0 {
+		return nil, 0, fmt.Errorf("InitializeAcl: %w", callErr)
+	}
+	return buf, windows.Handle(unsafe.Pointer(buf)), nil
+}
 
 // resolvePrincipal accepts either a SID string (e.g. "S-1-5-32-544") or
 // an account name ("DOMAIN\User", "BUILTIN\Administrators", ...) and

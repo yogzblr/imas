@@ -11,11 +11,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const (
-	objectTypeFile     = "file"
-	objectTypeRegistry = "registry"
-)
-
 // seObjectType maps the ingredient's object_type property to the
 // SE_OBJECT_TYPE constant GetNamedSecurityInfo/SetNamedSecurityInfo
 // expect.

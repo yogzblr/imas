@@ -28,7 +28,6 @@ package windacl
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -42,17 +41,6 @@ const (
 	methodAceAbsent           = "ace_absent"
 	methodInheritanceEnabled  = "inheritance_enabled"
 	methodInheritanceDisabled = "inheritance_disabled"
-)
-
-var (
-	ErrInvalidObjectType  = errors.New("invalid object_type")
-	ErrInvalidAccessMode  = errors.New("invalid access_mode")
-	ErrInvalidPropagation = errors.New("invalid propagation")
-	ErrInvalidRights      = errors.New("invalid rights")
-	ErrUnknownPrincipal   = errors.New("unknown principal")
-	ErrInvalidRegistryKey = errors.New("invalid registry key name")
-	ErrWouldClearDACL     = errors.New("operation would leave the object with no explicit ACEs")
-	ErrMissingProperty    = errors.New("missing required property")
 )
 
 var methodProps = map[string]ingredients.MethodPropsSet{
@@ -98,6 +86,7 @@ type Dacl struct {
 type aclRequest struct {
 	displayName   string
 	name          string
+	objType       string
 	seObjType     int32
 	principal     string
 	accessMode    int32
@@ -137,7 +126,7 @@ func (d Dacl) request() (aclRequest, error) {
 	if err != nil {
 		return aclRequest{}, err
 	}
-	req := aclRequest{displayName: d.name, name: resolvedName, seObjType: seObjType}
+	req := aclRequest{displayName: d.name, name: resolvedName, objType: objTypeStr, seObjType: seObjType}
 
 	switch d.method {
 	case methodAcePresent, methodAceAbsent:

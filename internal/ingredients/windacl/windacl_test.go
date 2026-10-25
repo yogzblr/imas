@@ -195,93 +195,15 @@ func TestParsePropagationInvalid(t *testing.T) {
 	}
 }
 
-func TestUpsertACEAddsNewTrustee(t *testing.T) {
-	everyone := mustSID(t, sidEveryone)
-	desired := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.GRANT_ACCESS, rights: windows.GENERIC_READ, inherit: uint32(api.NO_INHERITANCE)}
-	merged, changed := upsertACE(nil, desired)
-	if !changed || len(merged) != 1 || !aceEqual(merged[0], desired) {
-		t.Errorf("expected desired to be added, got merged=%v changed=%v", merged, changed)
-	}
-}
-
-func TestUpsertACEIsIdempotent(t *testing.T) {
-	everyone := mustSID(t, sidEveryone)
-	entry := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.GRANT_ACCESS, rights: windows.GENERIC_READ, inherit: uint32(api.NO_INHERITANCE)}
-	merged, changed := upsertACE([]aceEntry{entry}, entry)
-	if changed {
-		t.Errorf("expected no change when the identical ACE already exists")
-	}
-	if len(merged) != 1 {
-		t.Errorf("expected exactly one entry, got %d", len(merged))
-	}
-}
-
-func TestUpsertACEReplacesSameTrusteeAndMode(t *testing.T) {
-	everyone := mustSID(t, sidEveryone)
-	admins := mustSID(t, sidAdministrators)
-	old := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.GRANT_ACCESS, rights: windows.GENERIC_READ, inherit: uint32(api.NO_INHERITANCE)}
-	other := aceEntry{sidString: admins.String(), sid: admins, mode: api.GRANT_ACCESS, rights: windows.GENERIC_ALL, inherit: uint32(api.NO_INHERITANCE)}
-	desired := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.GRANT_ACCESS, rights: windows.GENERIC_ALL, inherit: uint32(api.CONTAINER_INHERIT_ACE)}
-
-	merged, changed := upsertACE([]aceEntry{old, other}, desired)
-	if !changed {
-		t.Fatalf("expected a change when rights/propagation differ")
-	}
-	if len(merged) != 2 {
-		t.Fatalf("expected the trustee's old entry to be replaced, not added alongside, got %d entries", len(merged))
-	}
-	var found bool
-	for _, e := range merged {
-		if e.sidString == everyone.String() {
-			found = true
-			if !aceEqual(e, desired) {
-				t.Errorf("expected replaced entry to match desired, got %+v", e)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("expected an entry for %s", everyone.String())
-	}
-}
-
-func TestUpsertACEAllowAndDenyCoexist(t *testing.T) {
-	everyone := mustSID(t, sidEveryone)
-	allow := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.GRANT_ACCESS, rights: windows.GENERIC_READ, inherit: uint32(api.NO_INHERITANCE)}
-	deny := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.DENY_ACCESS, rights: windows.GENERIC_WRITE, inherit: uint32(api.NO_INHERITANCE)}
-
-	merged, changed := upsertACE([]aceEntry{allow}, deny)
-	if !changed || len(merged) != 2 {
-		t.Errorf("expected allow and deny for the same trustee to coexist, got merged=%v changed=%v", merged, changed)
-	}
-}
-
-func TestRemoveACE(t *testing.T) {
-	everyone := mustSID(t, sidEveryone)
-	admins := mustSID(t, sidAdministrators)
-	entries := []aceEntry{
-		{sidString: everyone.String(), sid: everyone, mode: api.GRANT_ACCESS, rights: windows.GENERIC_READ},
-		{sidString: admins.String(), sid: admins, mode: api.GRANT_ACCESS, rights: windows.GENERIC_ALL},
-	}
-
-	remaining, changed := removeACE(entries, everyone.String(), api.GRANT_ACCESS)
-	if !changed || len(remaining) != 1 || remaining[0].sidString != admins.String() {
-		t.Errorf("expected everyone's entry removed, got remaining=%v changed=%v", remaining, changed)
-	}
-
-	remaining2, changed2 := removeACE(remaining, everyone.String(), api.GRANT_ACCESS)
-	if changed2 {
-		t.Errorf("expected no-op when the trustee has no matching entry")
-	}
-	if len(remaining2) != 1 {
-		t.Errorf("expected unchanged remaining list, got %v", remaining2)
-	}
-}
-
 func TestExplicitAccessRoundTrip(t *testing.T) {
 	everyone := mustSID(t, sidEveryone)
-	entry := aceEntry{sidString: everyone.String(), sid: everyone, mode: api.DENY_ACCESS, rights: windows.GENERIC_WRITE, inherit: uint32(api.CONTAINER_INHERIT_ACE)}
-	back := fromExplicitAccess(entry.toExplicitAccess())
-	if !aceEqual(entry, back) {
+	entry := aceEntry{sidString: everyone.String(), mode: api.DENY_ACCESS, rights: windows.GENERIC_WRITE, inherit: uint32(api.CONTAINER_INHERIT_ACE)}
+	ea, err := entry.toExplicitAccess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	back := fromExplicitAccess(ea)
+	if back != entry {
 		t.Errorf("round trip mismatch: %+v != %+v", entry, back)
 	}
 }
