@@ -117,9 +117,26 @@ func (p PSGet) timeouts() (check, change time.Duration, err error) {
 func (p PSGet) checkScript() string {
 	script := "@(Get-Module -ListAvailable -Name " + winexec.PSQuote(p.name)
 	if version := winexec.StringParamOr(p.params, "version", ""); version != "" {
-		script += " | Where-Object { $_.Version -eq [version]" + winexec.PSQuote(version) + " }"
+		// Both sides as four components, a missing one 0: [version]'5.4'
+		// is not -eq an installed 5.4.0, and a prerelease ("2.0.0-beta1")
+		// is not a [version] at all (Get-Module reports its base version).
+		script += " | Where-Object { (($_.Version.Major, $_.Version.Minor, [Math]::Max(0, $_.Version.Build), [Math]::Max(0, $_.Version.Revision)) -join '.') -eq " +
+			winexec.PSQuote(fourPartVersion(version)) + " }"
 	}
 	return script + ").Count"
+}
+
+// fourPartVersion is a module version as Major.Minor.Build.Revision, the
+// missing parts 0, without a prerelease or build suffix.
+func fourPartVersion(v string) string {
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(strings.TrimSpace(v), ".")
+	for len(parts) < 4 {
+		parts = append(parts, "0")
+	}
+	return strings.Join(parts[:4], ".")
 }
 
 // installScript installs the module. PowerShellGet 1.0.0.1, the one

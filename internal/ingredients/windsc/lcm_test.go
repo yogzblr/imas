@@ -40,11 +40,8 @@ func TestScriptsUseADcomCimSession(t *testing.T) {
 			t.Errorf("%s script uses WS-Management:\n%s", name, s)
 		}
 	}
-	if !strings.Contains(testScript(`C:\it's`), `-Path 'C:\it''s'`) {
+	if !strings.Contains(testScript(`C:\it's`), `$imasPath = 'C:\it''s'`) {
 		t.Error("the path must be quoted")
-	}
-	if !strings.Contains(applyScript(`C:\x`), "Start-DscConfiguration -Path 'C:\\x' -CimSession $imasCim -Wait -Force") {
-		t.Errorf("apply script:\n%s", applyScript(`C:\x`))
 	}
 }
 
@@ -94,7 +91,7 @@ func parse(t *testing.T) Dsc {
 func TestApplyAppliesThenIsIdempotent(t *testing.T) {
 	applied := false
 	scripts := fake(t, func(s string) (string, error) {
-		if strings.Contains(s, "Start-DscConfiguration") {
+		if strings.Contains(s, "SendConfigurationApply") {
 			applied = true
 			return "", nil
 		}
@@ -115,7 +112,7 @@ func TestFailureCarriesTheCmdletError(t *testing.T) {
 		return "", ingredients.CommandError("powershell.exe", exitError(1), nil, []byte(wsmanErr))
 	})
 	_, err := parse(t).Test(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "Test-DscConfiguration -Path") || !strings.Contains(err.Error(), "HRESULT 0x80338012") {
+	if err == nil || !strings.Contains(err.Error(), "the LCM's TestConfiguration of") || !strings.Contains(err.Error(), "HRESULT 0x80338012") {
 		t.Fatalf("err = %v", err)
 	}
 	var ee interface{ ExitCode() int }
@@ -124,10 +121,21 @@ func TestFailureCarriesTheCmdletError(t *testing.T) {
 	}
 }
 
-// Test-DscConfiguration can answer a bare Boolean; the script turns it
-// into the InDesiredState object parseInDesiredState reads.
-func TestTestScriptNormalisesABoolean(t *testing.T) {
-	if s := testScript(`C:\x`); !strings.Contains(s, "-is [bool]") || !strings.Contains(s, "InDesiredState = $_") {
-		t.Errorf("script: %s", s)
+// The LCM is asked through its own CIM methods with the MOF's bytes,
+// length-prefixed (W11 CI: Test-DscConfiguration -Path over DCOM sent a
+// configuration the LCM could not parse), and the answer is always the
+// InDesiredState object parseInDesiredState reads.
+func TestScriptsCallTheLCMMethods(t *testing.T) {
+	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
+	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "localhost.mof"} {
+		if !strings.Contains(test, want) {
+			t.Errorf("test script lacks %q:\n%s", want, test)
+		}
+	}
+	if !strings.Contains(apply, "-MethodName SendConfigurationApply") || !strings.Contains(apply, "Force = $true") {
+		t.Errorf("apply script:\n%s", apply)
+	}
+	if strings.Contains(test+apply, "Test-DscConfiguration") || strings.Contains(test+apply, "Start-DscConfiguration") {
+		t.Error("the scripts still use the cmdlets")
 	}
 }
