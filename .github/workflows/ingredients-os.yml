@@ -80,9 +80,16 @@ jobs:
           go-version: 1.26.x
           check-latest: true
 
+      # The step's shell is PowerShell 7, whose module path a child
+      # Windows PowerShell 5.1 (the ingredients' powershell.exe) would
+      # inherit and then fail to load its own modules from ("Get-Acl ...
+      # the module could not be loaded"). A sprout service has 5.1's
+      # default; so does this.
       - name: Run the Windows cases against the OS
         working-directory: uat/tests/ingredients
-        run: go test -tags windows_integration -run TestWindowsIngredientsOnTheOS -v -timeout 40m .
+        run: |
+          $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\system32\WindowsPowerShell\v1.0\Modules"
+          go test -tags windows_integration -run TestWindowsIngredientsOnTheOS -v -timeout 40m .
 
   systemd-ubuntu:
     name: systemd service cases (Ubuntu runner)
