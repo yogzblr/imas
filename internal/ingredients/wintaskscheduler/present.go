@@ -38,15 +38,6 @@ var triggerTypes = map[string]int{
 	"on_logon":   triggerLogon,
 }
 
-func triggerTypeName(n int) string {
-	for name, v := range triggerTypes {
-		if v == n {
-			return name
-		}
-	}
-	return ""
-}
-
 var runLevels = map[string]bool{"limited": true, "highest": true}
 
 // dayBits maps a weekly trigger's days_of_week names to the bitmask
