@@ -1,0 +1,147 @@
+name: Ingredients on the OS
+
+# W11 (Part D): faster feedback than an Azure UAT run for the ingredients
+# that read and change the OS. UAT Run 2 on rc.21 failed 16 Windows cases
+# and service masked/unmasked on AlmaLinux 9 that unit tests with fake
+# exec and COM layers could not catch. These jobs run the UAT case
+# catalogue's cycle for those ingredients (setup, test mode, real cook,
+# idempotency, the out of band check, revert: uat/tests/ingredients,
+# local_*_integration_test.go) directly against a real OS: no NATS, no
+# hub, no Azure, no Bastion.
+#
+#   windows   Windows Server 2022 (GitHub's windows-2022 image, Desktop
+#             Experience): win_firewall (netsh), win_task (Task Scheduler
+#             COM), win_dacl, win_certutil, win_psget (PSGallery),
+#             win_shortcut (its child powershell.exe), user, group,
+#             service (a stopped-by-default service the case picks),
+#             registry, win_dsc (the LCM over a DCOM CIM session).
+#   systemd   the service cases against real systemd: on the Ubuntu
+#             runner (systemd 255), and in an AlmaLinux 9 container with
+#             systemd as PID 1 (systemd 252, the UAT's alma sprouts), plus
+#             a static unit.
+#
+# What they do not cover: Server Core (the runner has the Desktop
+# Experience, so a Core-only gap such as the missing Print Spooler or
+# shell COM objects does not show), the sprout's SYSTEM context (the tests
+# run as the runner's administrator; certificate stores, profile paths
+# and Task Scheduler principals can differ under LocalSystem), the sprout
+# process itself (a native fault in an ingredient would end the test
+# binary, not a service), the Bastion WinRM and SSH channel, the hub and
+# the bus. Those stay with the Azure UAT run (uat/RUNBOOK.md).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/ingredients/win*/**"
+      - "internal/ingredients/service/**"
+      - "internal/ingredients/user/**"
+      - "internal/ingredients/group/**"
+      - "internal/ingredients/registry/**"
+      - "internal/ingredients/ingredients.go"
+      - "internal/ingredients/stepbound.go"
+      - "uat/cases/**"
+      - "uat/tests/ingredients/**"
+      - ".github/workflows/ingredients-os.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/ingredients/win*/**"
+      - "internal/ingredients/service/**"
+      - "internal/ingredients/user/**"
+      - "internal/ingredients/group/**"
+      - "internal/ingredients/registry/**"
+      - "internal/ingredients/ingredients.go"
+      - "internal/ingredients/stepbound.go"
+      - "uat/cases/**"
+      - "uat/tests/ingredients/**"
+      - ".github/workflows/ingredients-os.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows ingredients (Windows Server 2022)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      # The cases' scripts and go.mod are read as checked in (LF).
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      - name: Run the Windows cases against the OS
+        working-directory: uat/tests/ingredients
+        run: go test -tags windows_integration -run TestWindowsIngredientsOnTheOS -v -timeout 40m .
+
+  systemd-ubuntu:
+    name: systemd service cases (Ubuntu runner)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      - name: Build the test binary
+        run: CGO_ENABLED=0 go test -c -tags systemd_integration -o "$RUNNER_TEMP/it.test" ./uat/tests/ingredients/
+
+      # The cases change units and run systemctl: root.
+      - name: Run the service cases against systemd
+        working-directory: uat/tests/ingredients
+        run: |
+          systemctl --version | head -n 1
+          sudo "$RUNNER_TEMP/it.test" -test.v -test.run 'TestSystemd' -test.timeout 15m
+
+  systemd-alma:
+    name: systemd service cases (AlmaLinux 9, systemd as PID 1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.x
+          check-latest: true
+
+      - name: Build the test binary
+        run: CGO_ENABLED=0 go test -c -tags systemd_integration -o it.test ./uat/tests/ingredients/
+
+      # Privileged, with cgroupns=host and the host's /sys/fs/cgroup, as the
+      # molecule systemd platforms run (ansible/molecule/default).
+      - name: Start AlmaLinux 9 with systemd
+        run: |
+          docker run -d --name alma --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw -v "$PWD:/src" almalinux/9-init
+          for _ in $(seq 60); do
+            state=$(docker exec alma systemctl is-system-running 2>/dev/null || true)
+            case $state in running | degraded) break ;; esac
+            sleep 2
+          done
+          echo "system state: ${state:-unknown}"
+          docker exec alma systemctl --version | head -n 1
+
+      - name: Run the service cases against systemd 252
+        run: docker exec -w /src/uat/tests/ingredients alma /src/it.test -test.v -test.run 'TestSystemd' -test.timeout 15m
+
+      - name: The container's journal on failure
+        if: failure()
+        run: docker exec alma journalctl --no-pager -n 200 || true

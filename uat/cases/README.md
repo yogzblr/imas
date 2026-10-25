@@ -155,6 +155,17 @@ IMAS_UAT_DIR=... uat/tests/run.sh ingredients I.file.content I.cron.present
 IMAS_UAT_DIR=... uat/tests/run.sh lifecycle                       # L4, L5
 ```
 
+**Against the OS, without a hub (W11).** `.github/workflows/ingredients-os.yml`
+runs the cycle of the Windows ingredient cases on a GitHub Windows Server
+2022 runner and the service cases against real systemd (the Ubuntu runner,
+and an AlmaLinux 9 container with systemd as PID 1), with a local driver
+that cooks each step through the registered ingredients and runs the
+scripts on the machine itself (`local_*_integration_test.go`, build tags
+`windows_integration` and `systemd_integration`; run as an administrator or
+root, and `IMAS_IT_CASES` narrows the cases). It catches an ingredient's
+OS behaviour in minutes; it does not cover Server Core, the sprout's SYSTEM
+context, the sprout process or the Azure channel.
+
 Subtests are `TestIngredients/<id>/<t1-ubuntu>`. When an OS has no sprout in
 the run (the local rig has no Windows), its subtest is `t1-<os>` and is
 skipped with that reason. It is never passed. `IMAS_UAT_CASES_DIR` reads the
