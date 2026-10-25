@@ -43,9 +43,13 @@ func withDcomSession(body string) string {
 // with the total length as a 4-byte little-endian integer, the form
 // PSDesiredStateConfiguration's own SendConfiguration callers use, it parsed
 // the prefix as MOF text, the same "Syntax Error"). TestConfiguration is
-// sent the bytes alone too, and the prefixed form only if the LCM refuses
-// them as a syntax error: given the prefixed form it answered "not in the
-// desired state" straight after a successful apply (W11 CI).
+// tried with the MOF in four forms, bare and length-prefixed, as compiled
+// (UTF-16) and as UTF-8, and the first answer that evaluated any resource
+// is used: given the bare UTF-16 MOF it accepted it (ReturnValue 0) and
+// answered InDesiredState=False with no resource in or out of the desired
+// state, straight after a successful apply (W11 CI), so it had not read
+// the document. With no form evaluated, the first answer stands and the
+// note lists what each form got.
 const lcmClass = "-Namespace root/Microsoft/Windows/DesiredStateConfiguration -ClassName MSFT_DSCLocalConfigurationManager"
 
 // mofData is the script lines that read the configuration at path (a .mof
@@ -82,18 +86,22 @@ func returnValueCheck(method string) string {
 // and Detail: which form of the MOF the LCM took and everything it
 // answered, for the step's note when the node is not in the desired state.
 func testScript(path string) string {
+	call := "Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = [byte[]]$imasForms[$imasF] }"
 	return withDcomSession(mofData(path) + "\n" +
-		"  $imasForm = 'bare'\n" +
-		"  try {\n" +
-		"    $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }\n" +
-		"  } catch {\n" +
-		"    if ($_.Exception.Message -notmatch 'Syntax Error') { throw }\n" +
-		"    $imasForm = 'length-prefixed'\n" +
-		"    $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasData }\n" +
+		"  $imasU8 = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($imasMof))\n" +
+		"  $imasForms = [ordered]@{ 'bare' = $imasBytes; 'length-prefixed' = $imasData; 'bare UTF-8' = $imasU8; 'length-prefixed UTF-8' = [byte[]]([BitConverter]::GetBytes([int]($imasU8.Length + 4)) + $imasU8) }\n" +
+		"  $imasR = $null; $imasForm = $null; $imasTried = @()\n" +
+		"  foreach ($imasF in $imasForms.Keys) {\n" +
+		"    try { $imasA = " + call + " } catch { $imasTried += ($imasF + ': ' + $_.Exception.Message); continue }\n" +
+		"    if ($imasA.ReturnValue) { $imasTried += ($imasF + ': ReturnValue ' + $imasA.ReturnValue); continue }\n" +
+		"    $imasN = @(@($imasA.ResourcesInDesiredState) + @($imasA.ResourcesNotInDesiredState) | Where-Object { $_ }).Count\n" +
+		"    $imasTried += ($imasF + ': InDesiredState=' + $imasA.InDesiredState + ', ' + $imasN + ' resources evaluated')\n" +
+		"    if (-not $imasR) { $imasR = $imasA; $imasForm = $imasF }\n" +
+		"    if ($imasN -gt 0) { $imasR = $imasA; $imasForm = $imasF; break }\n" +
 		"  }\n" +
-		returnValueCheck("TestConfiguration") +
+		"  if (-not $imasR) { throw ('win_dsc: TestConfiguration refused the configuration in every form: ' + ($imasTried -join '; ')) }\n" +
 		"  if ($null -eq $imasR.InDesiredState) { throw \"win_dsc: TestConfiguration returned no InDesiredState (ReturnValue: $($imasR.ReturnValue))\" }\n" +
-		"  $imasDetail = 'MOF sent ' + $imasForm + ' (' + $imasBytes.Length + ' bytes, starting ' + ((@($imasBytes | Select-Object -First 4) | ForEach-Object { '{0:x2}' -f $_ }) -join '') + '); the LCM answered ' + ((@($imasR.PSObject.Properties | Where-Object { $_.Name -notlike 'Cim*' -and $_.Name -ne 'PSComputerName' }) | ForEach-Object { $_.Name + '=' + (@($_.Value | ForEach-Object { if ($_ -is [Microsoft.Management.Infrastructure.CimInstance]) { $_.ResourceId } else { $_ } }) -join ',') }) -join '; ')\n" +
+		"  $imasDetail = 'MOF sent ' + $imasForm + ' (' + $imasBytes.Length + ' bytes, starting ' + ((@($imasBytes | Select-Object -First 4) | ForEach-Object { '{0:x2}' -f $_ }) -join '') + '); tried ' + ($imasTried -join '; ') + '; the LCM answered ' + ((@($imasR.PSObject.Properties | Where-Object { $_.Name -notlike 'Cim*' -and $_.Name -ne 'PSComputerName' }) | ForEach-Object { $_.Name + '=' + (@($_.Value | ForEach-Object { if ($_ -is [Microsoft.Management.Infrastructure.CimInstance]) { $_.ResourceId } else { $_ } }) -join ',') }) -join '; ')\n" +
 		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @(@($imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }) + @($imasR.ResourceId) | Where-Object { $_ }); Detail = $imasDetail } | ConvertTo-Json -Compress")
 }
 
