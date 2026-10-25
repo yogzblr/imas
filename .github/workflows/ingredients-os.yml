@@ -42,6 +42,7 @@ on:
       - "internal/ingredients/stepbound.go"
       - "uat/cases/**"
       - "uat/tests/ingredients/**"
+      - "uat/tests/harness/**"
       - ".github/workflows/ingredients-os.yml"
   pull_request:
     branches: [main]
@@ -55,6 +56,7 @@ on:
       - "internal/ingredients/stepbound.go"
       - "uat/cases/**"
       - "uat/tests/ingredients/**"
+      - "uat/tests/harness/**"
       - ".github/workflows/ingredients-os.yml"
   workflow_dispatch:
 
