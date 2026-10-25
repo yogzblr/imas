@@ -2,6 +2,7 @@ package ingredients
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -122,20 +123,31 @@ func (b boundedCooker) run(ctx context.Context, mode string, fn func(context.Con
 		res, err := fn(bctx)
 		done <- stepOutcome{res, err}
 	}()
+	boundErr := func() error {
+		return fmt.Errorf("%s.%s (%s) did not finish within %s, the Windows step bound (%s; default %s); it was cancelled and abandoned: %w",
+			b.ingredient, b.method, mode, b.bound, WindowsStepTimeoutEnv, DefaultWindowsStepTimeout, context.DeadlineExceeded)
+	}
+	// finished keeps a step's own result, except that a step that gave up
+	// because the bound struck (returning its context's error) says so.
+	finished := func(o stepOutcome) (cook.Result, error) {
+		if errors.Is(o.err, context.DeadlineExceeded) && bctx.Err() != nil && ctx.Err() == nil {
+			return o.res, boundErr()
+		}
+		return o.res, o.err
+	}
 	select {
 	case o := <-done:
-		return o.res, o.err
+		return finished(o)
 	case <-bctx.Done():
 		// A step that finished as the bound struck keeps its own result.
 		select {
 		case o := <-done:
-			return o.res, o.err
+			return finished(o)
 		default:
 		}
 		if ctx.Err() != nil {
 			return cook.Result{Failed: true}, fmt.Errorf("%s.%s (%s): %w", b.ingredient, b.method, mode, ctx.Err())
 		}
-		return cook.Result{Failed: true}, fmt.Errorf("%s.%s (%s) did not finish within %s, the Windows step bound (%s; default %s); it was cancelled and abandoned: %w",
-			b.ingredient, b.method, mode, b.bound, WindowsStepTimeoutEnv, DefaultWindowsStepTimeout, context.DeadlineExceeded)
+		return cook.Result{Failed: true}, boundErr()
 	}
 }

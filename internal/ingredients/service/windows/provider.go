@@ -130,11 +130,14 @@ func (s WindowsService) withService(fn func(scmService) error) error {
 }
 
 // waitForState polls the service until it reaches want. It is only called
-// right after a successful Start or Stop control, so a service waited on
-// for Running that reports Stopped has failed to start (transitionFailed)
-// and fails at once with its exit codes; otherwise the wait ends with the
-// context, naming the last state seen.
+// right after a successful Start or Stop control. A service waited on for
+// Running that reports Stopped after its start showed as pending, or on
+// stoppedPollsLimit polls in a row (startWatch), has failed to start
+// (transitionFailed) and fails at once with its exit codes; a Stopped
+// right after StartService is not yet a failure. Otherwise the wait ends
+// with the context, naming the last state seen.
 func waitForState(ctx context.Context, sv scmService, name string, want svc.State) error {
+	var watch startWatch
 	for {
 		status, err := sv.Query()
 		if err != nil {
@@ -143,7 +146,8 @@ func waitForState(ctx context.Context, sv scmService, name string, want svc.Stat
 		if status.State == want {
 			return nil
 		}
-		if err := transitionFailed(name, uint32(want), uint32(status.State), true, status.Win32ExitCode, status.ServiceSpecificExitCode); err != nil {
+		failed := watch.observe(uint32(want), uint32(status.State))
+		if err := transitionFailed(name, uint32(want), uint32(status.State), failed, status.Win32ExitCode, status.ServiceSpecificExitCode); err != nil {
 			return err
 		}
 		select {

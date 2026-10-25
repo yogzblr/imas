@@ -517,8 +517,7 @@ func (oleTaskBackend) Save(path string, state taskState, password string) error 
 		registered, err := callDispatch(folder, "RegisterTaskDefinition",
 			taskName, taskDef, taskCreateOrUpdate, userID, pw, logonType)
 		if err != nil {
-			xml, _ := getStringProp(taskDef, "XmlText")
-			return registerError(path, userID, logonType, err, xml)
+			return registerError(path, userID, logonType, err)
 		}
 		registered.Release()
 

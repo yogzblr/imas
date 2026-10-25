@@ -36,10 +36,11 @@ func withDcomSession(body string) string {
 }
 
 // testScript asks the LCM whether the node is in the configuration at
-// path, as JSON.
+// path, as JSON. Some parameter sets answer a bare Boolean rather than a
+// result object; both become {"InDesiredState": ...}.
 func testScript(path string) string {
 	return withDcomSession("Test-DscConfiguration -Path " + winexec.PSQuote(path) +
-		" -CimSession $imasCim | Select-Object -Property InDesiredState | ConvertTo-Json -Compress")
+		" -CimSession $imasCim | ForEach-Object { if ($_ -is [bool]) { [pscustomobject]@{ InDesiredState = $_ } } else { $_ | Select-Object -Property InDesiredState } } | ConvertTo-Json -Compress")
 }
 
 // applyScript applies the configuration at path and waits for it.
