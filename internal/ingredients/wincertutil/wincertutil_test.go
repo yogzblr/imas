@@ -88,6 +88,8 @@ func TestCertCases(t *testing.T) {
 		storeErr: ingredients.CommandError("certutil.exe", exitError(5), []byte("CertUtil: Cannot find object or property."), nil),
 	}
 	exists := fakeCertutil{storeOut: foundOut}
+	// A match on a German host: exit 0, no English text.
+	existsDE := fakeCertutil{storeOut: "CertUtil: -store-Befehl wurde erfolgreich ausgeführt."}
 	tests := []struct {
 		name    string
 		method  string
@@ -104,6 +106,8 @@ func TestCertCases(t *testing.T) {
 		{"absent missing apply", methodCertAbsent, missing, true, false, ""},
 		{"absent exists test", methodCertAbsent, exists, false, true, ""},
 		{"absent exists apply", methodCertAbsent, exists, true, true, "-delstore"},
+		{"absent exists localized apply", methodCertAbsent, existsDE, true, true, "-delstore"},
+		{"present exists localized apply", methodCertPresent, existsDE, true, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

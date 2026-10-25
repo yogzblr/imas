@@ -214,3 +214,13 @@ func TestMethods(t *testing.T) {
 		t.Errorf("expected 2 methods, got %d", len(methods))
 	}
 }
+
+// "all" is netsh's every-rule selector: refused, so rule_absent can never
+// delete the whole rule set.
+func TestParseRefusesAll(t *testing.T) {
+	for _, n := range []string{"all", "ALL", " All "} {
+		if _, err := (Rule{}).Parse("id1", methodRuleAbsent, map[string]interface{}{"name": n}); err == nil {
+			t.Errorf("name %q: want an error", n)
+		}
+	}
+}

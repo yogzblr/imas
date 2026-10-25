@@ -15,6 +15,7 @@ package winfirewall
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/ingredients"
@@ -72,6 +73,11 @@ func (r Rule) Parse(id, method string, params map[string]interface{}) (cook.Reci
 	name, ok := winexec.StringParam(params, "name")
 	if !ok || name == "" {
 		return nil, ingredients.ErrMissingName
+	}
+	// netsh reads name=all as every rule: rule_absent would delete them
+	// all. This ingredient manages one rule by name.
+	if strings.EqualFold(strings.TrimSpace(name), "all") {
+		return nil, fmt.Errorf("win_firewall: %q is netsh's name for every rule, not a rule name", name)
 	}
 	return Rule{id: id, method: method, name: name, params: params}, nil
 }

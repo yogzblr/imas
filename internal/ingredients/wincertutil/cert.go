@@ -109,10 +109,10 @@ func (c Cert) store() string {
 	return winexec.StringParamOr(c.params, "store", "My")
 }
 
-// exists parses `certutil -store <store> <thumbprint>` output. certutil
-// prints "CertUtil: -store command completed successfully." on a match
-// and an error message (e.g. "Cannot find object or property.") when the
-// thumbprint isn't in the store.
+// exists runs `certutil -store <store> <thumbprint>`. certutil exits 0 on
+// a match and with an error (CRYPT_E_NOT_FOUND) when the thumbprint isn't
+// in the store; its messages are localized, so the exit code, not the
+// text, is the signal.
 func (c Cert) exists(ctx context.Context) (bool, error) {
 	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(c.params, "timeout", ""))
 	if err != nil {
@@ -134,7 +134,9 @@ func (c Cert) exists(ctx context.Context) (bool, error) {
 		}
 		return false, runErr
 	}
-	return strings.Contains(out, "command completed successfully"), nil
+	// Exit 0 is a match, in any locale. The English not-found text is only
+	// a guard for a certutil that exits 0 without one.
+	return !strings.Contains(out, "Cannot find"), nil
 }
 
 func (c Cert) Test(ctx context.Context) (cook.Result, error) {
