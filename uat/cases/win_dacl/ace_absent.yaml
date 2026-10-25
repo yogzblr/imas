@@ -3,7 +3,7 @@ title: 'remove the Users group allow ACE from a temp file'
 os: [windows]
 notes: |
   A throwaway file @NONCE@ in C:\Windows\Temp; the revert deletes it. The principal is the built-in Users group by its SID (S-1-5-32-545), so the case doesn't depend on the OS language. Only the file's own ACL is touched.
-  The setup grants the explicit ACE with icacls (read, by SID); ace_absent removes whatever explicit allow ACE the principal has.
+  The setup grants the explicit ACE with icacls (read, by SID); ace_absent removes whatever explicit allow ACE the principal has. That ACE is the file's only explicit one (it inherits the rest from C:\Windows\Temp), so the removal leaves an empty explicit list on an inheriting DACL, which the ingredient allows (it refuses only a protected DACL left empty).
 windows:
   setup: |
     Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-dacl-@NONCE@.txt' -Value 'imas uat @NONCE@'

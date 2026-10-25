@@ -1,5 +1,3 @@
-//go:build windows
-
 package winshortcut
 
 import (
@@ -37,9 +35,20 @@ func (a shortcutState) Equal(b shortcutState) bool {
 		a.Arguments == b.Arguments &&
 		a.Description == b.Description &&
 		strings.EqualFold(strings.TrimSpace(a.WorkingDirectory), strings.TrimSpace(b.WorkingDirectory)) &&
-		strings.EqualFold(a.IconLocation, b.IconLocation) &&
+		strings.EqualFold(iconLocation(a.IconLocation), iconLocation(b.IconLocation)) &&
 		a.WindowStyle == b.WindowStyle &&
 		strings.EqualFold(a.Hotkey, b.Hotkey)
+}
+
+// iconLocation is an IconLocation as compared: a shortcut saved without
+// one reads back as ",0" (no file, index 0), which is no icon, the same as
+// a recipe that sets none.
+func iconLocation(s string) string {
+	s = strings.TrimSpace(s)
+	if s == ",0" {
+		return ""
+	}
+	return s
 }
 
 // shortcutBackend abstracts the COM-backed shell automation calls this
@@ -48,13 +57,14 @@ func (a shortcutState) Equal(b shortcutState) bool {
 type shortcutBackend interface {
 	// Load reads the current property values of the shortcut at path.
 	// Callers are responsible for confirming the file exists first.
-	Load(path string) (shortcutState, error)
+	Load(ctx context.Context, path string) (shortcutState, error)
 	// Save creates or overwrites the shortcut at path with state.
-	Save(path string, state shortcutState) error
+	Save(ctx context.Context, path string, state shortcutState) error
 }
 
-// backend is replaceable in tests.
-var backend shortcutBackend = oleShortcutBackend{}
+// backend runs the shell automation in a child powershell.exe
+// (psbackend.go); replaceable in tests.
+var backend shortcutBackend = psShortcutBackend{}
 
 // windowStyles maps the ingredient's human-readable window_style values
 // to the Win32 show-command constants IWshShortcut.WindowStyle expects
@@ -141,7 +151,7 @@ func buildDesiredState(params map[string]interface{}) (shortcutState, error) {
 	}, nil
 }
 
-func (s Shortcut) present(_ context.Context, test bool) (cook.Result, error) {
+func (s Shortcut) present(ctx context.Context, test bool) (cook.Result, error) {
 	name, _ := winexec.StringParam(s.params, "name")
 	desired, err := buildDesiredState(s.params)
 	if err != nil {
@@ -149,7 +159,7 @@ func (s Shortcut) present(_ context.Context, test bool) (cook.Result, error) {
 	}
 
 	if _, statErr := os.Stat(name); statErr == nil {
-		if current, loadErr := backend.Load(name); loadErr == nil && current.Equal(desired) {
+		if current, loadErr := backend.Load(ctx, name); loadErr == nil && current.Equal(desired) {
 			return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
 				cook.Snprintf("shortcut %q already matches the desired state", name),
 			}}, nil
@@ -164,7 +174,7 @@ func (s Shortcut) present(_ context.Context, test bool) (cook.Result, error) {
 		}}, nil
 	}
 
-	if err := backend.Save(name, desired); err != nil {
+	if err := backend.Save(ctx, name, desired); err != nil {
 		return cook.Result{Succeeded: false, Failed: true, Changed: false, Notes: nil}, err
 	}
 	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{

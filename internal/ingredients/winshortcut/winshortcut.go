@@ -1,11 +1,23 @@
-//go:build windows
-
 // Package winshortcut implements a imas ingredient for managing Windows
 // shell shortcuts (.lnk files), matching the surface of Salt's
 // win_shortcut state module. It drives the Shell's WScript.Shell
 // "CreateShortcut" automation object (IWshShortcut) via COM — the same
 // underlying object Salt's Python implementation drives through
 // win32com.client.Dispatch("WScript.Shell").
+//
+// The object runs in a child powershell.exe (psbackend.go), never in the
+// sprout. UAT Run 2 on rc.21: the first real cook of I.win_shortcut.present
+// restarted the sprout 5 seconds in, with nothing in sprout-crash.log (a
+// native fault, not a Go panic), while the test-mode cook, which never
+// reaches COM, finished in a second. The in-process code released the
+// shortcut object twice (the result VARIANT's Clear and the IDispatch's
+// Release are the same reference), which is enough to fault inside the
+// shell's COM server; any other native fault there would do the same. In
+// a child process such a fault fails the step with the child's exit code
+// instead of killing the sprout.
+//
+// Only init (register.go) is Windows-only: the rest runs the child
+// through a replaceable runner and is unit-tested on every platform.
 package winshortcut
 
 import (
@@ -131,8 +143,4 @@ func (s Shortcut) Methods() (string, []string) {
 
 func (s Shortcut) Properties() (map[string]interface{}, error) {
 	return s.params, nil
-}
-
-func init() {
-	ingredients.RegisterAllMethods(Shortcut{})
 }

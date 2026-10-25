@@ -2,8 +2,11 @@ package wintaskscheduler
 
 import (
 	"errors"
+	"fmt"
 
 	ole "github.com/go-ole/go-ole"
+
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND, the HRESULTs
@@ -41,4 +44,14 @@ func isNotFoundErr(err error) bool {
 
 func isNotFoundCode(hr uint32) bool {
 	return hr == hrFileNotFound || hr == hrPathNotFound
+}
+
+// registerError is RegisterTaskDefinition's failure: the task, the
+// principal it was registered for and the HRESULTs (winexec.COMError:
+// through IDispatch the reason is the EXCEPINFO scode, which "Exception
+// occurred." alone does not name). The task's XML is never quoted: it
+// holds the action's command line, which a recipe may fill from a secret,
+// and a step's error is published with the job and written to its log.
+func registerError(path, userID string, logonType int, err error) error {
+	return winexec.COMError(fmt.Sprintf("wintaskscheduler: RegisterTaskDefinition(%q) as %s, logon type %d", path, userID, logonType), err)
 }

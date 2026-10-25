@@ -129,7 +129,15 @@ func (s WindowsService) withService(fn func(scmService) error) error {
 	return fn(sv)
 }
 
-func waitForState(ctx context.Context, sv scmService, want svc.State) error {
+// waitForState polls the service until it reaches want. It is only called
+// right after a successful Start or Stop control. A service waited on for
+// Running that reports Stopped after its start showed as pending, or on
+// stoppedPollsLimit polls in a row (startWatch), has failed to start
+// (transitionFailed) and fails at once with its exit codes; a Stopped
+// right after StartService is not yet a failure. Otherwise the wait ends
+// with the context, naming the last state seen.
+func waitForState(ctx context.Context, sv scmService, name string, want svc.State) error {
+	var watch startWatch
 	for {
 		status, err := sv.Query()
 		if err != nil {
@@ -138,9 +146,13 @@ func waitForState(ctx context.Context, sv scmService, want svc.State) error {
 		if status.State == want {
 			return nil
 		}
+		failed := watch.observe(uint32(want), uint32(status.State))
+		if err := transitionFailed(name, uint32(want), uint32(status.State), failed, status.Win32ExitCode, status.ServiceSpecificExitCode); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("service %q still %s, waiting for %s: %w", name, stateString(status.State), stateString(want), ctx.Err())
 		case <-time.After(pollInterval):
 		}
 	}
@@ -179,7 +191,7 @@ func (s WindowsService) Start(ctx context.Context) error {
 		if err := sv.Start(); err != nil {
 			return fmt.Errorf("starting service %q: %w", s.name, err)
 		}
-		return waitForState(ctx, sv, svc.Running)
+		return waitForState(ctx, sv, s.name, svc.Running)
 	})
 }
 
@@ -195,7 +207,7 @@ func (s WindowsService) Stop(ctx context.Context) error {
 		if _, err := sv.Control(svc.Stop); err != nil {
 			return fmt.Errorf("stopping service %q: %w", s.name, err)
 		}
-		return waitForState(ctx, sv, svc.Stopped)
+		return waitForState(ctx, sv, s.name, svc.Stopped)
 	})
 }
 

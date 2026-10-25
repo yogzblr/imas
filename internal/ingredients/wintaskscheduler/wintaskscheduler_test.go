@@ -1,5 +1,3 @@
-//go:build windows
-
 package wintaskscheduler
 
 import (
@@ -14,6 +12,7 @@ import (
 type fakeBackend struct {
 	states    map[string]taskState
 	loadErr   error
+	existsErr error
 	saveErr   error
 	deleteErr error
 	saved     []string
@@ -33,6 +32,14 @@ func (f *fakeBackend) Load(path string) (taskState, error) {
 		return taskState{}, ErrTaskNotFound
 	}
 	return state, nil
+}
+
+func (f *fakeBackend) Exists(path string) (bool, error) {
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	_, ok := f.states[path]
+	return ok, nil
 }
 
 func (f *fakeBackend) Save(path string, state taskState, _ string) error {

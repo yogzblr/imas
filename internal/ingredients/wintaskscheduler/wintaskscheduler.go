@@ -1,5 +1,3 @@
-//go:build windows
-
 // Package wintaskscheduler implements imas's win_task ingredient:
 // declarative management of Windows Task Scheduler tasks (create,
 // update, delete), matching the relevant surface of Salt's win_task
@@ -165,8 +163,4 @@ func (t Task) Methods() (string, []string) {
 
 func (t Task) Properties() (map[string]interface{}, error) {
 	return t.params, nil
-}
-
-func init() {
-	ingredients.RegisterAllMethods(Task{})
 }

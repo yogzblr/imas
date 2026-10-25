@@ -9,6 +9,8 @@ import (
 
 	ole "github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 // Task Scheduler 2.0 COM constants (taskschd.idl).
@@ -16,10 +18,6 @@ const (
 	taskActionExec = 0 // TASK_ACTION_EXEC
 
 	taskCreateOrUpdate = 6 // TASK_CREATE_OR_UPDATE
-
-	logonServiceAccount = 5 // TASK_LOGON_SERVICE_ACCOUNT
-	logonPassword       = 1 // TASK_LOGON_PASSWORD
-	logonS4U            = 2 // TASK_LOGON_S4U
 
 	runLevelHighestConst = 1 // TASK_RUNLEVEL_HIGHEST
 )
@@ -86,7 +84,7 @@ func withService(fn func(service *ole.IDispatch) error) error {
 // Clear() the source VARIANT -- see the oleTaskBackend doc comment.
 func dispatchResult(v *ole.VARIANT, err error, context string) (*ole.IDispatch, error) {
 	if err != nil {
-		return nil, fmt.Errorf("wintaskscheduler: %s: %w", context, err)
+		return nil, winexec.COMError("wintaskscheduler: "+context, err)
 	}
 	d := v.ToIDispatch()
 	if d == nil {
@@ -101,6 +99,16 @@ func getDispatchProp(disp *ole.IDispatch, name string) (*ole.IDispatch, error) {
 	return dispatchResult(v, err, "get "+name)
 }
 
+// itemAt returns element i (1-based) of an ITaskDefinition collection
+// (Actions, Triggers). Item is an indexed property (propget), not a
+// method: invoked with DISPATCH_METHOD, as CallMethod does, it fails with
+// DISP_E_MEMBERNOTFOUND, "Member not found" (UAT I.win_task.absent, Run 2
+// on rc.21, reading a task the setup had made).
+func itemAt(collection *ole.IDispatch, i int) (*ole.IDispatch, error) {
+	v, err := oleutil.GetProperty(collection, "Item", int32(i))
+	return dispatchResult(v, err, fmt.Sprintf("get Item(%d)", i))
+}
+
 func callDispatch(disp *ole.IDispatch, method string, args ...interface{}) (*ole.IDispatch, error) {
 	v, err := oleutil.CallMethod(disp, method, args...)
 	return dispatchResult(v, err, "call "+method)
@@ -112,7 +120,7 @@ func callDispatch(disp *ole.IDispatch, method string, args ...interface{}) (*ole
 func callVoid(disp *ole.IDispatch, method string, args ...interface{}) error {
 	v, err := oleutil.CallMethod(disp, method, args...)
 	if err != nil {
-		return err
+		return winexec.COMError("wintaskscheduler: call "+method, err)
 	}
 	v.Clear()
 	return nil
@@ -270,7 +278,7 @@ func (oleTaskBackend) Load(path string) (taskState, error) {
 		if state.UserName, err = getStringProp(principal, "UserId"); err != nil {
 			return err
 		}
-		if strings.EqualFold(state.UserName, "SYSTEM") || strings.EqualFold(state.UserName, `NT AUTHORITY\SYSTEM`) {
+		if isSystemAccount(state.UserName) {
 			state.UserName = ""
 		}
 		runLevel, err := getIntProp(principal, "RunLevel")
@@ -307,7 +315,7 @@ func (oleTaskBackend) Load(path string) (taskState, error) {
 			return err
 		}
 		if actionCount > 0 {
-			action, err := callDispatch(actions, "Item", 1)
+			action, err := itemAt(actions, 1)
 			if err != nil {
 				return err
 			}
@@ -333,7 +341,7 @@ func (oleTaskBackend) Load(path string) (taskState, error) {
 			return err
 		}
 		if triggerCount > 0 {
-			trigger, err := callDispatch(triggers, "Item", 1)
+			trigger, err := itemAt(triggers, 1)
 			if err != nil {
 				return err
 			}
@@ -419,17 +427,7 @@ func (oleTaskBackend) Save(path string, state taskState, password string) error 
 			return err
 		}
 
-		userID := state.UserName
-		var logonType int
-		switch {
-		case state.UserName == "":
-			userID = "SYSTEM"
-			logonType = logonServiceAccount
-		case password != "":
-			logonType = logonPassword
-		default:
-			logonType = logonS4U
-		}
+		userID, pw, logonType := principalFor(state.UserName, password)
 		if err := setStringProp(principal, "UserId", userID); err != nil {
 			return err
 		}
@@ -512,10 +510,14 @@ func (oleTaskBackend) Save(path string, state taskState, password string) error 
 			}
 		}
 
+		// pw is nil (VT_NULL) for the service-account logon, which takes no
+		// password: an empty string (VT_BSTR), as was passed before, is not
+		// the empty VARIANT RegisterTaskDefinition documents for it (UAT
+		// I.win_task.present, Run 2 on rc.21: "Exception occurred.").
 		registered, err := callDispatch(folder, "RegisterTaskDefinition",
-			taskName, taskDef, taskCreateOrUpdate, userID, password, logonType)
+			taskName, taskDef, taskCreateOrUpdate, userID, pw, logonType)
 		if err != nil {
-			return fmt.Errorf("wintaskscheduler: RegisterTaskDefinition(%q): %w", path, err)
+			return registerError(path, userID, logonType, err)
 		}
 		registered.Release()
 
@@ -543,4 +545,40 @@ func (oleTaskBackend) Delete(path string) error {
 		}
 		return nil
 	})
+}
+
+func (oleTaskBackend) Exists(path string) (bool, error) {
+	folderPath, taskName := splitTaskPath(path)
+	exists := false
+	err := withService(func(service *ole.IDispatch) error {
+		folder, err := callDispatch(service, "GetFolder", folderPath)
+		if err != nil {
+			if isNotFoundErr(err) {
+				return nil
+			}
+			return err
+		}
+		defer folder.Release()
+		task, err := callDispatch(folder, "GetTask", taskName)
+		if err != nil {
+			if isNotFoundErr(err) {
+				return nil
+			}
+			return err
+		}
+		task.Release()
+		exists = true
+		return nil
+	})
+	return exists, err
+}
+
+// triggerTypeName is the trigger_type name of a TASK_TRIGGER_TYPE2 value.
+func triggerTypeName(n int) string {
+	for name, v := range triggerTypes {
+		if v == n {
+			return name
+		}
+	}
+	return ""
 }

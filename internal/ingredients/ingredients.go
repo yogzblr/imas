@@ -110,7 +110,14 @@ func NewRecipeCooker(id cook.StepID, ingredient cook.Ingredient, method string, 
 	log.Trace(ingMap)
 	if r, ok := ingMap[ingredient]; ok {
 		if ing, ok := r[method]; ok {
-			return ing.Parse(string(id), method, params)
+			cooker, err := ing.Parse(string(id), method, params)
+			if err != nil {
+				return cooker, err
+			}
+			if bound, ok := windowsStepBound(ingredient, params); ok {
+				return boundedCooker{RecipeCooker: cooker, ingredient: ingredient, method: method, bound: bound}, nil
+			}
+			return cooker, nil
 		}
 		return nil, ErrUnknownMethod
 	}

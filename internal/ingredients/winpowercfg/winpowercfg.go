@@ -1,5 +1,3 @@
-//go:build windows
-
 // Package winpowercfg wraps Salt's win_powercfg module: getting/setting
 // the active power scheme via powercfg.exe, the same CLI tool Salt
 // itself shells out to. See G.9 in
@@ -78,7 +76,7 @@ func (s Scheme) activeGUID(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := winexec.RunCLI(ctx, "powercfg.exe", []string{"/getactivescheme"}, timeout)
+	out, err := runCLI(ctx, "powercfg.exe", []string{"/getactivescheme"}, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -90,7 +88,7 @@ func (s Scheme) Test(ctx context.Context) (cook.Result, error) {
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	if current == s.name {
+	if sameScheme(current, s.name) {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("power scheme %s is already active", s.name))}}, nil
 	}
 	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("power scheme %s would be activated (currently %s)", s.name, current))}}, nil
@@ -105,15 +103,11 @@ func (s Scheme) Apply(ctx context.Context) (cook.Result, error) {
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	if current == s.name {
+	if sameScheme(current, s.name) {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("power scheme %s is already active", s.name))}}, nil
 	}
-	if _, err := winexec.RunCLI(ctx, "powercfg.exe", []string{"/setactive", s.name}, timeout); err != nil {
+	if _, err := runCLI(ctx, "powercfg.exe", []string{"/setactive", s.name}, timeout); err != nil {
 		return cook.Result{Failed: true}, err
 	}
 	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("power scheme %s has been activated", s.name))}}, nil
-}
-
-func init() {
-	ingredients.RegisterAllMethods(Scheme{})
 }

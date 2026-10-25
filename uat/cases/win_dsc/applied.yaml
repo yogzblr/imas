@@ -1,10 +1,9 @@
 id: I.win_dsc.applied
 title: 'apply a compiled DSC configuration that writes one file'
 os: [windows]
-needs: [winrm-local]
 timeout: 15m
 notes: |
-  The setup compiles a configuration with the built-in PSDesiredStateConfiguration module: one File resource writing a scratch file. Start-DscConfiguration talks to the local LCM over WinRM, which the UAT Windows sprouts have on. The revert removes the configuration documents from the LCM and deletes the file.
+  The setup compiles a configuration with the built-in PSDesiredStateConfiguration module: one File resource writing a scratch file. The ingredient reaches the local LCM through a CIM session to localhost over DCOM (P35: the VMs have only the HTTPS WinRM listener, so the cmdlets' default WS-Man session to localhost failed with "The client cannot connect to the destination"); no local WinRM listener is needed. The revert removes the configuration documents from the LCM, over a DCOM session too, and deletes the file.
 windows:
   setup: |
     Configuration ImasUat {
@@ -23,6 +22,11 @@ windows:
     if ((Test-Path -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt') -and (Get-Content -Raw -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt') -match 'imas uat @NONCE@') { exit 0 }
     exit 1
   revert: |
-    Remove-DscConfigurationDocument -Stage Current, Previous, Pending -Force -ErrorAction SilentlyContinue
+    $o = New-CimSessionOption -Protocol Dcom
+    $cs = New-CimSession -ComputerName localhost -SessionOption $o -ErrorAction SilentlyContinue
+    if ($cs) {
+      Remove-DscConfigurationDocument -CimSession $cs -Stage Current, Previous, Pending -Force -ErrorAction SilentlyContinue
+      Remove-CimSession -CimSession $cs
+    }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\Windows\Temp\imas-uat-dsc-@NONCE@', 'C:\Windows\Temp\imas-uat-dsc-@NONCE@.txt'
     exit 0

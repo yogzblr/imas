@@ -1,14 +1,29 @@
-//go:build windows
-
 // Package windsc wraps Salt's win_dsc module: applying a compiled
 // Desired State Configuration (.mof) via the built-in DSC engine
 // (Start-DscConfiguration/Test-DscConfiguration), the same PowerShell
 // surface Salt itself shells out to. See G.8 in
 // docs/design/imas-windows-parity-addendum.md.
+//
+// The DSC cmdlets reach the Local Configuration Manager through a CIM
+// session. Given none, they open one over WS-Management to the node the
+// .mof names (localhost), which needs a WinRM HTTP listener; a host with
+// only an HTTPS listener, as the UAT Windows sprouts have, fails with
+// "The client cannot connect to the destination specified in the request
+// ... winrm quickconfig" (UAT I.win_dsc.applied, Run 2 on rc.21). This
+// package opens the session itself, to localhost over DCOM
+// (New-CimSessionOption -Protocol Dcom), which needs no WinRM listener at
+// all. Through that session it calls the LCM's own CIM methods rather
+// than the cmdlets (Test-DscConfiguration -Path over a DCOM session sent
+// the LCM a configuration it could not parse, W11 CI on Windows Server
+// 2022): SendConfigurationApply with the compiled MOF's bytes, and
+// TestConfiguration on the LCM's current configuration, checked to be the
+// MOF this ingredient last applied (see lcmClass in lcm.go).
+//
+// Only init (register.go) is Windows-only: the scripts are built and
+// unit-tested on every platform.
 package windsc
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -73,58 +88,4 @@ func (d Dsc) PropertiesForMethod(method string) (map[string]string, error) {
 
 func (d Dsc) Properties() (map[string]interface{}, error) {
 	return d.params, nil
-}
-
-// inDesiredState runs Test-DscConfiguration against the compiled
-// configuration at d.path.
-func (d Dsc) inDesiredState(ctx context.Context) (bool, error) {
-	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(d.params, "timeout", ""))
-	if err != nil {
-		return false, err
-	}
-	var result struct {
-		InDesiredState bool `json:"InDesiredState"`
-	}
-	script := fmt.Sprintf(
-		"Test-DscConfiguration -Path %s | Select-Object -Property InDesiredState | ConvertTo-Json -Compress",
-		winexec.PSQuote(d.path),
-	)
-	if err := winexec.RunPowerShellJSON(ctx, script, timeout, &result); err != nil {
-		return false, err
-	}
-	return result.InDesiredState, nil
-}
-
-func (d Dsc) Test(ctx context.Context) (cook.Result, error) {
-	ok, err := d.inDesiredState(ctx)
-	if err != nil {
-		return cook.Result{Failed: true}, err
-	}
-	if ok {
-		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s is already in the desired state", d.name))}}, nil
-	}
-	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s would be applied", d.name))}}, nil
-}
-
-func (d Dsc) Apply(ctx context.Context) (cook.Result, error) {
-	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(d.params, "timeout", ""))
-	if err != nil {
-		return cook.Result{Failed: true}, err
-	}
-	ok, err := d.inDesiredState(ctx)
-	if err != nil {
-		return cook.Result{Failed: true}, err
-	}
-	if ok {
-		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s is already in the desired state", d.name))}}, nil
-	}
-	script := fmt.Sprintf("Start-DscConfiguration -Path %s -Wait -Force -ErrorAction Stop", winexec.PSQuote(d.path))
-	if _, err := winexec.RunPowerShell(ctx, script, timeout); err != nil {
-		return cook.Result{Failed: true}, err
-	}
-	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s has been applied", d.name))}}, nil
-}
-
-func init() {
-	ingredients.RegisterAllMethods(Dsc{})
 }
