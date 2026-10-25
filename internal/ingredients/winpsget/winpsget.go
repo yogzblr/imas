@@ -120,12 +120,13 @@ func (p PSGet) checkScript() string {
 		// Both sides as four components, a missing one 0: [version]'5.4'
 		// is not -eq an installed 5.4.0, and a prerelease ("2.0.0-beta1")
 		// is not a [version] at all (Get-Module reports its base version
-		// and keeps the label in the manifest's PSData.Prerelease). The
-		// label must match too, none for a stable request, so an installed
-		// 2.0.0 is not taken for a requested 2.0.0-beta1 or the reverse.
+		// and keeps the label in the manifest's PSData.Prerelease, with or
+		// without a leading "-"). The label must match too, none for a
+		// stable request, so an installed 2.0.0 is not taken for a
+		// requested 2.0.0-beta1 or the reverse.
 		script += " | Where-Object { (($_.Version.Major, $_.Version.Minor, [Math]::Max(0, $_.Version.Build), [Math]::Max(0, $_.Version.Revision)) -join '.') -eq " +
 			winexec.PSQuote(fourPartVersion(version)) +
-			" -and [string]$_.PrivateData.PSData.Prerelease -eq " + winexec.PSQuote(prereleaseLabel(version)) + " }"
+			" -and ([string]$_.PrivateData.PSData.Prerelease).TrimStart('-') -eq " + winexec.PSQuote(prereleaseLabel(version)) + " }"
 	}
 	return script + ").Count"
 }
@@ -144,7 +145,9 @@ func fourPartVersion(v string) string {
 }
 
 // prereleaseLabel is a module version's prerelease label ("beta1" of
-// "2.0.0-beta1"), without a build suffix; "" for a stable version.
+// "2.0.0-beta1"), without the "-" or a build suffix; "" for a stable
+// version. The check compares it with the manifest's label trimmed the
+// same way.
 func prereleaseLabel(v string) string {
 	v = strings.TrimSpace(v)
 	if i := strings.IndexByte(v, '+'); i >= 0 {

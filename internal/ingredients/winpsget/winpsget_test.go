@@ -190,7 +190,8 @@ func TestCheckScriptComparesVersionsByFourParts(t *testing.T) {
 }
 
 // A prerelease request matches only that prerelease, and a stable request
-// only a stable copy (review on #319).
+// only a stable copy; a manifest may store the label with its leading "-"
+// (review on #319 and #320).
 func TestCheckScriptComparesThePrereleaseLabel(t *testing.T) {
 	for in, want := range map[string]string{"2.0.0-beta1": "beta1", "2.0.0": "", "2.0.0-rc.1+build5": "rc.1", "2.0.0+build5": ""} {
 		if got := prereleaseLabel(in); got != want {
@@ -199,7 +200,7 @@ func TestCheckScriptComparesThePrereleaseLabel(t *testing.T) {
 	}
 	for version, label := range map[string]string{"2.0.0-beta1": "'beta1'", "2.0.0": "''"} {
 		s := PSGet{name: "M", params: map[string]interface{}{"version": version}}.checkScript()
-		if !strings.Contains(s, "-eq '2.0.0.0' -and [string]$_.PrivateData.PSData.Prerelease -eq "+label+" }") {
+		if !strings.Contains(s, "-eq '2.0.0.0' -and ([string]$_.PrivateData.PSData.Prerelease).TrimStart('-') -eq "+label+" }") {
 			t.Errorf("check script for %s: %s", version, s)
 		}
 	}
