@@ -146,7 +146,7 @@ func TestNoteNamesTheResourcesNotInTheDesiredState(t *testing.T) {
 // SendConfigurationApply with the bytes alone.
 func TestScriptsCallTheLCMMethods(t *testing.T) {
 	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
-	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }", "-notmatch 'Syntax Error') { throw }", "TestConfiguration -Arguments @{ ConfigurationData = $imasData }", "ResourceId = @($imasR.ResourceId", "Detail = $imasDetail", "$imasForm = 'length-prefixed'", "localhost.mof"} {
+	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }", "-notmatch 'Syntax Error') { throw }", "TestConfiguration -Arguments @{ ConfigurationData = $imasData }", "$imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }", "Detail = $imasDetail", "$imasForm = 'length-prefixed'", "localhost.mof"} {
 		if !strings.Contains(test, want) {
 			t.Errorf("test script lacks %q:\n%s", want, test)
 		}

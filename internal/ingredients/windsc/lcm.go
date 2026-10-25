@@ -77,7 +77,8 @@ func returnValueCheck(method string) string {
 }
 
 // testScript asks the LCM whether the node is in the configuration at
-// path, as JSON: InDesiredState, the resources that are not (ResourceId),
+// path, as JSON: InDesiredState, the resources that are not (ResourceId,
+// from WMF 5's ResourcesNotInDesiredState instances or an older flat list),
 // and Detail: which form of the MOF the LCM took and everything it
 // answered, for the step's note when the node is not in the desired state.
 func testScript(path string) string {
@@ -92,8 +93,8 @@ func testScript(path string) string {
 		"  }\n" +
 		returnValueCheck("TestConfiguration") +
 		"  if ($null -eq $imasR.InDesiredState) { throw \"win_dsc: TestConfiguration returned no InDesiredState (ReturnValue: $($imasR.ReturnValue))\" }\n" +
-		"  $imasDetail = 'MOF sent ' + $imasForm + ' (' + $imasBytes.Length + ' bytes, starting ' + ((@($imasBytes | Select-Object -First 4) | ForEach-Object { '{0:x2}' -f $_ }) -join '') + '); the LCM answered ' + ((@($imasR.PSObject.Properties | Where-Object { $_.Name -notlike 'Cim*' -and $_.Name -ne 'PSComputerName' }) | ForEach-Object { $_.Name + '=' + (@($_.Value) -join ',') }) -join '; ')\n" +
-		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @($imasR.ResourceId | Where-Object { $_ }); Detail = $imasDetail } | ConvertTo-Json -Compress")
+		"  $imasDetail = 'MOF sent ' + $imasForm + ' (' + $imasBytes.Length + ' bytes, starting ' + ((@($imasBytes | Select-Object -First 4) | ForEach-Object { '{0:x2}' -f $_ }) -join '') + '); the LCM answered ' + ((@($imasR.PSObject.Properties | Where-Object { $_.Name -notlike 'Cim*' -and $_.Name -ne 'PSComputerName' }) | ForEach-Object { $_.Name + '=' + (@($_.Value | ForEach-Object { if ($_ -is [Microsoft.Management.Infrastructure.CimInstance]) { $_.ResourceId } else { $_ } }) -join ',') }) -join '; ')\n" +
+		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @(@($imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }) + @($imasR.ResourceId) | Where-Object { $_ }); Detail = $imasDetail } | ConvertTo-Json -Compress")
 }
 
 // applyScript applies the configuration at path; the method returns once
