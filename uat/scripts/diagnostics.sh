@@ -167,7 +167,7 @@ for n in $lines 150 60 20; do
     done
     if [ "\${starts:-0}" -gt 1 ] || [ "\${restarts:-0}" != 0 ] || [ "\$lost" = 1 ] || [ '${DIAG_VM_EVENTS:-0}' = 1 ]; then
       echo "== the sprout restarted or a job was lost: core dumps and OOM kills"
-      coredumpctl list --no-pager 2>&1 | tail -n 10
+      coredumpctl list --no-pager 2>&1 | grep -E '^TIME|$service' | tail -n 10
       journalctl -k -b --no-pager -o short-iso 2>/dev/null | grep -Ei 'out of memory|oom-kill|killed process' | tail -n 20
       journalctl -b --no-pager -o short-iso -u '$service' 2>/dev/null | grep -Ei 'main process exited|dumped core|failed with result|scheduled restart' | tail -n 20
     fi
