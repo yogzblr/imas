@@ -177,8 +177,13 @@ func (p PSGet) installScript() string {
 		scope = scopes[strings.ToLower(s)]
 	}
 	install := "Install-Module -Name " + winexec.PSQuote(p.name) + " -Force -AllowClobber -Scope " + winexec.PSQuote(scope)
+	prerelease := false
 	if version := winexec.StringParamOr(p.params, "version", ""); version != "" {
 		install += " -RequiredVersion " + winexec.PSQuote(version)
+		prerelease = prereleaseLabel(version) != ""
+	}
+	if prerelease {
+		install += " -AllowPrerelease"
 	}
 	if repo := winexec.StringParamOr(p.params, "repository", ""); repo != "" {
 		install += " -Repository " + winexec.PSQuote(repo)
@@ -194,12 +199,24 @@ func (p PSGet) installScript() string {
 		"    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope " + winexec.PSQuote(scope) + " | Out-Null",
 		"  }",
 		"  $stage = 'Install-Module'",
+		prereleaseGuard(prerelease),
 		"  " + install,
 		"} catch {",
 		"  [Console]::Error.WriteLine(\"win_psget: $stage failed: $($_.Exception.Message)\")",
 		"  exit 1",
 		"}",
 	}, "\n")
+}
+
+// prereleaseGuard is the install script line that, for a prerelease
+// version, fails with a plain message when PowerShellGet's Install-Module
+// has no -AllowPrerelease (before 1.6.0; Windows Server 2022 ships
+// 1.0.0.1), rather than letting the install fail on the parameter.
+func prereleaseGuard(prerelease bool) string {
+	if !prerelease {
+		return ""
+	}
+	return "  if (-not (Get-Command Install-Module).Parameters.ContainsKey('AllowPrerelease')) { throw \"a prerelease version needs PowerShellGet 1.6.0 or later (Install-Module has no -AllowPrerelease here)\" }"
 }
 
 func (p PSGet) removeScript() string {

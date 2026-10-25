@@ -208,3 +208,17 @@ func TestCheckScriptComparesThePrereleaseLabel(t *testing.T) {
 		t.Errorf("an unversioned check compares a label: %s", s)
 	}
 }
+
+// A prerelease version installs with -AllowPrerelease, and fails plainly
+// where PowerShellGet has no such parameter; a stable one has neither
+// (review on #319).
+func TestInstallScriptAllowsAPrerelease(t *testing.T) {
+	pre := PSGet{name: "M", params: map[string]interface{}{"version": "2.0.0-beta1"}}.installScript()
+	if !strings.Contains(pre, "-RequiredVersion '2.0.0-beta1' -AllowPrerelease") || !strings.Contains(pre, "Parameters.ContainsKey('AllowPrerelease')) { throw") {
+		t.Errorf("prerelease install script:\n%s", pre)
+	}
+	stable := PSGet{name: "M", params: map[string]interface{}{"version": "2.0.0"}}.installScript()
+	if strings.Contains(stable, "AllowPrerelease") {
+		t.Errorf("stable install script:\n%s", stable)
+	}
+}
