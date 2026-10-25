@@ -75,7 +75,8 @@
 # failure or re-probe, the call re-probes the tunnel first (reopening it
 # when it does not answer) and, when it answers, clears the mark and runs.
 # A success, a restart or start-vm that comes back, a reopen that answers,
-# and every session.sh refresh clear the mark. A run-command refused with
+# and every session.sh refresh clear the mark. A forced run-command
+# (VMCTL_CHANNEL=runcommand) ignores the mark and leaves it as it is. A run-command refused with
 # "(Conflict) Run command extension execution is in progress" (Azure never
 # started it) is retried with backoff.
 #
@@ -679,15 +680,20 @@ refuse_if_dead() {
 
 # exec_remote <script>: run_remote, print the streams and exit with the code.
 exec_remote() {
-  refuse_if_dead
+  # A forced run-command (VMCTL_CHANNEL=runcommand: the harness's way past
+  # a dead tunnel) does not use the tunnel, so the tunnel's dead mark
+  # neither stops it nor learns from it.
+  local forced=0
+  [ "${VMCTL_CHANNEL:-}" = runcommand ] && forced=1
+  [ "$forced" = 1 ] || refuse_if_dead
   ensure_fresh
   if ! run_remote "$1"; then
     [ -z "$remote_out" ] || printf '%s\n' "$remote_out"
     [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
-    note_fail "$remote_why"
+    [ "$forced" = 1 ] || note_fail "$remote_why"
     unavailable "could not run the command on $vm over $channel, or no exit code came back: $remote_why"
   fi
-  note_ok
+  [ "$forced" = 1 ] || note_ok
   [ -z "$remote_out" ] || printf '%s\n' "$remote_out"
   [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
   log "exit_code=$remote_rc"

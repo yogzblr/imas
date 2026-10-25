@@ -580,6 +580,21 @@ func TestChannelUnavailableLines(t *testing.T) {
 	if l, ok := lineFor(r, "I.win_firewall.rule_present", "windows", "1"); !ok || l.Status != "FAIL" || !strings.Contains(l.Detail, "netsh.exe: exit status 1") {
 		t.Errorf("product line: %+v", l)
 	}
+	// A channel failure first and a product failure after it is a product
+	// failure, named by the product's line.
+	mixed := ev(pkg+"/ingredients",
+		"run TestIngredients",
+		"run TestIngredients/I.file.managed",
+		"run TestIngredients/I.file.managed/t2-ubuntu",
+		"output TestIngredients/I.file.managed/t2-ubuntu     schedule.go:250: [I.file.managed os=ubuntu tenant=2 vm=t2-ubuntu step=tenant scoping] FAIL: running the check on t1-ubuntu: UAT CHANNEL UNAVAILABLE: vmctl.sh run t1-ubuntu: dead",
+		"output TestIngredients/I.file.managed/t2-ubuntu     schedule.go:250: [I.file.managed os=ubuntu tenant=2 vm=t2-ubuntu step=cook in test mode again] FAIL: cook in test mode again: want the item succeeded",
+		"fail TestIngredients/I.file.managed/t2-ubuntu",
+		"fail TestIngredients/I.file.managed",
+		"fail TestIngredients",
+	)
+	if l, ok := lineFor(summarize(t, "ingredients", nil, mixed), "I.file.managed", "ubuntu", "2"); !ok || l.Status != "FAIL" || !strings.Contains(l.Detail, "cook in test mode again") {
+		t.Errorf("a product failure after a channel one: %+v", l)
+	}
 	var sum bytes.Buffer
 	r.Print(&sum)
 	for _, w := range []string{"CHAN   I.lgpo.absent", "CHAN (1): channel unavailable", "lines: 1 pass, 1 fail, 1 channel unavailable, 0 skip"} {

@@ -64,10 +64,42 @@ const StatusChan = "CHAN"
 // (harness.ChannelUnavailableTag; uatreport does not import the harness).
 const channelTag = "UAT CHANNEL UNAVAILABLE"
 
-// channelOnly reports whether a failed test failed on the channel: its
-// first failure is a ChannelError.
+// failLines are the "FAIL:" messages of harness.Scenario a test printed.
+func failLines(n *node) []string {
+	var out []string
+	for _, l := range meaningful(n) {
+		if strings.Contains(l, " FAIL: ") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// channelOnly reports whether a failed test failed only on the channel:
+// every failure it printed is a ChannelError (a product failure after a
+// channel one still makes it a product failure).
 func channelOnly(n *node) bool {
-	return strings.Contains(failureDetail(n), channelTag)
+	fails := failLines(n)
+	if len(fails) == 0 {
+		return strings.Contains(failureDetail(n), channelTag)
+	}
+	for _, l := range fails {
+		if !strings.Contains(l, channelTag) {
+			return false
+		}
+	}
+	return true
+}
+
+// productDetail is the first failure that is not the channel's, else
+// failureDetail.
+func productDetail(n *node) string {
+	for _, l := range failLines(n) {
+		if !strings.Contains(l, channelTag) {
+			return l
+		}
+	}
+	return failureDetail(n)
 }
 
 // Failed reports whether the run must exit non-zero.
@@ -198,7 +230,7 @@ func Summarize(cat *Catalogue, sel *Selection, events []Event) *Report {
 					}
 				case l.Status != "FAIL":
 					l.Status = "FAIL"
-					l.Detail = failureDetail(c)
+					l.Detail = productDetail(c)
 				}
 			case "pass":
 				if l.Status == "" || l.Status == "SKIP" {

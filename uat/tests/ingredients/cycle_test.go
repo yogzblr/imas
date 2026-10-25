@@ -162,7 +162,9 @@ func TestCycleExplainsPastADeadChannel(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", w, all)
 		}
 	}
-	if d.outOfBand == 0 || len(d.diagnosed) == 0 || d.diagnosed[0] != "t1-ubuntu:j1" {
+	// Once, by the failed cook with its job id: not again for the channel
+	// error that sent the job log read out of band.
+	if d.outOfBand == 0 || len(d.diagnosed) != 1 || d.diagnosed[0] != "t1-ubuntu:j1" {
 		t.Errorf("out of band reads %d, diagnosed %v", d.outOfBand, d.diagnosed)
 	}
 }

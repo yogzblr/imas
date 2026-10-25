@@ -605,6 +605,11 @@ if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^ssh -p')" -eq "$before" ] && [ $(
 else nok "vmctl: dead fast fail (rc=$rc)" "$(calls) $err"; fi
 v "$uat" run t1-ubuntu 'echo other-vm'
 if [ "$rc" -eq 0 ] && [ "$out" = other-vm ]; then ok "vmctl: a dead mark is per VM"; else nok "vmctl: dead per VM (rc=$rc)" "$err"; fi
+mark=$(cat "$STUB_STATE/vmctl/t1-alma.fails")
+VMCTL_CHANNEL=runcommand v "$uat" run t1-alma 'echo out-of-band'
+if [ "$rc" -eq 0 ] && [ "$out" = out-of-band ] && [ "$(cat "$STUB_STATE/vmctl/t1-alma.fails" 2>/dev/null)" = "$mark" ]; then
+  ok "vmctl: a forced run-command reaches a dead VM, and leaves its tunnel's mark as it was"
+else nok "vmctl: forced run-command on a dead VM (rc=$rc)" "$err"; fi
 VMCTL_REPROBE_SECONDS=0 v "$uat" run t1-alma 'echo still-dead'
 read -r _ _ probed <"$STUB_STATE/vmctl/t1-alma.fails"
 if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "re-probing its ssh tunnel" && printf '%s' "$err" | grep -q "CHANNEL UNAVAILABLE" &&

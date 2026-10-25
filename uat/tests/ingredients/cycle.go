@@ -48,22 +48,32 @@ type Diagnoser interface {
 	Diagnose(ctx context.Context, sp harness.Sprout, jids ...string) string
 }
 
-// runLong runs a setup or revert script with the longer timeout when the
-// driver has one.
-func (cy *Cycle) runLong(ctx context.Context, script string) (*harness.RunResult, error) {
-	if l, ok := cy.Driver.(LongRunner); ok {
-		return l.RunLong(ctx, cy.Sprout, script)
+// host runs a host script on the cycle's sprout (a setup or revert
+// script, long, with the longer timeout when the driver has one), and has
+// the VM's side collected when the test channel failed under it.
+func (cy *Cycle) host(ctx context.Context, r *recorder, script string, long bool) (*harness.RunResult, error) {
+	var res *harness.RunResult
+	var err error
+	if l, ok := cy.Driver.(LongRunner); ok && long {
+		res, err = l.RunLong(ctx, cy.Sprout, script)
+	} else {
+		res, err = cy.Driver.Run(ctx, cy.Sprout, script)
 	}
-	return cy.Driver.Run(ctx, cy.Sprout, script)
+	if harness.IsChannelUnavailable(err) {
+		cy.diagnose(ctx, r)
+	}
+	return res, err
 }
 
 // diagnose collects the VM's side of a failure, when the driver can, and
-// logs where it went.
+// logs where it went: once per cycle, by the first failure (a failed
+// cook's, with its job id, or the channel's).
 func (cy *Cycle) diagnose(ctx context.Context, r *recorder, jids ...string) {
 	d, ok := cy.Driver.(Diagnoser)
-	if !ok {
+	if !ok || cy.diagnosed {
 		return
 	}
+	cy.diagnosed = true
 	if where := d.Diagnose(ctx, cy.Sprout, jids...); where != "" {
 		r.Logf("the VM's side of this failure (sprout log, job records, through az vm run-command): %s", where)
 	}
@@ -181,6 +191,9 @@ type Cycle struct {
 	// (the same sproutid): after the real cook, tenant 2's check must
 	// still fail there.
 	CrossCheck *harness.Sprout
+
+	// diagnosed: the VM's side of a failure was collected (diagnose).
+	diagnosed bool
 }
 
 // NewVars returns the placeholder values for a case on a sprout.
@@ -266,7 +279,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 		}
 		if part.Revert != "" {
 			r.Step("revert (host script)")
-			res, err := cy.runLong(cctx, ScriptCall(sp, part.Revert, "REVERT"))
+			res, err := cy.host(cctx, r, ScriptCall(sp, part.Revert, "REVERT"), true)
 			if err != nil {
 				r.Errorf("the revert script: %v; the host may keep the change", err)
 			} else if rc, out := scriptResult(res, "REVERT"); rc != 0 {
@@ -278,7 +291,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 
 	if part.Setup != "" {
 		r.Step("setup")
-		res, err := cy.runLong(ctx, ScriptCall(sp, part.Setup, "SETUP"))
+		res, err := cy.host(ctx, r, ScriptCall(sp, part.Setup, "SETUP"), true)
 		if err != nil {
 			r.Fatalf("running the setup script: %v", err)
 			return r.out
@@ -330,7 +343,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	if okTest1 {
 		jids = []string{jidTest1}
 	}
-	res, err := d.Run(ctx, sp, HostCall(sp, part.Check, jids))
+	res, err := cy.host(ctx, r, HostCall(sp, part.Check, jids), false)
 	if err != nil {
 		r.Fatalf("reading the host: %v", err)
 		return r.out
@@ -377,7 +390,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	if okTest2 {
 		logJIDs = append(logJIDs, jidTest2)
 	}
-	res, err = d.Run(ctx, sp, HostCall(sp, part.Check, logJIDs))
+	res, err = cy.host(ctx, r, HostCall(sp, part.Check, logJIDs), false)
 	if err != nil {
 		r.Fatalf("reading the host: %v", err)
 		return r.out

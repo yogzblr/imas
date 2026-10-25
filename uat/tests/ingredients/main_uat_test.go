@@ -112,27 +112,17 @@ func (d harnessDriver) Cook(ctx context.Context, sp harness.Sprout, recipe strin
 }
 
 func (d harnessDriver) Run(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
-	return d.run(ctx, sp, script, harness.RunOptions{})
+	return d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, harness.RunOptions{})
 }
 
 // RunLong is Run with a longer call timeout (LongRunner).
 func (d harnessDriver) RunLong(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
-	return d.run(ctx, sp, script, harness.RunOptions{CallTimeout: longCallTimeout})
+	return d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, harness.RunOptions{CallTimeout: longCallTimeout})
 }
 
 // RunOutOfBand is Run through az vm run-command (OutOfBand).
 func (d harnessDriver) RunOutOfBand(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
 	return d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, harness.RunOptions{OutOfBand: true, CallTimeout: longCallTimeout})
-}
-
-// run runs a host script; a test channel that failed has the VM's side of
-// it collected while it is fresh.
-func (d harnessDriver) run(ctx context.Context, sp harness.Sprout, script string, opt harness.RunOptions) (*harness.RunResult, error) {
-	res, err := d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, opt)
-	if harness.IsChannelUnavailable(err) {
-		d.Diagnose(ctx, sp)
-	}
-	return res, err
 }
 
 // Diagnose collects the VM's side of a failure (Diagnoser).

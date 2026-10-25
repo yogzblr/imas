@@ -356,7 +356,9 @@ ch_capture() {
 # ch_capture_vm_limits <vm>: the VM side of the channel, through az vm
 # run-command (never the tunnel), at most once per VM per
 # UAT_VM_LIMITS_EVERY_SECONDS (600), into
-# $VMCTL_DIAG_DIR/channel/<epoch>-<vm>-vm-side.txt.
+# $VMCTL_DIAG_DIR/channel/<epoch>-<vm>-vm-side.txt, holding every slot of
+# the VM (waiting up to UAT_VM_LIMITS_WAIT_SECONDS, 600) as any run-command
+# call does.
 ch_capture_vm_limits() {
   local vm=$1 dir=${VMCTL_DIAG_DIR:-} stamp id os out f
   [ -n "$dir" ] && [ -n "${UAT_UAT_JSON:-}" ] || return 0
@@ -368,6 +370,9 @@ ch_capture_vm_limits() {
   id=$(ch_vm_field "$vm" id)
   os=$(ch_vm_field "$vm" os)
   [ -n "$id" ] || return 0
+  # Azure runs one run-command per VM at a time: hold every slot, as
+  # vmctl.sh does for its own (this waits for the caller to finish).
+  ch_slots_exclusive "$vm" "$(ch_slots "$os")" "${UAT_VM_LIMITS_WAIT_SECONDS:-600}" || return 0
   f="$dir/channel/$(ch_now)-$vm-vm-side.txt"
   if [ "$os" = windows ]; then
     out=$(timeout -k 10 "${UAT_RUNCOMMAND_TIMEOUT:-240}" "${AZ:-az}" vm run-command invoke --ids "$id" \
@@ -386,6 +391,7 @@ ch_capture_vm_limits() {
       'journalctl -u ssh -u sshd --no-pager -n 60 -o short-iso 2>/dev/null' \
       2>&1) || true
   fi
+  ch_slots_release
   {
     echo "== $vm, VM side, through az vm run-command (not the tunnel)"
     printf '%s\n' "$out" | jq -r '[.value[]?.message] | join("\n")' 2>/dev/null || printf '%s\n' "$out"
