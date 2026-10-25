@@ -1,14 +1,18 @@
-//go:build windows
-
 // Package winpsget wraps Salt's win_psget module: installing/removing
 // PowerShell modules via PowerShellGet (Install-Module/Uninstall-Module),
 // the same PowerShell surface Salt itself shells out to. See G.8 in
 // docs/design/imas-windows-parity-addendum.md.
+//
+// Only init (register.go) is Windows-only: the rest runs PowerShell
+// through runPowerShell so the scripts it builds and its decisions are
+// unit-tested on every platform.
 package winpsget
 
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/ingredients"
@@ -21,6 +25,17 @@ const (
 	methodInstalled = "installed"
 	methodRemoved   = "removed"
 )
+
+// runPowerShell runs powershell.exe; tests replace it.
+var runPowerShell = winexec.RunPowerShell
+
+// installTimeout bounds an install or removal when the step sets no
+// timeout: it downloads from a repository (the NuGet provider first, on a
+// fresh host), which takes longer than winexec.DefaultTimeout.
+const installTimeout = 10 * time.Minute
+
+// The scopes Install-Module accepts.
+var scopes = map[string]string{"allusers": "AllUsers", "currentuser": "CurrentUser"}
 
 var methodProps = map[string]ingredients.MethodPropsSet{
 	methodInstalled: {
@@ -58,6 +73,11 @@ func (p PSGet) Parse(id, method string, params map[string]interface{}) (cook.Rec
 	if !ok || name == "" {
 		return nil, ingredients.ErrMissingName
 	}
+	if scope := winexec.StringParamOr(params, "scope", ""); scope != "" {
+		if _, ok := scopes[strings.ToLower(scope)]; !ok {
+			return nil, fmt.Errorf("invalid scope %q (must be AllUsers or CurrentUser)", scope)
+		}
+	}
 	return PSGet{id: id, method: method, name: name, params: params}, nil
 }
 
@@ -77,16 +97,80 @@ func (p PSGet) Properties() (map[string]interface{}, error) {
 	return p.params, nil
 }
 
-func (p PSGet) isInstalled(ctx context.Context) (bool, error) {
-	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(p.params, "timeout", ""))
+// timeouts returns the bound for the state check and for the install or
+// removal: the step's timeout for both when it sets one, else
+// winexec.DefaultTimeout and installTimeout.
+func (p PSGet) timeouts() (check, change time.Duration, err error) {
+	raw := winexec.StringParamOr(p.params, "timeout", "")
+	check, err = winexec.ParseTimeout(raw)
 	if err != nil {
-		return false, err
+		return 0, 0, err
 	}
-	script := fmt.Sprintf(
-		"@(Get-Module -ListAvailable -Name %s).Count",
-		winexec.PSQuote(p.name),
-	)
-	out, err := winexec.RunPowerShell(ctx, script, timeout)
+	if raw == "" {
+		return check, installTimeout, nil
+	}
+	return check, check, nil
+}
+
+// checkScript counts the installed copies of the module, of the
+// requested version when the step names one.
+func (p PSGet) checkScript() string {
+	script := "@(Get-Module -ListAvailable -Name " + winexec.PSQuote(p.name)
+	if version := winexec.StringParamOr(p.params, "version", ""); version != "" {
+		script += " | Where-Object { $_.Version -eq [version]" + winexec.PSQuote(version) + " }"
+	}
+	return script + ").Count"
+}
+
+// installScript installs the module. PowerShellGet 1.0.0.1, the one
+// Windows Server 2022 ships, needs the NuGet provider before its first
+// install and asks for it interactively, which fails under the sprout;
+// so the script makes sure the provider is there, over TLS 1.2 (the
+// gallery and the provider feed refuse older protocols, and .NET
+// Framework 4.x does not offer TLS 1.2 by default). -Force also answers
+// the untrusted-repository prompt for PSGallery. A failure names the
+// stage it failed in.
+//
+// -Scope is given once: the default AllUsers, or the step's scope. UAT
+// Run 2 on rc.21 sent "-Scope AllUsers -Scope 'AllUsers'", which
+// PowerShell refuses (ParameterAlreadyBound).
+func (p PSGet) installScript() string {
+	scope := "AllUsers"
+	if s := winexec.StringParamOr(p.params, "scope", ""); s != "" {
+		scope = scopes[strings.ToLower(s)]
+	}
+	install := "Install-Module -Name " + winexec.PSQuote(p.name) + " -Force -AllowClobber -Scope " + winexec.PSQuote(scope)
+	if version := winexec.StringParamOr(p.params, "version", ""); version != "" {
+		install += " -RequiredVersion " + winexec.PSQuote(version)
+	}
+	if repo := winexec.StringParamOr(p.params, "repository", ""); repo != "" {
+		install += " -Repository " + winexec.PSQuote(repo)
+	}
+	return strings.Join([]string{
+		"$ErrorActionPreference = 'Stop'",
+		"$ProgressPreference = 'SilentlyContinue'",
+		"$stage = 'TLS 1.2'",
+		"try {",
+		"  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12",
+		"  $stage = 'NuGet provider (Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201)'",
+		"  if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue | Where-Object { $_.Version -ge [version]'2.8.5.201' })) {",
+		"    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope " + winexec.PSQuote(scope) + " | Out-Null",
+		"  }",
+		"  $stage = 'Install-Module'",
+		"  " + install,
+		"} catch {",
+		"  [Console]::Error.WriteLine(\"win_psget: $stage failed: $($_.Exception.Message)\")",
+		"  exit 1",
+		"}",
+	}, "\n")
+}
+
+func (p PSGet) removeScript() string {
+	return "Uninstall-Module -Name " + winexec.PSQuote(p.name) + " -AllVersions -Force -ErrorAction Stop"
+}
+
+func (p PSGet) isInstalled(ctx context.Context, timeout time.Duration) (bool, error) {
+	out, err := runPowerShell(ctx, p.checkScript(), timeout)
 	if err != nil {
 		return false, err
 	}
@@ -94,7 +178,11 @@ func (p PSGet) isInstalled(ctx context.Context) (bool, error) {
 }
 
 func (p PSGet) Test(ctx context.Context) (cook.Result, error) {
-	installed, err := p.isInstalled(ctx)
+	check, _, err := p.timeouts()
+	if err != nil {
+		return cook.Result{Failed: true}, err
+	}
+	installed, err := p.isInstalled(ctx, check)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
@@ -115,11 +203,11 @@ func (p PSGet) Test(ctx context.Context) (cook.Result, error) {
 }
 
 func (p PSGet) Apply(ctx context.Context) (cook.Result, error) {
-	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(p.params, "timeout", ""))
+	check, change, err := p.timeouts()
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	installed, err := p.isInstalled(ctx)
+	installed, err := p.isInstalled(ctx, check)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
@@ -128,34 +216,19 @@ func (p PSGet) Apply(ctx context.Context) (cook.Result, error) {
 		if installed {
 			return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s is already installed", p.name))}}, nil
 		}
-		script := "Install-Module -Name " + winexec.PSQuote(p.name) + " -Force -AllowClobber -Scope AllUsers"
-		if version := winexec.StringParamOr(p.params, "version", ""); version != "" {
-			script += " -RequiredVersion " + winexec.PSQuote(version)
-		}
-		if scope := winexec.StringParamOr(p.params, "scope", ""); scope != "" {
-			script += " -Scope " + winexec.PSQuote(scope)
-		}
-		if repo := winexec.StringParamOr(p.params, "repository", ""); repo != "" {
-			script += " -Repository " + winexec.PSQuote(repo)
-		}
-		if _, err := winexec.RunPowerShell(ctx, script, timeout); err != nil {
-			return cook.Result{Failed: true}, err
+		if _, err := runPowerShell(ctx, p.installScript(), change); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("installing module %s: %w", p.name, err)
 		}
 		return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s has been installed", p.name))}}, nil
 	case methodRemoved:
 		if !installed {
 			return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s is already removed", p.name))}}, nil
 		}
-		script := "Uninstall-Module -Name " + winexec.PSQuote(p.name) + " -AllVersions -Force"
-		if _, err := winexec.RunPowerShell(ctx, script, timeout); err != nil {
-			return cook.Result{Failed: true}, err
+		if _, err := runPowerShell(ctx, p.removeScript(), change); err != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("removing module %s: %w", p.name, err)
 		}
 		return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s has been removed", p.name))}}, nil
 	default:
 		return cook.Result{}, ingredients.ErrInvalidMethod
 	}
-}
-
-func init() {
-	ingredients.RegisterAllMethods(PSGet{})
 }

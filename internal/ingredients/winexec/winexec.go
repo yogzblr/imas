@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -43,6 +44,14 @@ func ParseTimeout(s string) (time.Duration, error) {
 // RunPowerShell runs script via powershell.exe -Command and returns its
 // trimmed stdout. Errors include the process's stderr for diagnosis.
 func RunPowerShell(ctx context.Context, script string, timeout time.Duration) (string, error) {
+	return RunPowerShellEnv(ctx, script, nil, timeout)
+}
+
+// RunPowerShellEnv is RunPowerShell with env ("NAME=value") added to the
+// child's environment. Values a recipe supplies go there rather than into
+// the script text, so no quoting mistake can turn them into code: the
+// script reads them as $env:NAME.
+func RunPowerShellEnv(ctx context.Context, script string, env []string, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
@@ -53,6 +62,9 @@ func RunPowerShell(ctx context.Context, script string, timeout time.Duration) (s
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
 		"-Command", script,
 	)
+	if len(env) > 0 {
+		command.Env = append(os.Environ(), env...)
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
