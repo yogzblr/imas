@@ -188,3 +188,22 @@ func TestCheckScriptComparesVersionsByFourParts(t *testing.T) {
 		t.Errorf("check script: %s", s)
 	}
 }
+
+// A prerelease request matches only that prerelease, and a stable request
+// only a stable copy (review on #319).
+func TestCheckScriptComparesThePrereleaseLabel(t *testing.T) {
+	for in, want := range map[string]string{"2.0.0-beta1": "beta1", "2.0.0": "", "2.0.0-rc.1+build5": "rc.1", "2.0.0+build5": ""} {
+		if got := prereleaseLabel(in); got != want {
+			t.Errorf("prereleaseLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for version, label := range map[string]string{"2.0.0-beta1": "'beta1'", "2.0.0": "''"} {
+		s := PSGet{name: "M", params: map[string]interface{}{"version": version}}.checkScript()
+		if !strings.Contains(s, "-eq '2.0.0.0' -and [string]$_.PrivateData.PSData.Prerelease -eq "+label+" }") {
+			t.Errorf("check script for %s: %s", version, s)
+		}
+	}
+	if s := (PSGet{name: "M", params: map[string]interface{}{}}).checkScript(); strings.Contains(s, "Prerelease") {
+		t.Errorf("an unversioned check compares a label: %s", s)
+	}
+}

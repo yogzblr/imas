@@ -121,19 +121,30 @@ func TestFailureCarriesTheCmdletError(t *testing.T) {
 	}
 }
 
-// The LCM is asked through its own CIM methods with the MOF's bytes,
-// length-prefixed (W11 CI: Test-DscConfiguration -Path over DCOM sent a
-// configuration the LCM could not parse), and the answer is always the
-// InDesiredState object parseInDesiredState reads.
+// The LCM is asked through its own CIM methods (W11 CI: Test-DscConfiguration
+// -Path over DCOM sent a configuration the LCM could not parse):
+// TestConfiguration with the MOF's bytes length-prefixed, its answer always
+// the InDesiredState object parseInDesiredState reads, and no answer an
+// error; SendConfigurationApply with the bytes alone.
 func TestScriptsCallTheLCMMethods(t *testing.T) {
 	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
-	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "localhost.mof"} {
+	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "ConfigurationData = $imasData }", "localhost.mof"} {
 		if !strings.Contains(test, want) {
 			t.Errorf("test script lacks %q:\n%s", want, test)
 		}
 	}
-	if !strings.Contains(apply, "-MethodName SendConfigurationApply") || !strings.Contains(apply, "Force = $true") {
+	if !strings.Contains(apply, "-MethodName SendConfigurationApply") || !strings.Contains(apply, "ConfigurationData = $imasBytes; Force = $true") {
 		t.Errorf("apply script:\n%s", apply)
+	}
+	// A nonzero ReturnValue fails both, and a directory with several MOFs
+	// and no localhost.mof is refused rather than its first MOF applied
+	// (review on #319).
+	for name, s := range map[string]string{"test": test, "apply": apply} {
+		for _, want := range []string{"if ($imasR.ReturnValue) { throw", "$imasMofs.Count -gt 1) { throw"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("%s script lacks %q:\n%s", name, want, s)
+			}
+		}
 	}
 	if strings.Contains(test+apply, "Test-DscConfiguration") || strings.Contains(test+apply, "Start-DscConfiguration") {
 		t.Error("the scripts still use the cmdlets")

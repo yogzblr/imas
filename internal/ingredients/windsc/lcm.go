@@ -38,20 +38,27 @@ func withDcomSession(body string) string {
 // The LCM's own CIM methods, called through the DCOM session (W11 CI on
 // Windows Server 2022: Test-DscConfiguration -Path -CimSession over DCOM
 // sent the LCM a configuration it could not parse, "Syntax Error. Number
-// value is not valid: empty number string"). MSFT_DSCLocalConfigurationManager
-// takes the compiled MOF as ConfigurationData: its bytes, prefixed with the
-// total length as a 4-byte little-endian integer.
+// value is not valid: empty number string"). TestConfiguration takes the
+// compiled MOF as ConfigurationData prefixed with the total length as a
+// 4-byte little-endian integer; SendConfigurationApply takes the MOF's bytes
+// alone (W11 CI: given the prefix it parsed it as MOF text, the same
+// "Syntax Error", its buffer starting with the length bytes).
 const lcmClass = "-Namespace root/Microsoft/Windows/DesiredStateConfiguration -ClassName MSFT_DSCLocalConfigurationManager"
 
 // mofData is the script lines that read the configuration at path (a .mof
-// file, or a directory holding localhost.mof or a single .mof) into
-// $imasData.
+// file, or a directory holding localhost.mof or a single .mof; several
+// without localhost.mof are refused, one of them may be another node's) into
+// $imasBytes, and the same with its length prefix into $imasData.
 func mofData(path string) string {
 	return strings.Join([]string{
 		"$imasPath = " + winexec.PSQuote(path),
 		"  if (Test-Path -LiteralPath $imasPath -PathType Container) {",
 		"    $imasMof = Join-Path $imasPath 'localhost.mof'",
-		"    if (-not (Test-Path -LiteralPath $imasMof)) { $imasMof = @(Get-ChildItem -LiteralPath $imasPath -Filter *.mof)[0].FullName }",
+		"    if (-not (Test-Path -LiteralPath $imasMof)) {",
+		"      $imasMofs = @(Get-ChildItem -LiteralPath $imasPath -Filter *.mof)",
+		"      if ($imasMofs.Count -gt 1) { throw \"win_dsc: $imasPath holds $($imasMofs.Count) .mof files and no localhost.mof; name the one for this node\" }",
+		"      $imasMof = @($imasMofs | ForEach-Object { $_.FullName })[0]",
+		"    }",
 		"  } else { $imasMof = $imasPath }",
 		"  if (-not $imasMof -or -not (Test-Path -LiteralPath $imasMof)) { throw \"win_dsc: no compiled configuration (.mof) at $imasPath\" }",
 		"  $imasBytes = [IO.File]::ReadAllBytes($imasMof)",
@@ -59,11 +66,20 @@ func mofData(path string) string {
 	}, "\n")
 }
 
+// returnValueCheck is the script line that fails when the LCM method's
+// result in $imasR reports a nonzero ReturnValue (the methods can report a
+// failure there rather than throw).
+func returnValueCheck(method string) string {
+	return "  if ($imasR.ReturnValue) { throw \"win_dsc: " + method + " returned $($imasR.ReturnValue)\" }\n"
+}
+
 // testScript asks the LCM whether the node is in the configuration at
 // path, as JSON.
 func testScript(path string) string {
 	return withDcomSession(mofData(path) + "\n" +
 		"  $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasData }\n" +
+		returnValueCheck("TestConfiguration") +
+		"  if ($null -eq $imasR.InDesiredState) { throw \"win_dsc: TestConfiguration returned no InDesiredState (ReturnValue: $($imasR.ReturnValue))\" }\n" +
 		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState } | ConvertTo-Json -Compress")
 }
 
@@ -71,7 +87,8 @@ func testScript(path string) string {
 // the LCM has applied it.
 func applyScript(path string) string {
 	return withDcomSession(mofData(path) + "\n" +
-		"  $null = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName SendConfigurationApply -Arguments @{ ConfigurationData = $imasData; Force = $true }")
+		"  $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName SendConfigurationApply -Arguments @{ ConfigurationData = $imasBytes; Force = $true }\n" +
+		returnValueCheck("SendConfigurationApply"))
 }
 
 // parseInDesiredState reads testScript's output. TestConfiguration

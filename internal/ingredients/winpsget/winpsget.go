@@ -119,9 +119,13 @@ func (p PSGet) checkScript() string {
 	if version := winexec.StringParamOr(p.params, "version", ""); version != "" {
 		// Both sides as four components, a missing one 0: [version]'5.4'
 		// is not -eq an installed 5.4.0, and a prerelease ("2.0.0-beta1")
-		// is not a [version] at all (Get-Module reports its base version).
+		// is not a [version] at all (Get-Module reports its base version
+		// and keeps the label in the manifest's PSData.Prerelease). The
+		// label must match too, none for a stable request, so an installed
+		// 2.0.0 is not taken for a requested 2.0.0-beta1 or the reverse.
 		script += " | Where-Object { (($_.Version.Major, $_.Version.Minor, [Math]::Max(0, $_.Version.Build), [Math]::Max(0, $_.Version.Revision)) -join '.') -eq " +
-			winexec.PSQuote(fourPartVersion(version)) + " }"
+			winexec.PSQuote(fourPartVersion(version)) +
+			" -and [string]$_.PrivateData.PSData.Prerelease -eq " + winexec.PSQuote(prereleaseLabel(version)) + " }"
 	}
 	return script + ").Count"
 }
@@ -137,6 +141,19 @@ func fourPartVersion(v string) string {
 		parts = append(parts, "0")
 	}
 	return strings.Join(parts[:4], ".")
+}
+
+// prereleaseLabel is a module version's prerelease label ("beta1" of
+// "2.0.0-beta1"), without a build suffix; "" for a stable version.
+func prereleaseLabel(v string) string {
+	v = strings.TrimSpace(v)
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		return v[i+1:]
+	}
+	return ""
 }
 
 // installScript installs the module. PowerShellGet 1.0.0.1, the one
