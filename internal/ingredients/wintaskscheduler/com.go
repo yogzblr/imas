@@ -573,3 +573,13 @@ func (oleTaskBackend) Exists(path string) (bool, error) {
 	})
 	return exists, err
 }
+
+// triggerTypeName is the trigger_type name of a TASK_TRIGGER_TYPE2 value.
+func triggerTypeName(n int) string {
+	for name, v := range triggerTypes {
+		if v == n {
+			return name
+		}
+	}
+	return ""
+}

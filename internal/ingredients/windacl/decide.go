@@ -8,11 +8,6 @@ package windacl
 
 import "errors"
 
-const (
-	objectTypeFile     = "file"
-	objectTypeRegistry = "registry"
-)
-
 var (
 	ErrInvalidObjectType  = errors.New("invalid object_type")
 	ErrInvalidAccessMode  = errors.New("invalid access_mode")
