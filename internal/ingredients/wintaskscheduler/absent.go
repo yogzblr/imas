@@ -1,26 +1,28 @@
-//go:build windows
-
 package wintaskscheduler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/yogzblr/imas/internal/cook"
 	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
+// absent only asks whether the task exists (backend.Exists): it needs
+// nothing of the task's definition. Reading the whole definition, as it
+// did through Load, made it fail on any part Load could not read (UAT
+// I.win_task.absent, Run 2 on rc.21: "call Item: Member not found").
 func (t Task) absent(_ context.Context, test bool) (cook.Result, error) {
 	name, _ := winexec.StringParam(t.params, "name")
 
-	if _, err := backend.Load(name); err != nil {
-		if errors.Is(err, ErrTaskNotFound) {
-			return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
-				cook.Snprintf("task %q is already absent", name),
-			}}, nil
-		}
+	exists, err := backend.Exists(name)
+	if err != nil {
 		return cook.Result{Succeeded: false, Failed: true, Changed: false, Notes: nil}, err
+	}
+	if !exists {
+		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{
+			cook.Snprintf("task %q is already absent", name),
+		}}, nil
 	}
 
 	if test {

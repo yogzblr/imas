@@ -2,8 +2,12 @@ package wintaskscheduler
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 
 	ole "github.com/go-ole/go-ole"
+
+	"github.com/yogzblr/imas/internal/ingredients/winexec"
 )
 
 // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND, the HRESULTs
@@ -41,4 +45,25 @@ func isNotFoundErr(err error) bool {
 
 func isNotFoundCode(hr uint32) bool {
 	return hr == hrFileNotFound || hr == hrPathNotFound
+}
+
+// maxXMLQuote bounds how much of the task's XML a registration error
+// quotes.
+const maxXMLQuote = 2048
+
+// registerError is RegisterTaskDefinition's failure: the task, the
+// principal it was registered for, the HRESULTs (winexec.COMError: through
+// IDispatch the reason is the EXCEPINFO scode, which "Exception occurred."
+// alone does not name) and the definition's XML, which is what Task
+// Scheduler validated.
+func registerError(path, userID string, logonType int, err error, xml string) error {
+	err = winexec.COMError(fmt.Sprintf("wintaskscheduler: RegisterTaskDefinition(%q) as %s, logon type %d", path, userID, logonType), err)
+	xml = strings.TrimSpace(xml)
+	if xml == "" {
+		return err
+	}
+	if len(xml) > maxXMLQuote {
+		xml = xml[:maxXMLQuote] + "..."
+	}
+	return fmt.Errorf("%w; task XML: %s", err, xml)
 }

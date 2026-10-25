@@ -1,5 +1,3 @@
-//go:build windows
-
 package wintaskscheduler
 
 import (
@@ -133,6 +131,10 @@ func (a taskState) Equal(b taskState) bool {
 // ingredient needs, so tests can substitute an in-memory fake instead
 // of touching a real Windows Task Scheduler service and COM apartment.
 type taskBackend interface {
+	// Exists reports whether a task exists at path: only the folder and
+	// the task are looked up, nothing of its definition is read, so a
+	// definition this package cannot read never stops absent.
+	Exists(path string) (bool, error)
 	// Load reads the current definition of the task at path. It returns
 	// ErrTaskNotFound if no task (or containing folder) exists there.
 	Load(path string) (taskState, error)
@@ -145,8 +147,50 @@ type taskBackend interface {
 	Delete(path string) error
 }
 
-// backend is replaceable in tests.
-var backend taskBackend = oleTaskBackend{}
+// backend is the COM backend on Windows (register.go) and replaceable in
+// tests.
+var backend taskBackend
+
+// Task Scheduler 2.0 logon types (TASK_LOGON_TYPE in taskschd.idl).
+const (
+	logonPassword       = 1 // TASK_LOGON_PASSWORD
+	logonS4U            = 2 // TASK_LOGON_S4U
+	logonServiceAccount = 5 // TASK_LOGON_SERVICE_ACCOUNT
+)
+
+// principalFor returns the user id, password and logon type
+// RegisterTaskDefinition gets for a task that runs as userName (empty:
+// SYSTEM). The sprout runs as SYSTEM, which has no password and no
+// interactive session, so:
+//
+//   - no user_name: "SYSTEM" with TASK_LOGON_SERVICE_ACCOUNT and no
+//     password (a nil VARIANT: the service-account logon takes none);
+//   - a user with a password: TASK_LOGON_PASSWORD;
+//   - a user without one: TASK_LOGON_S4U, which needs no stored password
+//     (TASK_LOGON_INTERACTIVE_TOKEN would need the user logged on, and
+//     TASK_LOGON_PASSWORD with an empty password is refused).
+//
+// password is nil, not "", when there is none.
+func principalFor(userName, password string) (userID string, pw interface{}, logonType int) {
+	switch {
+	case userName == "" || isSystemAccount(userName):
+		return "SYSTEM", nil, logonServiceAccount
+	case password != "":
+		return userName, password, logonPassword
+	default:
+		return userName, nil, logonS4U
+	}
+}
+
+// isSystemAccount reports whether name is the local system account under
+// one of the names Task Scheduler gives it back.
+func isSystemAccount(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "SYSTEM", `NT AUTHORITY\SYSTEM`, "S-1-5-18":
+		return true
+	}
+	return false
+}
 
 func intParamOr(params map[string]interface{}, key string, def int) int {
 	v, ok := params[key]
