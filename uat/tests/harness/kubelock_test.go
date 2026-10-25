@@ -49,17 +49,22 @@ func TestHoldKubeTunnelWaitsForAReopen(t *testing.T) {
 	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
-	unlocked := make(chan struct{})
-	go func() {
-		defer close(unlocked)
-		time.Sleep(600 * time.Millisecond)
-		_ = syscall.Flock(fd, syscall.LOCK_UN)
-	}()
-	defer func() { <-unlocked }()
-	start := time.Now()
-	release := holdKubeTunnel(context.Background(), kc)
-	if waited := time.Since(start); waited < 500*time.Millisecond {
-		t.Errorf("took the lock in %s while a reopen held it", waited)
+	held := make(chan func())
+	go func() { held <- holdKubeTunnel(context.Background(), kc) }()
+	select {
+	case release := <-held:
+		release()
+		t.Fatal("took the lock while a reopen held it")
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	var release func()
+	select {
+	case release = <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("still waiting after the reopen let the lock go")
 	}
 	// Held shared now: a reopen can't take it.
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
