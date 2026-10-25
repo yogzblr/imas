@@ -94,7 +94,7 @@ func TestInstallScriptBootstrapsNuGetOverTLS12(t *testing.T) {
 	tls := strings.Index(s, "[Net.SecurityProtocolType]::Tls12")
 	nuget := strings.Index(s, "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force")
 	install := strings.Index(s, "Install-Module -Name")
-	if tls < 0 || nuget < 0 || install < 0 || !(tls < nuget && nuget < install) {
+	if tls < 0 || nuget < 0 || install < 0 || tls >= nuget || nuget >= install {
 		t.Errorf("want TLS 1.2, then the NuGet provider, then Install-Module:\n%s", s)
 	}
 	if !strings.Contains(s, "$ErrorActionPreference = 'Stop'") || !strings.Contains(s, "$stage failed") || !strings.Contains(s, "exit 1") {
@@ -110,7 +110,7 @@ func TestParseRejectsBadScope(t *testing.T) {
 
 func TestCheckScriptHonoursVersion(t *testing.T) {
 	p := parse(t, methodInstalled, map[string]interface{}{"name": "Pester", "version": "5.4.0"})
-	if got := p.checkScript(); !strings.Contains(got, "[version]'5.4.0'") {
+	if got := p.checkScript(); !strings.Contains(got, "-eq '5.4.0.0'") {
 		t.Errorf("check script %q ignores the version", got)
 	}
 }
@@ -172,5 +172,19 @@ func TestRemovedRemovesWhenInstalled(t *testing.T) {
 	res, err := parse(t, methodRemoved, map[string]interface{}{"name": "Pester"}).Apply(context.Background())
 	if err != nil || !res.Changed || !strings.Contains(f.scripts[1], "Uninstall-Module -Name 'Pester' -AllVersions -Force") {
 		t.Fatalf("res=%+v err=%v scripts=%q", res, err, f.scripts)
+	}
+}
+
+// A requested "5.4" matches an installed 5.4.0, and a prerelease compares
+// by its base version (review on #320).
+func TestCheckScriptComparesVersionsByFourParts(t *testing.T) {
+	for in, want := range map[string]string{"5.4": "5.4.0.0", "5.4.0": "5.4.0.0", "1.2.3.4": "1.2.3.4", "2.0.0-beta1": "2.0.0.0", "3": "3.0.0.0"} {
+		if got := fourPartVersion(in); got != want {
+			t.Errorf("fourPartVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+	p := PSGet{name: "M", params: map[string]interface{}{"version": "5.4"}}
+	if s := p.checkScript(); !strings.Contains(s, "-eq '5.4.0.0'") || strings.Contains(s, "[version]'5.4'") {
+		t.Errorf("check script: %s", s)
 	}
 }
