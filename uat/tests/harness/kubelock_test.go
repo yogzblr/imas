@@ -45,24 +45,28 @@ func TestHoldKubeTunnelWaitsForAReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	fd := int(f.Fd())
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
 		t.Fatal(err)
 	}
+	unlocked := make(chan struct{})
 	go func() {
+		defer close(unlocked)
 		time.Sleep(600 * time.Millisecond)
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = syscall.Flock(fd, syscall.LOCK_UN)
 	}()
+	defer func() { <-unlocked }()
 	start := time.Now()
 	release := holdKubeTunnel(context.Background(), kc)
 	if waited := time.Since(start); waited < 500*time.Millisecond {
 		t.Errorf("took the lock in %s while a reopen held it", waited)
 	}
 	// Held shared now: a reopen can't take it.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 		t.Error("a reopen took the lock under a kubectl call")
 	}
 	release()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Errorf("the lock is not free after the call: %v", err)
 	}
 }
