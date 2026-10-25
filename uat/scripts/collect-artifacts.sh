@@ -12,7 +12,11 @@
 #   <out-dir>/report/    the test report: summary.txt, junit.xml, events.json,
 #                        build.log (uat/tests/run.sh), and every regular
 #                        file under report/diagnostics/ (uat/scripts/
-#                        diagnostics.sh, which redacts them first)
+#                        diagnostics.sh and vmctl.sh's channel captures,
+#                        which redact them first); and, under
+#                        report/diagnostics/channel/, the Bastion tunnels'
+#                        own logs (access/logs/<vm>-<kind>.log, as tunnels/)
+#                        and session.sh's supervisor log (W10)
 #   <out-dir>/outputs/   run.json (this run's inputs), uat.json (tofu output
 #                        uat, no credentials), ha_node_names.json and
 #                        object_store.json (tofu outputs ha_node_names and
@@ -21,6 +25,13 @@
 #                        hub/core/out/{core,admin}.json and uat-ca.crt,
 #                        hub/harness.json, dmz/dmz.json,
 #                        enroll/{run,tenants,keys,sprouts,sprouts-detail}.json
+#
+# build.log, the tunnel logs and the supervisor log are text logs of
+# everything that ran, so they go through redact (uat/scripts/redact.sh) on
+# the way: UAT Run 2 #6's build.log held a login token (az-relogin.sh's
+# ::add-mask:: line, which GitHub masks in the job log but not in a file)
+# and was deleted below, leaving no build.log. There is always a build.log:
+# when the run wrote none, one that says so (W10).
 #
 # and then scans every copied file for anything that looks like a secret (a
 # private key, kubeconfig credentials, a Bearer or Basic credential, a JWT,
@@ -31,6 +42,9 @@
 set -euo pipefail
 
 prog=$(basename "$0")
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=redact.sh
+. "$here/redact.sh"
 [ $# -eq 2 ] || { echo "usage: $prog <state-dir> <out-dir>" >&2; exit 2; }
 state=$1 out=$2
 [ -d "$state" ] || { echo "$prog: not a directory: $state" >&2; exit 2; }
@@ -39,7 +53,6 @@ report_files=(
   report/summary.txt
   report/junit.xml
   report/events.json
-  report/build.log
 )
 output_files=(
   run.json
@@ -75,6 +88,28 @@ copy() {
   copied=$((copied + 1))
 }
 for f in "${report_files[@]}"; do copy "$f" "$out"; done
+
+# copy_redacted SRC-REL DEST-PATH: a text log through redact.
+copy_redacted() {
+  local src="$state/$1" dest=$2
+  [ -f "$src" ] && [ ! -L "$src" ] || return 1
+  mkdir -p "$(dirname "$dest")"
+  redact <"$src" >"$dest"
+  copied=$((copied + 1))
+}
+if ! copy_redacted report/build.log "$out/report/build.log"; then
+  mkdir -p "$out/report"
+  echo "$prog: the run wrote no report/build.log (the Tests step did not run, or failed before uat/tests/run.sh started); see the job log" >"$out/report/build.log"
+fi
+if [ -d "$state/access/logs" ] && [ ! -L "$state/access/logs" ]; then
+  for f in "$state"/access/logs/*.log; do
+    [ -f "$f" ] || continue
+    case ${f##*/} in
+      supervisor.log) copy_redacted "access/logs/supervisor.log" "$out/report/diagnostics/channel/supervisor.log" || true ;;
+      *) copy_redacted "access/logs/${f##*/}" "$out/report/diagnostics/channel/tunnels/${f##*/}" || true ;;
+    esac
+  done
+fi
 if [ -d "$state/report/diagnostics" ] && [ ! -L "$state/report/diagnostics" ]; then
   while IFS= read -r -d '' f; do
     copy "${f#"$state"/}" "$out"

@@ -61,23 +61,32 @@ case "$1 $2 $3" in
     [ "$rport" = 22 ] && [ ! -f "$STUB_STATE/no_banner" ] && banner="SSH-2.0-stub"
     # Like the real az (a shell wrapper around python), the listener is a
     # child process; close must stop both.
+    # heal_on_reopen: a tunnel started again on a port marked stale is
+    # healthy again (as a reopened Bastion tunnel is).
+    if [ -f "$STUB_STATE/heal_on_reopen" ]; then rm -f "$STUB_STATE/stale.$port"; fi
     python3 -I -c '
-import socket, sys
-port, banner = int(sys.argv[1]), sys.argv[2]
+import os, socket, sys
+port, banner, state = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", port))
 s.listen(16)
 print("Opening tunnel on port: %d" % port, flush=True)
+held = []
 while True:
     c, _ = s.accept()
+    # stale.<port>: the tunnel accepts and then hangs, as a stale Bastion
+    # tunnel does (UAT Run 2 #6): no banner, the connection held open.
+    if os.path.exists(os.path.join(state, "stale.%d" % port)):
+        held.append(c)
+        continue
     try:
         if banner:
             c.sendall((banner + "\r\n").encode())
     except OSError:
         pass
     c.close()
-' "$port" "$banner" &
+' "$port" "$banner" "$STUB_STATE" &
     child=$!
     trap 'kill "$child" 2>/dev/null; exit 0' TERM INT
     wait "$child"
@@ -108,6 +117,12 @@ case "$1 $2" in
         echo "Code: Conflict" >&2
         exit 1
       fi
+    fi
+    # vmctl.sh's reboot (restart's fallback) is never run here.
+    if printf '%s\n' "$@" | grep -qx '# imas-uat-reboot'; then
+      log_line "reboot requested"
+      echo '{"value": []}'
+      exit 0
     fi
     cid=$(arg --command-id "$@")
     # The script lines are everything after --scripts.

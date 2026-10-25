@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -59,7 +60,7 @@ func RunPowerShell(ctx context.Context, script string, timeout time.Duration) (s
 	err := command.Run()
 	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return out, ingredients.CommandError("powershell.exe", err, stdout.Bytes(), stderr.Bytes())
+		return out, ingredients.CommandError("powershell.exe", timeoutErr(tctx, err), stdout.Bytes(), stderr.Bytes())
 	}
 	return out, nil
 }
@@ -98,9 +99,37 @@ func RunCLI(ctx context.Context, exe string, args []string, timeout time.Duratio
 	err := command.Run()
 	out := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return out, ingredients.CommandError(exe, err, stdout.Bytes(), stderr.Bytes())
+		return out, ingredients.CommandError(exe, timeoutErr(tctx, err), stdout.Bytes(), stderr.Bytes())
 	}
 	return out, nil
+}
+
+// timeoutErr hides the exit status of a process killed because tctx
+// ended: on Windows the kill leaves exit code 1, which some CLI tools
+// also use for "not found" (netsh), so a timed-out existence check must
+// not read as one. ExitCode reports no code for the result.
+func timeoutErr(tctx context.Context, err error) error {
+	if ctxErr := tctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w (%v)", ctxErr, err)
+	}
+	return err
+}
+
+// ExitCode returns the exit code of the process behind err, an error
+// from RunCLI or RunPowerShell, and whether there is one. There is none
+// for a process that could not start, or that was killed because the
+// timeout or the caller's context ended. A Windows exit code above
+// 0x7fffffff (an HRESULT, as certutil.exe exits with) comes back as the
+// uint32 code converted to int; compare it as uint32.
+func ExitCode(err error) (int, bool) {
+	if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return 0, false
+	}
+	var exitErr interface{ ExitCode() int }
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
 }
 
 // StringParam extracts a required string property, matching the

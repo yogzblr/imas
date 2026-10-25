@@ -23,6 +23,53 @@ const ValuePrefix = "__IMAS_UAT_"
 // rcKey is the value the wrapper prints with the script's exit status.
 const rcKey = "RC"
 
+// ChannelUnavailableTag starts the message of a ChannelError, the way
+// uat/tests/uatreport tells a case the test channel blocked (status CHAN)
+// from a product failure (W10). uatreport matches the same text.
+const ChannelUnavailableTag = "UAT CHANNEL UNAVAILABLE"
+
+// vmctlUnavailable is the line vmctl.sh prints when the channel to a VM
+// failed after its recovery, or the VM is marked dead.
+const vmctlUnavailable = "vmctl.sh: CHANNEL UNAVAILABLE: "
+
+// ChannelError is a vmctl.sh call that failed because the test channel to
+// the VM (its Bastion tunnel, SSH or WinRM) was unavailable, not because of
+// anything on the VM or in the product: vmctl.sh exited 255 and said
+// "CHANNEL UNAVAILABLE".
+type ChannelError struct {
+	VM, Verb string
+	// Detail is vmctl.sh's CHANNEL UNAVAILABLE line, without its prefix.
+	Detail string
+}
+
+func (e *ChannelError) Error() string {
+	return fmt.Sprintf("%s: vmctl.sh %s %s: %s", ChannelUnavailableTag, e.Verb, e.VM, e.Detail)
+}
+
+// IsChannelUnavailable reports whether err is, or wraps, a ChannelError.
+func IsChannelUnavailable(err error) bool {
+	var ce *ChannelError
+	return errors.As(err, &ce)
+}
+
+// channelError returns the ChannelError of a vmctl.sh call that printed a
+// CHANNEL UNAVAILABLE line and exited 255, or nil.
+func channelError(verb, vm string, out []byte, code int) error {
+	if code != 255 {
+		return nil
+	}
+	detail := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if i := strings.Index(line, vmctlUnavailable); i >= 0 {
+			detail = strings.TrimSpace(line[i+len(vmctlUnavailable):])
+		}
+	}
+	if detail == "" {
+		return nil
+	}
+	return &ChannelError{VM: vm, Verb: verb, Detail: detail}
+}
+
 // VMCtl runs uat/access/vmctl.sh, the Access interface of the plan's
 // Shared contract:
 //
@@ -38,7 +85,7 @@ type VMCtl struct {
 	// Path is vmctl.sh; UATFile is passed as its first argument.
 	Path    string
 	UATFile string
-	// Timeout bounds one call (default 15 minutes, or
+	// Timeout bounds one call (default DefaultVMCtlTimeout, or
 	// $IMAS_UAT_VMCTL_TIMEOUT: a Windows restart through the Azure
 	// control plane is slow). vmctl.sh bounds each of its own channel
 	// calls far below it (VMCTL_CALL_TIMEOUT); this is the backstop. On
@@ -47,7 +94,8 @@ type VMCtl struct {
 	Timeout time.Duration
 	// Exec, when set, replaces running Path: it gets vmctl.sh's arguments
 	// after the uat.json path and returns what it printed and its exit
-	// code. For tests and in-process fakes.
+	// code. For tests and in-process fakes. The environment a call adds
+	// (RunWith) is in ctx: CallEnv.
 	Exec func(ctx context.Context, args []string) ([]byte, int, error)
 
 	mu    sync.Mutex
@@ -57,9 +105,14 @@ type VMCtl struct {
 // EnvVMCtlTimeout overrides VMCtl's default Timeout (a Go duration).
 const EnvVMCtlTimeout = "IMAS_UAT_VMCTL_TIMEOUT"
 
+// DefaultVMCtlTimeout is the backstop on one vmctl.sh call: above a
+// restart's own bounds, its az vm restart (VMCTL_AZ_TIMEOUT, 600 s) and
+// then its wait for the guest (VMCTL_RESTART_WAIT_SECONDS, 600 s).
+const DefaultVMCtlTimeout = 25 * time.Minute
+
 // NewVMCtl returns a VMCtl.
 func NewVMCtl(path, uatFile string) *VMCtl {
-	timeout := 15 * time.Minute
+	timeout := DefaultVMCtlTimeout
 	if d, err := time.ParseDuration(os.Getenv(EnvVMCtlTimeout)); err == nil && d > 0 {
 		timeout = d
 	}
@@ -84,6 +137,37 @@ func (v *VMCtl) lock(vm string) func() {
 	return l.Unlock
 }
 
+// RunOptions change one vmctl.sh run.
+type RunOptions struct {
+	// CallTimeout is vmctl.sh's own bound on the call (VMCTL_CALL_TIMEOUT;
+	// default its 120 s): longer for a revert or a reboot command (W10).
+	CallTimeout time.Duration
+	// OutOfBand runs the script through az vm run-command, never the test
+	// channel (VMCTL_CHANNEL=runcommand): to reach a host whose tunnel is
+	// down, slowly.
+	OutOfBand bool
+}
+
+func (o RunOptions) env() []string {
+	var env []string
+	if o.CallTimeout > 0 {
+		env = append(env, fmt.Sprintf("VMCTL_CALL_TIMEOUT=%d", int(o.CallTimeout.Round(time.Second)/time.Second)))
+	}
+	if o.OutOfBand {
+		env = append(env, "VMCTL_CHANNEL=runcommand")
+	}
+	return env
+}
+
+type callEnvKey struct{}
+
+// CallEnv returns the environment a vmctl.sh call adds to the runner's
+// (RunWith's options), for an Exec fake.
+func CallEnv(ctx context.Context) []string {
+	env, _ := ctx.Value(callEnvKey{}).([]string)
+	return env
+}
+
 func (v *VMCtl) call(ctx context.Context, args ...string) ([]byte, int, error) {
 	if v != nil && v.Exec != nil {
 		return v.Exec(ctx, args)
@@ -93,11 +177,14 @@ func (v *VMCtl) call(ctx context.Context, args ...string) ([]byte, int, error) {
 	}
 	timeout := v.Timeout
 	if timeout <= 0 {
-		timeout = 15 * time.Minute
+		timeout = DefaultVMCtlTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, v.Path, append([]string{v.UATFile}, args...)...)
+	if env := CallEnv(ctx); len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -127,6 +214,9 @@ func (v *VMCtl) simple(ctx context.Context, verb, vm string) error {
 	out, code, err := v.call(ctx, verb, vm)
 	if err != nil {
 		return err
+	}
+	if ce := channelError(verb, vm, out, code); ce != nil {
+		return ce
 	}
 	if code != 0 {
 		return fmt.Errorf("vmctl.sh %s %s exited %d: %s", verb, vm, code, tail(out, 800))
@@ -185,13 +275,25 @@ func (r *RunResult) Value(key string) (string, bool) {
 // call exit (it would end the wrapper too); they set $global:LASTEXITCODE
 // to report a failure.
 func (v *VMCtl) Run(ctx context.Context, vm, family, script string) (*RunResult, error) {
+	return v.RunWith(ctx, vm, family, script, RunOptions{})
+}
+
+// RunWith is Run with options: a longer call timeout, or the out of band
+// path. A call the test channel could not carry fails with a ChannelError.
+func (v *VMCtl) RunWith(ctx context.Context, vm, family, script string, opt RunOptions) (*RunResult, error) {
 	defer v.lock(vm)()
+	if env := opt.env(); len(env) > 0 {
+		ctx = context.WithValue(ctx, callEnvKey{}, env)
+	}
 	out, code, err := v.call(ctx, "run", vm, WrapScript(family, script))
 	if err != nil {
 		return nil, err
 	}
 	res := ParseRunOutput(out)
 	if _, ok := res.Values[rcKey]; !ok {
+		if ce := channelError("run", vm, out, code); ce != nil {
+			return res, ce
+		}
 		return res, fmt.Errorf("vmctl.sh run %s exited %d and printed no exit status line: %s", vm, code, tail(out, 800))
 	}
 	return res, nil

@@ -326,8 +326,9 @@ timing; the mechanism is not proven.
 with `uat/access/session.sh phase`: it logs in again (`az-relogin.sh`, the
 same OIDC exchange as `azure/login`) and reopens every tunnel, on its old port when free (a moved kube port is
 rewritten in the kubeconfigs; `enroll.sh` writes its inventory again)
-when the login or the tunnels are 15 minutes old
-(`UAT_SESSION_REFRESH_AFTER_MIN`), then checks the ages that result: it
+when the login or the tunnels are 10 minutes old
+(`UAT_SESSION_REFRESH_AFTER_MIN`, default `UAT_REFRESH_AFTER_MIN`; 15
+before W10), then checks the ages that result: it
 refuses to start a phase if either is still older than 40
 (`UAT_SESSION_MAX_AGE_MIN`), which can only happen when no refresh was
 made (a 41-minute-old login is refreshed first and the phase starts), and
@@ -342,7 +343,11 @@ tunnel's process still runs, and the end of each tunnel's log.
 **Maximum safe phase length.** About 40 minutes for one uninterrupted
 unit of work (a workflow step between two boundaries, one Ansible run, one
 top-level test): the observed failure came 55 to 60 minutes after the
-login, and a unit can start on a login up to 15 minutes old. For scale: in
+login, and a unit can start on a login up to 15 minutes old. **During the
+tests this no longer holds on its own** (W10, "The test channel after Run 2
+#6" below): Run 2 #6's tunnels went stale about 20 minutes after they
+opened, inside one top-level test, so a supervisor now renews them during
+the tests. For scale: in
 Run 2, k0s, both hubs, core's second half and the DMZ check took 29 minutes
 together. A single unit that runs longer and opens tunnel connections late
 is not covered; the per-test times in `events.json` and the step times show
@@ -402,7 +407,9 @@ nothing in the artifacts said why.
   timeout, retrying only what never started, and fails a VM fast after 3
   channel failures in a row (`uat/access/README.md`, "The channel"). A
   reboot waits for the power state and then SSH or WinRM, never a
-  run-command.
+  run-command. (W10 changed the last two: a strike only after a probe and
+  a reopen, a re-probe instead of the 30-minute hold, and a reboot wait
+  that recreates the tunnel; next section.)
 - The tests' budget is what the job has left, less 60 minutes for the
   diagnostics, the report and the destroy (at most 280 minutes); the Tests
   step prints it (`tests budget: ...`), and `run.sh` prints the budget left
@@ -455,6 +462,153 @@ nothing in the artifacts said why.
    brute-force protector's debug lines (`new num failures`, `quick login,
    set min wait seconds`) carry no user, only the failure count and
    timing, so match them to those lines by time.
+
+### The test channel after Run 2 #6 (rc.20): tunnels that go stale inside a test (W10)
+
+**Run 2 #6 (run 40106684046, `v0.1.0-rc.20`, tier `ingredients`, single
+node)**: 193 pass, 114 fail, 60 skip, nothing missing. The local rig passes
+the same code (smoke 10/0, core 68/0/4, ingredients 126/0/111), so the
+failures were the Azure channel, the harness and one Windows ingredient.
+What the job log (from 16:59:43Z; GitHub keeps only its last 5000 lines)
+and the summary show:
+
+- **The tunnels went stale inside one test.** `TestIngredients` ran
+  17:04:22Z to 17:19:32Z as one top-level test; the login and tunnels were
+  last refreshed at about 16:52. The first channel failures were t1-win's
+  (`winrm_exec.py: could not open a WinRM shell on 127.0.0.1:20106 ...
+  Read timed out. (read timeout=30)`), then t1-alma's and t1-ubuntu's
+  (`Connection timed out during banner exchange`), at tunnel ages of about
+  22 to 25 minutes. The next refresh, at 17:21:33, found `azure login age
+  29m, tunnels age 28m`. A stale tunnel keeps accepting on its local port
+  and hangs every new connection. **No tenant 2 VM failed** although its
+  tunnels were just as old: the tenant 1 tunnels had carried far more
+  connections (every case runs on tenant 1; only tenant-2 cases on tenant 2),
+  so the use one `az network bastion tunnel` process has carried is as
+  likely a factor as its age. Both are met by the same remedy below.
+- **The dead mark never recovered.** t1-win, t1-alma and t1-ubuntu were
+  marked dead at 17:18:51 (3 failures in a row) for a fixed 1800 s; about
+  100 cases then failed on the mark in under a second, among them L4
+  (ubuntu, alma) and L5 (ubuntu) **after** the 17:21:33 refresh had reopened
+  every tunnel (`not trying again for 1521s`).
+- **The Windows L1 reboots** both failed after 659.5 s and 661.2 s. The
+  summary shows only `vmctl.sh restart t1-win exited 255: vmctl.sh:
+  restarting t1-win` because a summary line keeps only the first line of a
+  multi-line message (the rest was in `build.log`, which was lost, below).
+  The time is `az vm restart` (about a minute) plus the guest wait's 600 s
+  over the WinRM tunnel opened before the reboot, which never answered,
+  while the Linux reboots were back in 50 to 74 s. Ten minutes later, on
+  tunnels the 16:52 refresh had reopened, both Windows sprouts served
+  ingredient cases. The tunnel, not the VM, was what did not come back.
+- **I.win_firewall.rule_present** failed in test mode on t1-win:
+  `netsh.exe: exit status 1; stdout: No rules match the specified
+  criteria.`, netsh's normal "no such rule". The ingredient took the exit
+  code as a failure (fixed: exit 1 of `show rule` is "absent"). The report
+  said only `job_failed`: the harness read the job record over the channel,
+  t1-win was already marked dead, and the read failed silently.
+- **No `build.log`.** "Collect the report and outputs" removed it:
+  `matches: (^|[^A-Za-z0-9_-])eyJ...` (a JWT). `az-relogin.sh` printed
+  `::add-mask::<OIDC token>`, which GitHub masks in the job log, and
+  `run.sh` copied the session refresh's output into `build.log`, where the
+  token stayed in clear. The scanner did its job; the file was the leak.
+- The farmer logged `failed to connect to NATS bus ... closed before it
+  connected` at ERROR, retrying forever, for tenants the tests had
+  offboarded.
+
+**What the gate does now (W10).**
+
+| Where | What |
+|---|---|
+| `session.sh supervise` | One supervisor per run, started by the Tests step, stopped before the tunnels close. Every `UAT_SUPERVISE_INTERVAL` (60 s): renews the login when `REFRESH_AFTER` (`UAT_REFRESH_AFTER_MIN`, 10 minutes) old; takes the tunnels one at a time, oldest first, and reopens one that is `REFRESH_AFTER` old or fails its protocol probe, **on the same port**, then probes it; never under a running command (it holds every `vmctl.sh` slot of the VM, or for a kube tunnel waits until no connection is open on its port); re-probes every dead VM every `VMCTL_REPROBE_SECONDS` (120) and clears its mark when the tunnel answers. Its log: `diagnostics/channel/supervisor.log` |
+| `vmctl.sh`, before a command | Renews a login or the VM's tunnel past `REFRESH_AFTER` first |
+| `vmctl.sh`, on a channel failure | One `CHANNEL ERROR` line stamped at the moment (epoch, UTC time, VM, kind, port, login age, tunnel age, the probe's verdict, the failure); the channel's state captured into `diagnostics/channel/`; the tunnel probed by its protocol and reopened when it does not answer; a call that certainly never started tried once more; only then a strike |
+| `vmctl.sh`, dead VMs | After 3 strikes a call fails at once with `CHANNEL UNAVAILABLE`; no fixed hold: a call 120 s after the last failure or re-probe re-probes (and reopens) the tunnel and runs when it answers; every full refresh clears every mark |
+| `vmctl.sh restart` | `az vm restart` (a run-command reboot when that fails), then up to `VMCTL_RESTART_WAIT_SECONDS` (600) for the power state, the protocol probe and a command, **recreating the tunnel on every failed probe**; a failure names its reason and the last probe's error |
+| `vmctl.sh`, hardening | A counting semaphore per VM (`VMCTL_SLOTS_LINUX` 4, `VMCTL_SLOTS_WINDOWS` 2); one persistent SSH master per Linux VM (`ControlPersist` 300 s, `ServerAlive` 15 s x 4) and one pooled WinRM session per Windows VM (`winrm_exec.py --pool`, idle 300 s), so a call opens no new connection through the tunnel; setup and revert scripts get a 5-minute call timeout; the harness's backstop per call is 25 minutes |
+| The harness | Checks the login's and the kube tunnels' ages before kubectl (`session.sh ensure kube` when due); a case the channel blocked is **`CHAN`**, apart from `FAIL`; a failed cook's failure line carries its failed steps' errors, read over the channel and, when the channel is down, through `az vm run-command`; the VM's side of a failure goes to `diagnostics/<vm>/` |
+| The report | `CHAN` lines in `summary.txt` (with their count and a pointer to the diagnostics) and as `<error type="channel-unavailable">` in `junit.xml`; they fail the run like `FAIL` |
+| `build.log` | Everything that goes into it is redacted (`uat/scripts/redact.sh`); `az-relogin.sh` prints its `::add-mask::` line only for the workflow's own steps (`AZ_RELOGIN_ADD_MASK=1`), never into a file; `collect-artifacts.sh` redacts the text logs on the way and always writes a `build.log` (one that says why, when the run wrote none) |
+| The sprout | A failed step's error is logged at ERROR in its log, redacted like the job record (`Step <id> of job <jid> failed: ...`) |
+
+**The knobs** (environment of the Tests step; the workflow sets
+`UAT_REFRESH_AFTER_MIN`, `VMCTL_DIAG_DIR` and `AZ_RELOGIN_ADD_MASK`):
+
+| Knob | Default | What |
+|---|---|---|
+| `UAT_REFRESH_AFTER_MIN` | 10 | REFRESH_AFTER: the supervisor's, `vmctl.sh`'s and the harness's age limit for the login and each tunnel; also the phase boundaries' default |
+| `UAT_SUPERVISE_INTERVAL` | 60 s | Between the supervisor's rounds |
+| `UAT_SUPERVISE_WAIT_SECONDS` | 30 s | How long a round waits for a VM's slots or a kube port's connections before leaving that tunnel for the next round |
+| `UAT_SUPERVISE_PROBE` | 1 | 0: the supervisor reopens by age only, no probe each round |
+| `UAT_PROBE_SSH_SECONDS`, `UAT_PROBE_HTTPS_SECONDS` | 5 s, 10 s | The protocol probe: the SSH banner; the WinRM (401 or 405 on `/wsman`) or Kubernetes (`/version`) HTTPS answer |
+| `VMCTL_SLOTS_LINUX`, `VMCTL_SLOTS_WINDOWS` | 4, 2 | Calls at once per VM |
+| `VMCTL_CONNECT_RETRIES` | 1 | Tries again of a call that never started, after the probe and any reopen |
+| `VMCTL_DEAD_AFTER`, `VMCTL_REPROBE_SECONDS` | 3, 120 s | Strikes that mark a VM dead; how often it is re-probed |
+| `VMCTL_RESTART_WAIT_SECONDS` | 600 s | The whole wait after a restart or start-vm |
+| `VMCTL_SSH_PERSIST` | 300 s | An idle SSH master's life |
+| `VMCTL_WINRM_POOL`, `VMCTL_WINRM_POOL_IDLE` | 1, 300 s | The pooled WinRM session per Windows VM (0: one per call), and an idle one's life |
+| `VMCTL_CALL_TIMEOUT` | 120 s (setup and revert scripts 300 s) | One channel call |
+| `IMAS_UAT_VMCTL_TIMEOUT` | 25 m | The harness's backstop on one `vmctl.sh` call |
+| `IMAS_UAT_VM_DIAG_MAX` | 4 | `diagnostics/<vm>/` collections per VM (each a few run-command calls) |
+| `VMCTL_DIAG_DIR` | `<report>/diagnostics` | Where a channel failure's capture goes |
+
+**Reading the next run.**
+
+1. `summary.txt`: `FAIL` lines are the product (or a test); `CHAN` lines
+   did not test the product: the channel to their VM was down. A run with
+   `CHAN` lines and no `FAIL` failed on the gate, not on the release.
+2. `build.log`: search `CHANNEL ERROR` for each failure as it happened,
+   with both ages and the probe's verdict, and the lines after it for the
+   recovery (`reopening it on 127.0.0.1:<port>`, `after the reopen: ok
+   ...`). `marked dead` and `the dead mark is cleared` bracket a dead
+   period. A `CHANNEL ERROR` with `probe=ok` and young ages is not a stale
+   tunnel: read the VM side (4).
+3. `diagnostics/channel/<epoch>-<vm>-<kind>.txt` (the channel at that
+   moment, before recovery): the tunnel's process (a `bastion tunnel` pid
+   missing or a zombie), the listening ports (its port gone), the
+   connections on its port by state (many `ESTAB` or `CLOSE-WAIT` on one
+   tunnel: it carried too much; none: it hangs before the VM), and the end
+   of its own log (an az error there names the cause).
+   `diagnostics/channel/tunnels/<vm>-<kind>.log` is each tunnel's whole log
+   with a line per reopen, `supervisor.log` every round's decisions.
+4. `diagnostics/channel/<epoch>-<vm>-vm-side.txt` (through run-command):
+   sshd's `MaxStartups` and `MaxSessions`, or WinRM's `MaxShellsPerUser`,
+   `MaxConcurrentUsers` and `MaxConnections`, and the connections the VM
+   sees on 22 or 5986: limits reached on the VM rather than in the tunnel.
+5. `diagnostics/<vm>/<epoch>.txt` (through run-command, after a failed
+   cook or a channel failure on that VM): the sprout service, the last 300
+   lines of its log (fewer when they do not fit) and the failed jobs'
+   records (`<joblogdir>/<jid>.jsonl`). The JUnit message and `build.log`
+   carry the failed steps' errors too (`the job's failed steps: step "...":
+   ...`).
+
+**Re-dispatch** (after `v0.1.0-rc.21` is cut and published as in
+section 1; the tests run from the checkout, so the channel fixes need no
+release, but the win_firewall, win_certutil, sprout logging and farmer
+fixes do):
+
+| Input | Value |
+|---|---|
+| `release_tag` | `v0.1.0-rc.21` |
+| `region` | `centralindia` |
+| `keep_hours` | `0` |
+| `tier` | `ingredients` |
+| `upgrade_from_tag` | `v0.1.0-rc.20` (L4 and L5's earlier release) |
+| `scenarios` | empty |
+| `hub_nodes` | `1` |
+| `dispatch_flags` | `true` (L5 runs; an L5 skip is a failed run) |
+| `ingress_cidrs` | empty |
+
+```sh
+gh workflow run uat.yml --ref main -f release_tag=v0.1.0-rc.21 -f region=centralindia \
+  -f keep_hours=0 -f tier=ingredients -f upgrade_from_tag=v0.1.0-rc.20 -f hub_nodes=1 -f dispatch_flags=true
+```
+
+Not verified anywhere but on Azure: that a reopened Bastion tunnel serves
+again (the stubs model it), the WinRM and sshd limits' output, and the
+Windows reboot's wait on a real WinRM listener. If `CHANNEL ERROR` lines
+still appear with tunnels under 10 minutes old and `probe=fail`, the cause
+is the tunnel's use, not its age: lower `UAT_REFRESH_AFTER_MIN` and read the
+per-port connection counts.
+
 
 ## 5. After the runs
 

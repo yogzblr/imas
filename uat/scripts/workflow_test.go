@@ -117,6 +117,20 @@ func TestWorkflowSessionPhases(t *testing.T) {
 		}
 	}
 
+	// W10: the supervisor runs through the tests and the diagnostics, and
+	// stops before the tunnels close; the channel's knobs are set.
+	if !strings.Contains(steps[index(t, steps, "Tests (uat/tests/run.sh)")].Run, "\nuat/access/session.sh supervise start\n") {
+		t.Error("the Tests step must start the session supervisor")
+	}
+	if got := firstLine(steps[index(t, steps, "Close the Bastion tunnels")].Run); got != "uat/access/session.sh supervise stop || true" {
+		t.Errorf("the supervisor must stop before the tunnels close, first line %q", got)
+	}
+	for _, k := range []string{"UAT_REFRESH_AFTER_MIN=", "VMCTL_DIAG_DIR=$RUNNER_TEMP/uat-state/report/diagnostics", "AZ_RELOGIN_ADD_MASK=1"} {
+		if !strings.Contains(prep, k) {
+			t.Errorf("Prepare directories does not set %s", k)
+		}
+	}
+
 	diag := index(t, steps, "Azure login and tunnel ages (on failure)")
 	if s := steps[diag]; !strings.HasPrefix(s.If, "failure()") || !strings.HasPrefix(s.Run, "uat/access/session.sh ages ") {
 		t.Errorf("the failure diagnostic: if %q run %q", s.If, s.Run)

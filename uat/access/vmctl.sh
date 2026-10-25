@@ -14,18 +14,23 @@
 # node_names) or a key of sprouts.
 #
 # The channel. A command runs over the VM's Bastion tunnel when access.json
-# (tunnels.sh) has one for it: SSH (ssh_port, the admin user and sudo) on
-# Linux, WinRM (winrm_port, HTTPS with NTLM, through winrm_exec.py and the
-# runner's pywinrm) on Windows. Only a VM with no tunnel entry falls back to
-# az vm run-command, which takes 30 to 60 s a call and runs one command per VM
-# at a time (UAT Run 2, uat/RUNBOOK.md). The power operations (restart,
-# stop-vm, start-vm) always go through the Azure control plane.
+# (tunnels.sh) has one for it: SSH (ssh_port, the admin user and sudo, over
+# one persistent SSH master per VM) on Linux, WinRM (winrm_port, HTTPS with
+# NTLM, through winrm_exec.py and the runner's pywinrm, one pooled session
+# per VM) on Windows. Only a VM
+# with no tunnel entry, or VMCTL_CHANNEL=runcommand, uses az vm run-command,
+# which takes 30 to 60 s a call and runs one command per VM at a time (UAT
+# Run 2, uat/RUNBOOK.md). The power operations (restart, stop-vm, start-vm)
+# always go through the Azure control plane.
 #
-# restart       az vm restart, then waits until Azure reports the VM running
-#               (up to VMCTL_POWER_WAIT_SECONDS) and then until its guest
-#               answers (up to VMCTL_GUEST_WAIT_SECONDS): a command over the
-#               tunnel, or, with no tunnel, the guest agent reporting Ready
-#               after the restart began. Never a run-command.
+# restart       az vm restart (when it fails: a reboot through run-command),
+#               then waits, up to VMCTL_RESTART_WAIT_SECONDS in all, until
+#               Azure reports the VM running and its guest answers: the
+#               tunnel's protocol probe, then a command over it. Every failed
+#               probe recreates the tunnel (a tunnel opened before the reboot
+#               can stop serving: UAT Run 2's Windows L1). With no tunnel, the
+#               guest agent reporting Ready after the restart began. A
+#               failure names the reason and the last probe's error.
 # stop-sprout   stops the sprout service (systemd unit or Windows service
 # start-sprout  imas-sprout) on a sprout VM; refused for the hubs.
 # stop-vm       az vm stop (powered off, still allocated) on a hub node, then
@@ -44,58 +49,94 @@
 #
 # Every timeout here runs with --foreground, so it stays in vmctl.sh's process
 # group and the harness's group kill reaches it and its child.
-# Every call to one VM holds that VM's lock (flock, in VMCTL_STATE_DIR), so
-# two calls never overlap on a VM, across processes too. Each channel call
-# has its own timeout (VMCTL_CALL_TIMEOUT) and is killed when it runs over.
-# Retried, with backoff: a run-command refused with "(Conflict) Run command
-# extension execution is in progress" (Azure never started it), and an SSH or
-# WinRM connection that failed before the command started. Never retried: a
-# command that may have run. After VMCTL_DEAD_AFTER channel failures in a row
-# (exit 255: no exit code came back) the VM is marked dead, and run,
-# stop-sprout and start-sprout fail at once, naming the last failure, for
-# VMCTL_DEAD_SECONDS; then one call may try again. A success, or a restart or
-# start-vm that comes back, clears the mark.
+#
+# The slots (W10, uat/access/channel.sh). Calls to one VM share
+# VMCTL_SLOTS_LINUX (4) or VMCTL_SLOTS_WINDOWS (2) slots, across processes;
+# restart, stop-vm, start-vm, a run-command call and every tunnel reopen
+# take them all. Each channel call has its own timeout (VMCTL_CALL_TIMEOUT)
+# and is killed when it runs over.
+#
+# Fresh before each command (W10). When the Azure login or the VM's tunnel is
+# REFRESH_AFTER (UAT_REFRESH_AFTER_MIN, 10) minutes old or more, vmctl.sh
+# logs in again (UAT_AZ_RELOGIN) and reopens the tunnel on its port, under
+# the VM's slots, before the command. session.sh's supervisor does the same
+# every minute; this is for a call that comes first.
+#
+# A channel failure (W10). When a call over the tunnel fails with no exit
+# code, vmctl.sh prints one CHANNEL ERROR line (epoch and time, VM, kind,
+# port, both ages, the probe's verdict and the failure), captures the
+# channel's state into $VMCTL_DIAG_DIR/channel/ before touching anything,
+# probes the tunnel by its protocol, and reopens it (under the VM's slots)
+# when the probe fails. A call that certainly never started is then tried
+# once more (VMCTL_CONNECT_RETRIES); one that may have run never is. Only a
+# failure that remains counts as a strike. After VMCTL_DEAD_AFTER strikes in
+# a row the VM is marked dead: a call to it fails at once ("CHANNEL
+# UNAVAILABLE"), except that, VMCTL_REPROBE_SECONDS (120) after the last
+# failure or re-probe, the call re-probes the tunnel first (reopening it
+# when it does not answer) and, when it answers, clears the mark and runs.
+# A success, a restart or start-vm that comes back, a reopen that answers,
+# and every session.sh refresh clear the mark. A forced run-command
+# (VMCTL_CHANNEL=runcommand) ignores the mark and leaves it as it is. A run-command refused with
+# "(Conflict) Run command extension execution is in progress" (Azure never
+# started it) is retried with backoff.
 #
 # Exit status: the command's for run, stop-sprout and start-sprout; 0 for a
 # restart or start-vm that came back and a stop-vm that stopped; 2 on a usage
 # error or an unknown VM; 255 when the command could not be run or gave no
-# exit code (the channel failed, timed out, or the VM is marked dead).
+# exit code (the channel failed, timed out, or the VM is marked dead: the
+# output then has a line with "CHANNEL UNAVAILABLE").
 #
-# All Azure calls of the UAT gate live here and in tunnels.sh.
+# All Azure calls of the UAT gate live here, in channel.sh and in tunnels.sh.
 #
 # Environment:
 #   AZ                    az command (default az)
 #   UAT_AZ_RELOGIN        a command (uat/access/az-relogin.sh in the gate) that
-#                         logs az in again; run once, and the az call repeated,
+#                         logs az in again: before a command when the login is
+#                         REFRESH_AFTER old, and once, the az call repeated,
 #                         when az fails with AADSTS700024 (expired session)
+#   UAT_REFRESH_AFTER_MIN REFRESH_AFTER, in minutes (default 10)
 #   VMCTL_ACCESS          tunnels.sh's access.json (default
 #                         $UAT_SESSION_ACCESS/access.json, else
 #                         <uat.json's directory>/access/access.json); a VM it
 #                         does not list uses run-command
+#   VMCTL_CHANNEL         runcommand: use az vm run-command even where there
+#                         is a tunnel (the harness's way past a dead tunnel
+#                         to the sprout's job log)
 #   VMCTL_SSH_KEY         the SSH private key for the Linux tunnels
 #   VMCTL_SSH_USER        the SSH user (default the VM's admin_user)
+#   VMCTL_SSH_PERSIST     seconds an idle SSH master stays (default 300)
+#   VMCTL_SSH_CONTROL_DIR the SSH masters' sockets (default /tmp/imas-cm-<uid>)
 #   VMCTL_WINRM_PASSWORD_FILE  the WinRM password for the Windows tunnels
 #   VMCTL_WINRM_USER      the WinRM user (default the VM's admin_user)
+#   VMCTL_WINRM_POOL      0: a WinRM session per call instead of one pooled
+#                         session per VM (default 1)
+#   VMCTL_WINRM_POOL_IDLE seconds an idle pooled session stays (default 300)
 #                         A tunnel without its credential falls back to
 #                         run-command, saying so.
-#   VMCTL_STATE_DIR       locks, failure counts and SSH known hosts (default
+#   VMCTL_STATE_DIR       slots, dead marks and SSH known hosts (default
 #                         <access.json's directory>/vmctl, else
 #                         ${TMPDIR:-/tmp}/imas-vmctl-<uid>)
+#   VMCTL_DIAG_DIR        where a channel failure's state goes (channel/);
+#                         unset: nowhere
 #   VMCTL_CALL_TIMEOUT    seconds for one channel call (default 120)
 #   VMCTL_AZ_TIMEOUT      seconds for one az power operation (default 600)
-#   VMCTL_LOCK_WAIT_SECONDS  how long to wait for the VM's lock (default 900)
+#   VMCTL_LOCK_WAIT_SECONDS  how long to wait for the VM's slots (default 900)
+#   VMCTL_SLOTS_LINUX, VMCTL_SLOTS_WINDOWS  slots per VM (default 4 and 2)
 #   VMCTL_CONFLICT_RETRIES   run-command Conflict retries (default 4; 15 s,
 #                         30 s, 60 s, 120 s apart)
-#   VMCTL_CONNECT_RETRIES    SSH or WinRM connection retries (default 2)
-#   VMCTL_DEAD_AFTER      channel failures in a row that mark the VM dead
-#                         (default 3; 0 never marks)
-#   VMCTL_DEAD_SECONDS    how long a dead mark holds (default 1800)
+#   VMCTL_CONNECT_RETRIES    tries again of a call that never started, after
+#                         the probe and any reopen (default 1)
+#   VMCTL_DEAD_AFTER      strikes in a row that mark the VM dead (default 3;
+#                         0 never marks)
+#   VMCTL_REPROBE_SECONDS how often a dead VM's tunnel is re-probed by a call
+#                         to it (default 120)
 #   VMCTL_SPROUT_SERVICE  service name (default imas-sprout, as packaged)
-#   VMCTL_POWER_WAIT_SECONDS  wait for the power state (restart, stop-vm,
-#                         start-vm; default 300)
-#   VMCTL_GUEST_WAIT_SECONDS  wait for the guest after the power state
-#                         (default VMCTL_WAIT_SECONDS, else 600)
-#   VMCTL_PROBE_TIMEOUT   seconds for one guest probe (default 30)
+#   VMCTL_POWER_WAIT_SECONDS  wait for the power state (stop-vm; default 300)
+#   VMCTL_RESTART_WAIT_SECONDS  the whole wait after a restart or start-vm:
+#                         running, the probe and a command (default
+#                         VMCTL_WAIT_SECONDS, else 600)
+#   VMCTL_PROBE_TIMEOUT   seconds for one guest command in that wait
+#                         (default 30)
 #   VMCTL_POLL_SECONDS    the waits' poll interval (default 10)
 #   VMCTL_BACKOFF_SCALE   multiplies every retry backoff (default 1; the
 #                         tests set 0)
@@ -107,16 +148,19 @@ AZ=${AZ:-az}
 service=${VMCTL_SPROUT_SERVICE:-imas-sprout}
 wait_seconds=${VMCTL_WAIT_SECONDS:-600}
 power_wait=${VMCTL_POWER_WAIT_SECONDS:-300}
-guest_wait=${VMCTL_GUEST_WAIT_SECONDS:-$wait_seconds}
+restart_wait=${VMCTL_RESTART_WAIT_SECONDS:-$wait_seconds}
 poll_seconds=${VMCTL_POLL_SECONDS:-10}
 call_timeout=${VMCTL_CALL_TIMEOUT:-120}
 az_timeout=${VMCTL_AZ_TIMEOUT:-600}
 probe_timeout=${VMCTL_PROBE_TIMEOUT:-30}
 lock_wait=${VMCTL_LOCK_WAIT_SECONDS:-900}
 conflict_retries=${VMCTL_CONFLICT_RETRIES:-4}
-connect_retries=${VMCTL_CONNECT_RETRIES:-2}
+connect_retries=${VMCTL_CONNECT_RETRIES:-1}
 dead_after=${VMCTL_DEAD_AFTER:-3}
-dead_seconds=${VMCTL_DEAD_SECONDS:-1800}
+reprobe_seconds=${VMCTL_REPROBE_SECONDS:-120}
+ssh_persist=${VMCTL_SSH_PERSIST:-300}
+winrm_pool=${VMCTL_WINRM_POOL:-1}
+winrm_idle=${VMCTL_WINRM_POOL_IDLE:-300}
 backoff_scale=${VMCTL_BACKOFF_SCALE:-1}
 marker="__IMAS_VMCTL_RC__"
 
@@ -141,8 +185,8 @@ case "$action" in
   *) log "unknown action '$action'"; usage ;;
 esac
 [[ "$service" =~ ^[A-Za-z0-9._@-]+$ ]] || { log "VMCTL_SPROUT_SERVICE has unexpected characters"; exit 2; }
-for n in "$wait_seconds" "$power_wait" "$guest_wait" "$poll_seconds" "$call_timeout" "$az_timeout" "$probe_timeout" \
-  "$lock_wait" "$conflict_retries" "$connect_retries" "$dead_after" "$dead_seconds" "$backoff_scale"; do
+for n in "$wait_seconds" "$power_wait" "$restart_wait" "$poll_seconds" "$call_timeout" "$az_timeout" "$probe_timeout" \
+  "$lock_wait" "$conflict_retries" "$connect_retries" "$dead_after" "$reprobe_seconds" "$ssh_persist" "$winrm_pool" "$winrm_idle" "$backoff_scale"; do
   [[ "$n" =~ ^[0-9]+$ ]] || { log "the VMCTL_* timeouts, waits and counts must be whole numbers (got '$n')"; exit 2; }
 done
 if [ "$call_timeout" -eq 0 ] || [ "$probe_timeout" -eq 0 ] || [ "$az_timeout" -eq 0 ]; then
@@ -179,12 +223,13 @@ if [ -z "$access" ]; then
   fi
 fi
 channel=runcommand
+tunnel_kind=""
 tunnel_host=""
 tunnel_port=""
-if [ -r "$access" ]; then
-  port_key=ssh_port
-  [ "$os" = windows ] && port_key=winrm_port
-  if ! read -r tunnel_host tunnel_port < <(jq -r --arg vm "$vm" --arg k "$port_key" \
+if [ -r "$access" ] && [ "${VMCTL_CHANNEL:-}" != runcommand ]; then
+  tunnel_kind=ssh
+  [ "$os" = windows ] && tunnel_kind=winrm
+  if ! read -r tunnel_host tunnel_port < <(jq -r --arg vm "$vm" --arg k "${tunnel_kind}_port" \
     '.[$vm] // {} | select(.[$k] != null) | "\(.host // "127.0.0.1") \(.[$k])"' "$access" 2>/dev/null); then
     tunnel_host="" tunnel_port=""
   fi
@@ -219,7 +264,7 @@ if [ "$channel" = winrm ] && [ -z "$winrm_user" ]; then
   exit 2
 fi
 
-# State: one lock, one failure count and one known hosts file per VM.
+# State: slots, a dead mark and the SSH known hosts per VM.
 state_dir=${VMCTL_STATE_DIR:-}
 if [ -z "$state_dir" ]; then
   if [ -r "$access" ]; then
@@ -231,52 +276,96 @@ fi
 mkdir -p "$state_dir"
 fails_file=$state_dir/$vm.fails
 
+CH_ACCESS_DIR=$(dirname "$access")
+CH_STATE_DIR=$state_dir
+UAT_UAT_JSON=$uat
+export UAT_UAT_JSON
+# shellcheck source=channel.sh
+. "$here/channel.sh"
+ch_valid_knobs || { log "UAT_REFRESH_AFTER_MIN, UAT_PROBE_*_SECONDS and VMCTL_SLOTS_* must be whole numbers above 0"; exit 2; }
+
+# The slots: every one (exclusive) for the power operations and run-command
+# (Azure runs one run-command per VM at a time), one for a tunnel call.
+slots=$(ch_slots "$os")
+slot_mode=shared
+case $action in restart | stop-vm | start-vm) slot_mode=exclusive ;; esac
+[ "$channel" = runcommand ] && slot_mode=exclusive
 lock_start=$SECONDS
-exec 9>>"$state_dir/$vm.lock"
-if ! flock -w "$lock_wait" 9; then
-  log "another vmctl.sh call held the lock of $vm for ${lock_wait}s; giving up"
+take_slots() {
+  if [ "$slot_mode" = exclusive ]; then
+    ch_slots_exclusive "$vm" "$slots" "$lock_wait"
+  else
+    ch_slot_shared "$vm" "$slots" "$lock_wait"
+  fi
+}
+if ! take_slots; then
+  log "other vmctl.sh calls held the slots of $vm for ${lock_wait}s; giving up"
   log "exit_code=255"
   exit 255
 fi
 if [ $((SECONDS - lock_start)) -ge 5 ]; then
-  log "waited $((SECONDS - lock_start))s for another call on $vm to finish"
+  log "waited $((SECONDS - lock_start))s for other calls on $vm to finish"
 fi
 
-# fail_count, fail_epoch and fail_reason: the VM's consecutive channel
-# failures, when the last was, and what it was.
-read_fails() {
-  fail_count=0 fail_epoch=0 fail_reason=""
-  if [ -f "$fails_file" ]; then
-    { read -r fail_count fail_epoch && IFS= read -r fail_reason; } <"$fails_file" || true
-    [[ "$fail_count" =~ ^[0-9]+$ ]] || fail_count=0
-    [[ "$fail_epoch" =~ ^[0-9]+$ ]] || fail_epoch=0
+# with_all_slots <command...>: runs the command holding every slot of the VM
+# (a tunnel reopen): gives a shared slot back first, and takes it again
+# after. 1 when the slots did not come free.
+with_all_slots() {
+  local rc=0
+  if [ "$slot_mode" = exclusive ]; then
+    "$@" || rc=$?
+    return "$rc"
   fi
-}
-note_ok() { rm -f "$fails_file"; }
-note_fail() {
-  read_fails
-  printf '%s %s\n%s\n' "$((fail_count + 1))" "$(date +%s)" "$1" >"$fails_file.tmp"
-  mv "$fails_file.tmp" "$fails_file"
-  if [ "$dead_after" -gt 0 ] && [ $((fail_count + 1)) -ge "$dead_after" ]; then
-    log "$vm is now marked dead: $((fail_count + 1)) channel failures in a row (last: $1)"
+  ch_slots_release
+  if ! ch_slots_exclusive "$vm" "$slots" "$lock_wait"; then
+    take_slots || true
+    return 1
   fi
-}
-# refuse_if_dead: exits 255 at once when the VM is marked dead.
-refuse_if_dead() {
-  [ "$dead_after" -gt 0 ] || return 0
-  read_fails
-  [ "$fail_count" -ge "$dead_after" ] || return 0
-  local age=$(($(date +%s) - fail_epoch))
-  if [ "$age" -lt "$dead_seconds" ]; then
-    log "$vm is marked dead after $fail_count channel failures in a row (last ${age}s ago: $fail_reason); not trying again for $((dead_seconds - age))s (a restart that comes back, or removing $fails_file, clears it)"
+  "$@" || rc=$?
+  ch_slots_release
+  if ! take_slots; then
+    log "lost the slot of $vm while the tunnel was reopened; giving up"
     log "exit_code=255"
     exit 255
   fi
-  log "$vm was marked dead ${age}s ago ($fail_reason); trying once more"
+  return "$rc"
+}
+
+# fail_count, fail_epoch, probe_epoch and fail_reason: the VM's strikes in a
+# row, when the last was, when the tunnel was last re-probed, and what the
+# last failure was.
+read_fails() {
+  fail_count=0 fail_epoch=0 probe_epoch=0 fail_reason=""
+  if [ -f "$fails_file" ]; then
+    { read -r fail_count fail_epoch probe_epoch && IFS= read -r fail_reason; } <"$fails_file" || true
+    [[ "$fail_count" =~ ^[0-9]+$ ]] || fail_count=0
+    [[ "$fail_epoch" =~ ^[0-9]+$ ]] || fail_epoch=0
+    [[ "${probe_epoch:-}" =~ ^[0-9]+$ ]] || probe_epoch=0
+  fi
+}
+write_fails() { # write_fails <count> <fail epoch> <probe epoch> <reason>
+  printf '%s %s %s\n%s\n' "$1" "$2" "$3" "$4" >"$fails_file.tmp"
+  mv "$fails_file.tmp" "$fails_file"
+}
+note_ok() { ch_clear_mark "$vm"; }
+note_fail() {
+  read_fails
+  write_fails "$((fail_count + 1))" "$(date +%s)" 0 "$1"
+  if [ "$dead_after" -gt 0 ] && [ $((fail_count + 1)) -ge "$dead_after" ]; then
+    log "$vm is now marked dead: $((fail_count + 1)) channel failures in a row (last: $1); a call re-probes it ${reprobe_seconds}s from now"
+  fi
 }
 
 # backoff <seconds>: sleeps seconds times VMCTL_BACKOFF_SCALE.
 backoff() { sleep $(($1 * backoff_scale)); }
+
+# relogin: logs az in again with UAT_AZ_RELOGIN (its stdout, which in the
+# workflow can carry a ::add-mask:: line with the token, is dropped: ours is
+# read into the report).
+relogin() {
+  [ -n "${UAT_AZ_RELOGIN:-}" ] || return 1
+  AZ_RELOGIN_ADD_MASK=0 "$UAT_AZ_RELOGIN" >/dev/null
+}
 
 # az_run <timeout> <az args>: "$AZ" with the args, killed after <timeout>
 # seconds; when it fails with AADSTS700024 and UAT_AZ_RELOGIN is set, logs
@@ -290,7 +379,7 @@ az_run() {
   timeout --foreground -k 10 "$secs" "$AZ" "$@" 2>"$az_err_file" || rc=$?
   if [ "$rc" -ne 0 ] && [ -n "${UAT_AZ_RELOGIN:-}" ] && grep -q AADSTS700024 "$az_err_file"; then
     log "the Azure login expired; logging in again"
-    if "$UAT_AZ_RELOGIN" >&2; then
+    if relogin; then
       rc=0
       timeout --foreground -k 10 "$secs" "$AZ" "$@" 2>"$az_err_file" || rc=$?
     else
@@ -380,19 +469,25 @@ run_runcommand() {
   fi
 }
 
-# An SSH error before the command started: the tunnel or sshd refused.
-ssh_preexec_re='kex_exchange_identification|ssh_exchange_identification|Connection refused|banner exchange|Connection closed by [0-9]|Connection reset by [0-9]'
+# An SSH error before the command started: the tunnel or sshd refused, or
+# the connection (or the session over the master) never opened.
+ssh_preexec_re='kex_exchange_identification|ssh_exchange_identification|Connection refused|banner exchange|Connection closed by [0-9]|Connection reset by [0-9]|Connection timed out$|mux_client_request_session|Control socket connect'
 
 run_ssh() {
-  local script=$1 secs=$2 errf rc=0
+  local script=$1 secs=$2 errf rc=0 control
   errf=$(mktemp)
+  control=$(ch_ssh_control "$vm")
+  mkdir -p "$(dirname "$control")" && chmod 700 "$(dirname "$control")"
   # The script goes on stdin into a file, then runs as root with stdin
   # /dev/null (as through run-command); the marker comes from the login
-  # shell after it.
+  # shell after it. One master per VM (ControlMaster) carries every call
+  # until it has been idle for VMCTL_SSH_PERSIST seconds; ServerAlive ends a
+  # master whose tunnel died within a minute.
   # shellcheck disable=SC2016 # expanded on the VM
-  remote_out=$(printf '%s' "$script" | timeout --foreground -k 5 "$secs" ssh -p "$tunnel_port" -i "$VMCTL_SSH_KEY" \
+  remote_out=$(ch_closefds; printf '%s' "$script" | timeout --foreground -k 5 "$secs" ssh -p "$tunnel_port" -i "$VMCTL_SSH_KEY" \
     -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$state_dir/known_hosts" -o HostKeyAlias="$vm" \
+    -o ControlMaster=auto -o ControlPath="$control" -o ControlPersist="$ssh_persist" \
     -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o LogLevel=ERROR \
     "$ssh_user@$tunnel_host" \
     '__f=$(mktemp) && cat >"$__f" && sudo -n -H bash "$__f" </dev/null; __rc=$?; rm -f "$__f"; echo "'"$marker"'$__rc"' \
@@ -404,18 +499,30 @@ run_ssh() {
     remote_why="ssh to $vm ($tunnel_host:$tunnel_port) timed out after ${secs}s (VMCTL_CALL_TIMEOUT); killed"
     return 1
   fi
-  remote_why="ssh to $vm ($tunnel_host:$tunnel_port) exited $rc with no exit code: $(printf '%s' "$remote_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
+  # The line that says why: ssh's own reason for a connection that never
+  # opened ("... during banner exchange"), else its last line.
+  local why
+  why=$(printf '%s\n' "$remote_err" | grep -E "$ssh_preexec_re" | head -n 1 || true)
+  [ -n "$why" ] || why=$(printf '%s' "$remote_err" | grep -v '^[[:space:]]*$' | tail -n 1 || true)
+  remote_why="ssh to $vm ($tunnel_host:$tunnel_port) exited $rc with no exit code: $why"
   if [ "$rc" -eq 255 ] && printf '%s' "$remote_err" | grep -Eq "$ssh_preexec_re"; then return 2; fi
   return 1
 }
 
 run_winrm() {
   local script=$1 secs=$2 errf b64 rc=0
+  local -a pool=()
   errf=$(mktemp)
   b64=$(printf '%s' "$script" | base64 | tr -d '\n')
-  remote_out=$(ps_wrapper "$b64" | timeout --foreground -k 5 "$secs" python3 "$here/winrm_exec.py" \
+  # One pooled session per VM (winrm_exec.py --pool): no new connection
+  # and no new shell through the tunnel per call.
+  if [ "$winrm_pool" != 0 ]; then
+    pool=(--pool "$(ch_winrm_pool "$vm")" --pool-idle "$winrm_idle" --deadline "$secs")
+    mkdir -p "$(dirname "${pool[1]}")" && chmod 700 "$(dirname "${pool[1]}")"
+  fi
+  remote_out=$(ch_closefds; ps_wrapper "$b64" | timeout --foreground -k 5 "$secs" python3 "$here/winrm_exec.py" \
     --host "$tunnel_host" --port "$tunnel_port" --user "$winrm_user" \
-    --password-file "$VMCTL_WINRM_PASSWORD_FILE" 2>"$errf") || rc=$?
+    --password-file "$VMCTL_WINRM_PASSWORD_FILE" "${pool[@]}" 2>"$errf") || rc=$?
   remote_out=$(printf '%s' "$remote_out" | tr -d '\r')
   remote_err=$(tr -d '\r' <"$errf")
   rm -f "$errf"
@@ -430,21 +537,89 @@ run_winrm() {
   return 1
 }
 
+# run_channel <script> <timeout>: one call over the channel, no retry.
+run_channel() {
+  case $channel in
+    ssh) run_ssh "$1" "$2" ;;
+    winrm) run_winrm "$1" "$2" ;;
+    *) run_runcommand "$1" "$2" ;;
+  esac
+}
+
+# reopen_tunnel: reopens the VM's tunnel on its port (the caller holds every
+# slot) and sets recover_verdict to the probe's verdict on the new one.
+reopen_tunnel() {
+  recover_verdict=$(ch_reopen "$vm" "$tunnel_kind") || true
+  tunnel_port=$(ch_port "$vm" "$tunnel_kind")
+}
+
+# recover_tunnel: under every slot of the VM, probes its tunnel again (a
+# call that held the slots before us may have reopened it already) and,
+# when it does not answer, reopens it. Sets recover_verdict; 0 when the
+# tunnel answers. Never call it in $(...): a subshell that gives back the
+# caller's slot gives it back for the caller too (flock locks belong to the
+# open file, which the subshell shares).
+recover_once() {
+  recover_verdict=$(ch_probe "$tunnel_kind" "$tunnel_port")
+  if [ "${recover_verdict%% *}" != ok ]; then
+    log "$vm: the $tunnel_kind tunnel does not answer ($recover_verdict); reopening it on 127.0.0.1:$tunnel_port"
+    reopen_tunnel
+    log "$vm: after the reopen: $recover_verdict"
+  fi
+}
+recover_tunnel() {
+  recover_verdict="fail could not take the slots of $vm to reopen its tunnel"
+  with_all_slots recover_once || true
+  [ "${recover_verdict%% *}" = ok ]
+}
+
+# fresh_once: ensure_fresh's reopen, under every slot.
+fresh_once() {
+  # Another call may have reopened it while we waited for the slots.
+  ch_due "$(ch_tunnel_age "$vm" "$tunnel_kind")" || return 0
+  reopen_tunnel
+  log "$vm: after the reopen: $recover_verdict"
+}
+
+# ensure_fresh: before a command over a tunnel, a login or a tunnel past
+# REFRESH_AFTER is renewed (W10).
+ensure_fresh() {
+  [ "$channel" != runcommand ] || return 0
+  local la ta
+  la=$(ch_login_age)
+  if ch_due "$la" && [ -n "${UAT_AZ_RELOGIN:-}" ]; then
+    log "$vm: the Azure login is $(ch_fmt_age "$la") old (REFRESH_AFTER ${ch_refresh_after}m); logging in again first"
+    relogin || log "logging in again failed; going on with the old login"
+  fi
+  ta=$(ch_tunnel_age "$vm" "$tunnel_kind")
+  ch_due "$ta" || return 0
+  log "$vm: its $tunnel_kind tunnel is $(ch_fmt_age "$ta") old (REFRESH_AFTER ${ch_refresh_after}m); reopening it first"
+  with_all_slots fresh_once || log "$vm: could not take its slots to reopen the tunnel; going on"
+}
+
 # run_remote <script> [timeout]: runs a script over the VM's channel, with
-# the retries above, and sets remote_out, remote_err and remote_rc.
+# the recovery above, and sets remote_out, remote_err and remote_rc.
 run_remote() {
-  local script=$1 secs=${2:-$call_timeout} attempt=0 rc started=$SECONDS
+  local script=$1 secs=${2:-$call_timeout} attempt=0 rc started=$SECONDS verdict line
   remote_out="" remote_err="" remote_rc=255 remote_why=""
   while :; do
     rc=0
-    case $channel in
-      ssh) run_ssh "$script" "$secs" || rc=$? ;;
-      winrm) run_winrm "$script" "$secs" || rc=$? ;;
-      *) run_runcommand "$script" "$secs" || rc=$? ;;
-    esac
+    run_channel "$script" "$secs" || rc=$?
+    [ "$rc" -ne 0 ] || break
+    if [ "$channel" = runcommand ]; then break; fi
+    # A channel failure: say so with the ages and the probe, keep the
+    # channel's state, then mend the tunnel when it does not answer.
+    verdict=$(ch_probe "$tunnel_kind" "$tunnel_port")
+    line=$(ch_error_line "$vm" "$tunnel_kind" "$tunnel_port" "$verdict" "$remote_why")
+    log "$line"
+    ch_capture "$vm" "$tunnel_kind" "$tunnel_port" "$line"
+    if [ "${verdict%% *}" != ok ]; then
+      recover_tunnel || true
+      verdict=$recover_verdict
+    fi
     if [ "$rc" -eq 2 ] && [ "$attempt" -lt "$connect_retries" ]; then
       attempt=$((attempt + 1))
-      log "$vm: $remote_why; retry $attempt of $connect_retries"
+      log "$vm: the call never started; retry $attempt of $connect_retries (tunnel: $verdict)"
       backoff $((2 * attempt))
       continue
     fi
@@ -461,18 +636,64 @@ run_remote() {
   return 1
 }
 
+# unavailable <text>: the channel-unavailable failure, which the harness
+# reports apart from a product failure.
+unavailable() {
+  log "CHANNEL UNAVAILABLE: $*"
+  log "exit_code=255"
+  exit 255
+}
+
+# refuse_if_dead: a dead VM fails at once, unless its re-probe is due: then
+# its tunnel is probed (and reopened when it does not answer), and a tunnel
+# that answers clears the mark.
+refuse_if_dead() {
+  [ "$dead_after" -gt 0 ] || return 0
+  read_fails
+  [ "$fail_count" -ge "$dead_after" ] || return 0
+  local now last since verdict
+  now=$(date +%s)
+  last=$fail_epoch
+  [ "$probe_epoch" -gt "$last" ] && last=$probe_epoch
+  since=$((now - last))
+  if [ "$since" -ge "$reprobe_seconds" ]; then
+    if [ "$channel" = runcommand ]; then
+      log "$vm was marked dead ${since}s ago ($fail_reason); trying once more"
+      return 0
+    fi
+    log "$vm is marked dead ($fail_count channel failures in a row, the last $((now - fail_epoch))s ago: $fail_reason); re-probing its $tunnel_kind tunnel"
+    if recover_tunnel; then
+      log "$vm: its tunnel answers again ($recover_verdict); the dead mark is cleared"
+      note_ok
+      return 0
+    fi
+    verdict=$recover_verdict
+    read_fails
+    write_fails "$fail_count" "$fail_epoch" "$(date +%s)" "$fail_reason"
+    since=0
+  else
+    verdict="not re-probed (last ${since}s ago)"
+  fi
+  log "$(ch_error_line "$vm" "${tunnel_kind:-runcommand}" "$tunnel_port" "$verdict" "marked dead")"
+  unavailable "$vm is marked dead after $fail_count channel failures in a row (last $((now - fail_epoch))s ago: $fail_reason); next re-probe in $((reprobe_seconds - since))s (any session.sh refresh, a restart that comes back, or removing $fails_file, clears it)"
+}
+
 # exec_remote <script>: run_remote, print the streams and exit with the code.
 exec_remote() {
-  refuse_if_dead
+  # A forced run-command (VMCTL_CHANNEL=runcommand: the harness's way past
+  # a dead tunnel) does not use the tunnel, so the tunnel's dead mark
+  # neither stops it nor learns from it.
+  local forced=0
+  [ "${VMCTL_CHANNEL:-}" = runcommand ] && forced=1
+  [ "$forced" = 1 ] || refuse_if_dead
+  ensure_fresh
   if ! run_remote "$1"; then
     [ -z "$remote_out" ] || printf '%s\n' "$remote_out"
     [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
-    note_fail "$remote_why"
-    log "could not run the command on $vm over $channel, or no exit code came back: $remote_why"
-    log "exit_code=255"
-    exit 255
+    [ "$forced" = 1 ] || note_fail "$remote_why"
+    unavailable "could not run the command on $vm over $channel, or no exit code came back: $remote_why"
   fi
-  note_ok
+  [ "$forced" = 1 ] || note_ok
   [ -z "$remote_out" ] || printf '%s\n' "$remote_out"
   [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
   log "exit_code=$remote_rc"
@@ -485,18 +706,11 @@ power_state() {
     --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" -o tsv 2>/dev/null || true
 }
 
-# guest_back <since>: does the guest answer? Over the tunnel a trivial
-# command; without one, the guest agent reporting Ready at or after <since>
-# (seconds since the epoch), so a status from before the restart does not
-# count. Sets guest_why when not.
-guest_back() {
+# agent_ready <since>: without a tunnel, the guest agent reporting Ready at
+# or after <since> (seconds since the epoch), so a status from before the
+# restart does not count. Sets guest_why when not.
+agent_ready() {
   local since=$1 st ready at at_s
-  if [ "$channel" != runcommand ]; then
-    local probe="exit 0"
-    if run_remote "$probe" "$probe_timeout" && [ "$remote_rc" = 0 ]; then return 0; fi
-    guest_why=$remote_why
-    return 1
-  fi
   st=$(az_run "$probe_timeout" vm get-instance-view --ids "$vm_id" \
     --query "instanceView.vmAgent.statuses[0].[displayStatus, time]" -o tsv 2>/dev/null || true)
   read -r ready at <<<"$(printf '%s' "$st" | tr '\n' ' ')" || true
@@ -506,37 +720,76 @@ guest_back() {
   return 1
 }
 
-# wait_back <since>: waits until Azure reports the VM running (up to
-# VMCTL_POWER_WAIT_SECONDS), then until the guest answers (up to
-# VMCTL_GUEST_WAIT_SECONDS); exits 0 when it does, 255 if not.
+# guest_back: over the tunnel, its protocol probe and then a trivial
+# command; a failed probe recreates the tunnel for the next poll. Sets
+# guest_why when not back.
+guest_back() {
+  local verdict rc=0
+  verdict=$(ch_probe "$tunnel_kind" "$tunnel_port")
+  if [ "${verdict%% *}" != ok ]; then
+    guest_why="probe: ${verdict#* }"
+    log "$vm: $guest_why; recreating its tunnel"
+    reopen_tunnel
+    log "$vm: after the reopen: $recover_verdict"
+    return 1
+  fi
+  remote_out="" remote_err="" remote_rc=255
+  run_channel "exit 0" "$probe_timeout" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$remote_rc" = 0 ]; then return 0; fi
+  guest_why="the probe answers, but a command does not: $remote_why"
+  return 1
+}
+
+# wait_back <since>: waits, up to VMCTL_RESTART_WAIT_SECONDS in all, until
+# Azure reports the VM running and its guest answers; exits 0 when it does,
+# 255 if not.
 wait_back() {
-  local since=$1 deadline power guest_why=""
-  deadline=$((SECONDS + power_wait))
+  local since=$1 deadline power="" guest_why="" running=0
+  deadline=$((SECONDS + restart_wait))
   while :; do
-    power=$(power_state)
-    [ "$power" = "PowerState/running" ] && break
+    if [ "$running" = 0 ]; then
+      power=$(power_state)
+      if [ "$power" = "PowerState/running" ]; then
+        running=1
+        log "$vm is running; waiting for its guest (over $channel)"
+      else
+        guest_why="Azure reports power state '${power:-unknown}'"
+      fi
+    fi
+    if [ "$running" = 1 ]; then
+      if [ "$channel" = runcommand ]; then
+        agent_ready "$since" && break
+      else
+        guest_back && break
+      fi
+    fi
     if [ "$SECONDS" -ge "$deadline" ]; then
-      note_fail "not running ${power_wait}s after the power operation"
-      log "$vm not running after ${power_wait}s (power state '${power:-unknown}')"
+      note_fail "not back ${restart_wait}s after the power operation: $guest_why"
+      if [ "$running" = 0 ]; then
+        log "$vm not running after ${restart_wait}s (power state '${power:-unknown}')"
+      else
+        log "$vm not back after ${restart_wait}s: running, but its guest does not answer over $channel (last: $guest_why)"
+      fi
       exit 255
     fi
     sleep "$poll_seconds"
   done
-  log "$vm is running; waiting for its guest (over $channel)"
-  deadline=$((SECONDS + guest_wait))
-  while :; do
-    if guest_back "$since"; then
-      note_ok
-      log "$vm is back"
-      exit 0
-    fi
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      note_fail "guest not back ${guest_wait}s after the VM ran: $guest_why"
-      log "$vm not back after ${guest_wait}s: running, but its guest does not answer over $channel (last: $guest_why)"
-      exit 255
-    fi
-    sleep "$poll_seconds"
-  done
+  note_ok
+  log "$vm is back"
+  exit 0
+}
+
+# reboot_by_runcommand: the restart's fallback when az vm restart fails: a
+# reboot a few seconds out, so run-command returns before it. The first
+# line marks it (the tests' az never runs it).
+reboot_by_runcommand() {
+  if [ "$os" = windows ]; then
+    az_run "$az_timeout" vm run-command invoke --ids "$vm_id" --command-id RunPowerShellScript -o none \
+      --scripts '# imas-uat-reboot' 'shutdown.exe /r /t 10 /f /d p:4:1 /c "imas UAT restart"' >/dev/null
+  else
+    az_run "$az_timeout" vm run-command invoke --ids "$vm_id" --command-id RunShellScript -o none \
+      --scripts '# imas-uat-reboot' 'systemd-run --on-active=10 systemctl reboot || (sleep 10; reboot) >/dev/null 2>&1 &' >/dev/null
+  fi
 }
 
 case "$action" in
@@ -561,10 +814,17 @@ case "$action" in
     ;;
   restart)
     log "restarting $vm"
+    # A session held across the reboot would only fail later.
+    ch_ssh_master_close "$vm"
+    ch_winrm_pool_close "$vm"
     since=$(date +%s)
     if ! az_run "$az_timeout" vm restart --ids "$vm_id" -o none; then
-      log "az vm restart failed for $vm"
-      exit 255
+      log "az vm restart failed for $vm; rebooting it through run-command instead"
+      since=$(date +%s)
+      if ! reboot_by_runcommand; then
+        log "the run-command reboot failed for $vm too"
+        exit 255
+      fi
     fi
     wait_back "$since"
     ;;
@@ -575,6 +835,8 @@ case "$action" in
     fi
     verb=${action%-vm}
     log "${verb/stop/stopp}ing $vm"
+    ch_ssh_master_close "$vm"
+    ch_winrm_pool_close "$vm"
     since=$(date +%s)
     if ! az_run "$az_timeout" vm "$verb" --ids "$vm_id" -o none; then
       log "az vm $verb failed for $vm"

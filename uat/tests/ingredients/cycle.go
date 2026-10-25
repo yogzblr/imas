@@ -29,6 +29,56 @@ type Driver interface {
 	Run(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error)
 }
 
+// OutOfBand is a Driver that can also reach a host past its test channel
+// (az vm run-command): a failed cook's job log is read that way when the
+// channel is down, so its step errors still reach the report (W10).
+type OutOfBand interface {
+	RunOutOfBand(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error)
+}
+
+// LongRunner is a Driver that can give a host script a longer call
+// timeout than its default: the setup and revert scripts (W10).
+type LongRunner interface {
+	RunLong(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error)
+}
+
+// Diagnoser is a Driver that collects a VM's side of a failure (the
+// sprout's log, the failed jobs' records) and says where it put it, or "".
+type Diagnoser interface {
+	Diagnose(ctx context.Context, sp harness.Sprout, jids ...string) string
+}
+
+// host runs a host script on the cycle's sprout (a setup or revert
+// script, long, with the longer timeout when the driver has one), and has
+// the VM's side collected when the test channel failed under it.
+func (cy *Cycle) host(ctx context.Context, r *recorder, script string, long bool) (*harness.RunResult, error) {
+	var res *harness.RunResult
+	var err error
+	if l, ok := cy.Driver.(LongRunner); ok && long {
+		res, err = l.RunLong(ctx, cy.Sprout, script)
+	} else {
+		res, err = cy.Driver.Run(ctx, cy.Sprout, script)
+	}
+	if harness.IsChannelUnavailable(err) {
+		cy.diagnose(ctx, r)
+	}
+	return res, err
+}
+
+// diagnose collects the VM's side of a failure, when the driver can, and
+// logs where it went: once per cycle, by the first failure (a failed
+// cook's, with its job id, or the channel's).
+func (cy *Cycle) diagnose(ctx context.Context, r *recorder, jids ...string) {
+	d, ok := cy.Driver.(Diagnoser)
+	if !ok || cy.diagnosed {
+		return
+	}
+	cy.diagnosed = true
+	if where := d.Diagnose(ctx, cy.Sprout, jids...); where != "" {
+		r.Logf("the VM's side of this failure (sprout log, job records, through az vm run-command): %s", where)
+	}
+}
+
 // Line is one message of an outcome, already formatted the way
 // harness.Scenario formats them ("[<id> os=.. tenant=.. vm=.. step=..]
 // FAIL: ..."), so uat/tests/uatreport reads it the same way.
@@ -141,6 +191,9 @@ type Cycle struct {
 	// (the same sproutid): after the real cook, tenant 2's check must
 	// still fail there.
 	CrossCheck *harness.Sprout
+
+	// diagnosed: the VM's side of a failure was collected (diagnose).
+	diagnosed bool
 }
 
 // NewVars returns the placeholder values for a case on a sprout.
@@ -215,14 +268,18 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 			} else {
 				it, err := d.Cook(cctx, sp, revertRecipe, false, timeout)
 				if err != nil || it.Status != harness.ItemSucceeded {
-					r.Errorf("the revert cook: %s; the host may keep the change", itemOrErr(it, err))
+					why := ""
+					if err == nil {
+						why = failedSteps(cy.explain(cctx, r, it.JID))
+					}
+					r.Errorf("the revert cook: %s%s; the host may keep the change", itemOrErr(it, err), why)
 				}
 				d.Delete(cctx, sp.Tenant, revertRecipe)
 			}
 		}
 		if part.Revert != "" {
 			r.Step("revert (host script)")
-			res, err := d.Run(cctx, sp, ScriptCall(sp, part.Revert, "REVERT"))
+			res, err := cy.host(cctx, r, ScriptCall(sp, part.Revert, "REVERT"), true)
 			if err != nil {
 				r.Errorf("the revert script: %v; the host may keep the change", err)
 			} else if rc, out := scriptResult(res, "REVERT"); rc != 0 {
@@ -234,7 +291,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 
 	if part.Setup != "" {
 		r.Step("setup")
-		res, err := d.Run(ctx, sp, ScriptCall(sp, part.Setup, "SETUP"))
+		res, err := cy.host(ctx, r, ScriptCall(sp, part.Setup, "SETUP"), true)
 		if err != nil {
 			r.Fatalf("running the setup script: %v", err)
 			return r.out
@@ -269,8 +326,12 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 		// id finds the cook in the hub's and the sprout's logs.
 		r.Logf("%s: job %s, item %s", what, it.JID, it.Status)
 		if it.Status != harness.ItemSucceeded {
-			report("%s: want the item succeeded, got %s", what, it)
-			cy.explain(ctx, r, it.JID, steps)
+			// The failed steps' errors go into the failure itself, so
+			// the summary and the JUnit message carry them, not only
+			// "job_failed" (W10; UAT Run 2's I.win_firewall).
+			why := failedSteps(cy.explain(ctx, r, it.JID))
+			report("%s: want the item succeeded, got %s%s", what, it, why)
+			cy.diagnose(ctx, r, it.JID)
 			return it.JID, false
 		}
 		return it.JID, true
@@ -282,7 +343,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	if okTest1 {
 		jids = []string{jidTest1}
 	}
-	res, err := d.Run(ctx, sp, HostCall(sp, part.Check, jids))
+	res, err := cy.host(ctx, r, HostCall(sp, part.Check, jids), false)
 	if err != nil {
 		r.Fatalf("reading the host: %v", err)
 		return r.out
@@ -329,7 +390,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	if okTest2 {
 		logJIDs = append(logJIDs, jidTest2)
 	}
-	res, err = d.Run(ctx, sp, HostCall(sp, part.Check, logJIDs))
+	res, err = cy.host(ctx, r, HostCall(sp, part.Check, logJIDs), false)
 	if err != nil {
 		r.Fatalf("reading the host: %v", err)
 		return r.out
@@ -350,25 +411,55 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	return r.out
 }
 
-// explain reads the job log of a failed cook and records its failed steps.
-func (cy *Cycle) explain(ctx context.Context, r *recorder, jid string, steps []string) {
+// explain reads the job log of a failed cook, records its steps that did
+// not complete, and returns the failed ones with their errors ("" when
+// none, or the log could not be read). The log is read over the test
+// channel, and through az vm run-command when the channel fails.
+func (cy *Cycle) explain(ctx context.Context, r *recorder, jid string) string {
 	if jid == "" {
-		return
+		return ""
 	}
-	res, err := cy.Driver.Run(ctx, cy.Sprout, HostCall(cy.Sprout, "", []string{jid}))
+	call := HostCall(cy.Sprout, "", []string{jid})
+	res, err := cy.Driver.Run(ctx, cy.Sprout, call)
 	if err != nil {
-		return
+		r.Logf("reading job %s's log over the test channel: %v", jid, err)
+		ob, ok := cy.Driver.(OutOfBand)
+		if !ok {
+			return ""
+		}
+		if res, err = ob.RunOutOfBand(ctx, cy.Sprout, call); err != nil {
+			r.Logf("reading job %s's log through az vm run-command: %v", jid, err)
+			return ""
+		}
+		r.Logf("read job %s's log through az vm run-command instead", jid)
 	}
 	log, err := ParseJobLog(res, 0)
 	if err != nil {
 		r.Logf("job log %s: %v", jid, err)
-		return
+		return ""
 	}
+	var failed []string
 	for _, s := range log.Steps {
 		if s.CompletionStatus != StatusCompleted {
 			r.Logf("job %s step %q: %s: %s", jid, s.ID, statusName(s.CompletionStatus), s.errText())
 		}
+		if s.CompletionStatus == StatusFailed {
+			e := s.errText()
+			if e == "" {
+				e = "(no error recorded)"
+			}
+			failed = append(failed, fmt.Sprintf("step %q: %s", s.ID, clip(oneLine(e), 600)))
+		}
 	}
+	return strings.Join(failed, "; ")
+}
+
+// failedSteps is explain's result as the tail of a failure message.
+func failedSteps(why string) string {
+	if why == "" {
+		return ""
+	}
+	return "; the job's failed steps: " + why
 }
 
 // checkLog asserts on one cook's job log: every step of the recipe is

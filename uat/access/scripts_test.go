@@ -33,7 +33,7 @@ func need(t *testing.T, tools ...string) {
 
 func run(t *testing.T, name string, args ...string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir(t)
@@ -51,6 +51,6 @@ func TestAccessScripts(t *testing.T) {
 
 func TestShellcheck(t *testing.T) {
 	need(t, "shellcheck")
-	run(t, "shellcheck", "tunnels.sh", "vmctl.sh", "az-relogin.sh", "session.sh", "tests/access_test.sh", "tests/stubs/az", "tests/stubs/systemctl",
+	run(t, "shellcheck", "-x", "tunnels.sh", "vmctl.sh", "channel.sh", "az-relogin.sh", "session.sh", "tests/access_test.sh", "tests/stubs/az", "tests/stubs/systemctl",
 		"tests/stubs/ssh-keyscan", "tests/stubs/curl", "tests/stubs/ssh", "tests/stubs/sudo")
 }

@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# session.sh: keep the UAT run's Azure login and Bastion tunnels fresh at the
-# run's phase boundaries, and say how old they are (W6).
+# session.sh: keep the UAT run's Azure login and Bastion tunnels fresh, at the
+# run's phase boundaries (W6) and, during the tests, every minute (W10), and
+# say how old they are.
 #
 #   session.sh mark-login
 #   session.sh phase <name> [--force] [--probe] [--no-tunnels]
 #   session.sh refresh [--no-tunnels]
 #   session.sh probe <name>
 #   session.sh ages <name>
+#   session.sh supervise start|stop|run|tick
+#   session.sh ensure kube
 #
 # Why. The runner's az session comes from a GitHub OIDC login, which cannot
 # renew itself once its access token expires (about an hour). UAT Run 2 hung
@@ -41,6 +44,37 @@
 # ages        prints both ages, each tunnel's process state and the last
 #             lines of each tunnel's log, and never fails: the workflow's
 #             failure-time diagnostic.
+# supervise   the refresh that does not wait for a boundary (W10). UAT Run 2
+#             #6's TestIngredients ran 15 minutes as one top-level test; its
+#             tunnels, refreshed only between tests, stopped opening
+#             connections at about 20 minutes old. `supervise start` starts
+#             one supervisor per run in the background (its pid in
+#             <access dir>/supervisor.pid, its log in
+#             <access dir>/logs/supervisor.log; a second start is a no-op
+#             while it runs); `stop` stops it; `run` is the loop itself; `tick`
+#             is one round of it. Each UAT_SUPERVISE_INTERVAL seconds (60) a
+#             round:
+#               1. logs az in again when the login is REFRESH_AFTER
+#                  (UAT_REFRESH_AFTER_MIN, 10) minutes old;
+#               2. takes the tunnels one at a time, oldest first, and reopens
+#                  one that is REFRESH_AFTER old or whose protocol probe fails
+#                  (channel.sh), on the SAME port, then probes it. It never
+#                  reopens a tunnel under a running command: an SSH or WinRM
+#                  tunnel only holding every vmctl.sh slot of its VM, a kube
+#                  tunnel only once no connection is open on its port
+#                  (kubectl, a port-forward), waiting up to
+#                  UAT_SUPERVISE_WAIT_SECONDS (30) and otherwise leaving it
+#                  for the next round;
+#               3. re-probes every VM vmctl.sh marked dead, at most every
+#                  VMCTL_REPROBE_SECONDS (120), reopening its tunnel when the
+#                  probe fails, and clears the mark when the tunnel answers.
+#             A round skips while <access dir>/supervisor.pause exists (a
+#             full refresh is running).
+# ensure kube logs in again and reopens each kube tunnel, as a round does,
+#             when it is REFRESH_AFTER old; the Go harness runs it before a
+#             kubectl call that would otherwise go out on an old one.
+#
+# Every refresh that reopens the tunnels clears vmctl.sh's dead marks.
 #
 # The login time is the modification time of az-relogin.sh's stamp,
 # $AZ_RELOGIN_DIR/az-relogin.stamp, so a relogin by vmctl.sh counts too; the
@@ -52,7 +86,17 @@
 #   UAT_SESSION_KUBECONFIGS  colon-separated kubeconfigs to keep on the
 #                            tunnels' ports (missing files are skipped)
 #   UAT_SESSION_REFRESH_AFTER_MIN  refresh at a phase start from this age
-#                            (default 15)
+#                            (default UAT_REFRESH_AFTER_MIN, else 10)
+#   UAT_REFRESH_AFTER_MIN    REFRESH_AFTER: the supervisor's and vmctl.sh's
+#                            age limit (default 10)
+#   UAT_SUPERVISE_INTERVAL   seconds between the supervisor's rounds
+#                            (default 60)
+#   UAT_SUPERVISE_WAIT_SECONDS  how long a round waits for a VM's slots or a
+#                            kube port's connections (default 30)
+#   UAT_SUPERVISE_PROBE      0: a round reopens by age only, no probes
+#                            (default 1)
+#   VMCTL_STATE_DIR          vmctl.sh's slots and dead marks (default
+#                            <access dir>/vmctl, as vmctl.sh)
 #   UAT_SESSION_MAX_AGE_MIN  the age guard (default 40)
 #   AZ_RELOGIN_DIR           where the login stamp lives (default
 #                            $RUNNER_TEMP or /tmp, as az-relogin.sh)
@@ -69,10 +113,14 @@ relogin=${UAT_SESSION_RELOGIN:-$here/az-relogin.sh}
 tunnels=${UAT_SESSION_TUNNELS:-$here/tunnels.sh}
 login_dir=${AZ_RELOGIN_DIR:-${RUNNER_TEMP:-/tmp}}
 stamp="$login_dir/az-relogin.stamp"
-refresh_after=${UAT_SESSION_REFRESH_AFTER_MIN:-15}
+refresh_after=${UAT_SESSION_REFRESH_AFTER_MIN:-${UAT_REFRESH_AFTER_MIN:-10}}
 max_age=${UAT_SESSION_MAX_AGE_MIN:-40}
 SSH_KEYSCAN=${SSH_KEYSCAN:-ssh-keyscan}
 CURL=${CURL:-curl}
+UAT_UAT_JSON=${UAT_SESSION_UAT:-}
+export UAT_UAT_JSON AZ_RELOGIN_DIR=$login_dir
+# shellcheck source=channel.sh
+. "$here/channel.sh"
 
 log() { echo "$prog: $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -83,10 +131,16 @@ usage: $prog mark-login
        $prog refresh [--no-tunnels]
        $prog probe <name>
        $prog ages <name>
+       $prog supervise start|stop|run|tick
+       $prog ensure kube
 EOF
   exit 2
 }
 
+ch_valid_knobs || { log "UAT_REFRESH_AFTER_MIN, UAT_PROBE_*_SECONDS and VMCTL_SLOTS_* must be whole numbers above 0"; exit 2; }
+for n in "${UAT_SUPERVISE_INTERVAL:-60}" "${UAT_SUPERVISE_WAIT_SECONDS:-30}" "${VMCTL_REPROBE_SECONDS:-120}" "${VMCTL_DEAD_AFTER:-3}"; do
+  [[ "$n" =~ ^[0-9]+$ ]] || { log "UAT_SUPERVISE_INTERVAL, UAT_SUPERVISE_WAIT_SECONDS, VMCTL_REPROBE_SECONDS and VMCTL_DEAD_AFTER must be whole numbers"; exit 2; }
+done
 for v in refresh_after max_age; do
   [[ "${!v}" =~ ^[1-9][0-9]*$ ]] || { log "UAT_SESSION_REFRESH_AFTER_MIN and UAT_SESSION_MAX_AGE_MIN must be whole minutes"; exit 2; }
 done
@@ -173,10 +227,21 @@ cmd_refresh() {
     mkdir -p "$dir"
     old="$dir/access.json.before-refresh"
     if [ -s "$dir/access.json" ]; then cp "$dir/access.json" "$old"; else echo '{}' >"$old"; fi
-    "$tunnels" reopen "$UAT_SESSION_UAT" "$dir" ||
+    # The supervisor waits, and the SSH masters and pooled WinRM sessions go
+    # with their tunnels.
+    touch "$dir/supervisor.pause"
+    local m
+    for m in $(jq -r 'to_entries[] | select(.value.ssh_port) | .key' "$old" 2>/dev/null); do ch_ssh_master_close "$m"; done
+    for m in $(jq -r 'to_entries[] | select(.value.winrm_port) | .key' "$old" 2>/dev/null); do ch_winrm_pool_close "$m"; done
+    if ! "$tunnels" reopen "$UAT_SESSION_UAT" "$dir"; then
+      rm -f "$dir/supervisor.pause"
       die "refresh: reopening the tunnels failed (they are closed now); $(ages_line)"
+    fi
+    rm -f "$dir/supervisor.pause"
     remap_kubeconfigs "$old" "$dir/access.json"
     rm -f "$old"
+    # Fresh tunnels: no VM is dead because of the old ones (W10).
+    CH_STATE_DIR=$(state_dir) ch_clear_marks
   fi
   log "refresh: done; $(ages_line)"
 }
@@ -307,6 +372,207 @@ cmd_ages() {
   return 0
 }
 
+# --- the supervisor (W10)
+
+state_dir() { echo "${VMCTL_STATE_DIR:-$(access_dir)/vmctl}"; }
+slog() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $prog: $*" >&2; }
+supervise_wait=${UAT_SUPERVISE_WAIT_SECONDS:-30}
+supervise_interval=${UAT_SUPERVISE_INTERVAL:-60}
+reprobe_seconds=${VMCTL_REPROBE_SECONDS:-120}
+dead_after=${VMCTL_DEAD_AFTER:-3}
+
+# relogin_if_due: a login REFRESH_AFTER old is renewed. Its stdout (a
+# ::add-mask:: line) is dropped: this output is kept in files.
+relogin_if_due() {
+  local la
+  la=$(ch_login_age)
+  if [ -n "$la" ] && ! ch_due "$la"; then return 0; fi
+  slog "azure login age $(ch_fmt_age "$la") (REFRESH_AFTER ${ch_refresh_after}m); logging in again"
+  if AZ_RELOGIN_MIN_AGE=0 AZ_RELOGIN_ADD_MASK=0 AZ_RELOGIN_DIR="$login_dir" "$relogin" >/dev/null; then
+    mkdir -p "$login_dir"
+    touch "$stamp"
+  else
+    slog "logging in again failed; the next round tries again"
+  fi
+}
+
+# reopen_held <vm> <kind>: reopens a tunnel once nothing uses it: every
+# slot of an SSH or WinRM tunnel's VM, or no connection on a kube tunnel's
+# port. 1 when it had to be left for later.
+reopen_held() {
+  local vm=$1 kind=$2 port verdict i
+  port=$(ch_port "$vm" "$kind")
+  if [ "$kind" = kube ]; then
+    for ((i = 0; i < supervise_wait; i++)); do
+      [ "$(ch_port_connections "$port")" -eq 0 ] && break
+      sleep 1
+    done
+    if [ "$(ch_port_connections "$port")" -ne 0 ]; then
+      slog "$vm kube tunnel (127.0.0.1:$port): $(ch_port_connections "$port") connections still open after ${supervise_wait}s; leaving it for the next round"
+      return 1
+    fi
+    verdict=$(ch_reopen "$vm" "$kind") || true
+  else
+    local os
+    os=$(ch_vm_field "$vm" os)
+    if ! ch_slots_exclusive "$vm" "$(ch_slots "$os")" "$supervise_wait"; then
+      slog "$vm $kind tunnel (127.0.0.1:$port): its VM's slots stayed busy for ${supervise_wait}s; leaving it for the next round"
+      return 1
+    fi
+    verdict=$(ch_reopen "$vm" "$kind") || true
+    ch_slots_release
+  fi
+  slog "$vm $kind tunnel reopened on 127.0.0.1:$port: $verdict"
+  return 0
+}
+
+# supervise_tunnels: one round over the tunnels, one at a time, oldest
+# first.
+supervise_tunnels() {
+  local dir vm kind port age reason verdict
+  dir=$(access_dir)
+  [ -s "$dir/tunnels.pids" ] || return 0
+  while IFS=$'\t' read -r age vm kind port; do
+    [ -n "${vm:-}" ] || continue
+    reason=""
+    if ch_due "$age"; then
+      reason="age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m)"
+    elif [ "${UAT_SUPERVISE_PROBE:-1}" = 1 ]; then
+      verdict=$(ch_probe "$kind" "$port")
+      [ "${verdict%% *}" = ok ] || reason="probe: ${verdict#* }"
+    fi
+    [ -n "$reason" ] || continue
+    slog "$vm $kind tunnel (127.0.0.1:$port): $reason; reopening it"
+    reopen_held "$vm" "$kind" || true
+  done < <(while IFS=$'\t' read -r _pid vm kind port; do
+      [ -n "${vm:-}" ] || continue
+      printf '%s\t%s\t%s\t%s\n' "$(ch_tunnel_age "$vm" "$kind")" "$vm" "$kind" "$port"
+    done <"$dir/tunnels.pids" | sort -t$'\t' -k1,1nr)
+}
+
+# supervise_dead: re-probes the VMs vmctl.sh marked dead.
+supervise_dead() {
+  local f vm count fepoch pepoch reason last now kind port verdict os
+  [ "$dead_after" -gt 0 ] || return 0
+  for f in "$CH_STATE_DIR"/*.fails; do
+    [ -f "$f" ] || continue
+    vm=$(basename "$f" .fails)
+    { read -r count fepoch pepoch && IFS= read -r reason; } <"$f" || continue
+    if ! [[ "${count:-}" =~ ^[0-9]+$ ]] || [ "$count" -lt "$dead_after" ]; then continue; fi
+    [[ "${pepoch:-}" =~ ^[0-9]+$ ]] || pepoch=0
+    now=$(date +%s)
+    last=$fepoch
+    [ "$pepoch" -gt "$last" ] && last=$pepoch
+    [ $((now - last)) -ge "$reprobe_seconds" ] || continue
+    kind=$(ch_tunnels_of "$vm" | grep -v '^kube$' | head -n 1)
+    [ -n "$kind" ] || continue
+    port=$(ch_port "$vm" "$kind")
+    os=$(ch_vm_field "$vm" os)
+    if ! ch_slots_exclusive "$vm" "$(ch_slots "$os")" "$supervise_wait"; then
+      slog "$vm is marked dead; its slots are busy, re-probing it next round"
+      continue
+    fi
+    verdict=$(ch_probe "$kind" "$port")
+    if [ "${verdict%% *}" != ok ]; then
+      slog "$vm is marked dead and its $kind tunnel does not answer ($verdict); reopening it"
+      verdict=$(ch_reopen "$vm" "$kind") || true
+    fi
+    if [ "${verdict%% *}" = ok ]; then
+      ch_clear_mark "$vm"
+      slog "$vm was marked dead ($count channel failures; last: $reason); its $kind tunnel answers ($verdict): un-marked"
+    elif [ -f "$f" ]; then
+      printf '%s %s %s\n%s\n' "$count" "$fepoch" "$(date +%s)" "$reason" >"$f.tmp" && mv "$f.tmp" "$f"
+      slog "$vm stays marked dead: $verdict"
+    fi
+    ch_slots_release
+  done
+}
+
+supervise_tick() {
+  local dir
+  dir=$(access_dir)
+  CH_ACCESS_DIR=$dir
+  CH_STATE_DIR=$(state_dir)
+  mkdir -p "$CH_STATE_DIR"
+  if [ -e "$dir/supervisor.pause" ]; then
+    slog "a full refresh is running; skipping this round"
+    return 0
+  fi
+  # One round at a time, also against ensure.
+  exec 7>>"$dir/session.lock"
+  flock -w "$supervise_wait" 7 || { slog "another round still runs; skipping"; return 0; }
+  relogin_if_due
+  if [ -s "$dir/access.json" ]; then
+    supervise_tunnels
+    supervise_dead
+  fi
+  flock -u 7
+}
+
+cmd_supervise() {
+  [ $# -eq 1 ] || usage
+  [ -n "${UAT_SESSION_UAT:-}" ] || { log "UAT_SESSION_UAT is not set"; exit 2; }
+  local dir pidf pid
+  dir=$(access_dir)
+  mkdir -p "$dir/logs"
+  pidf=$dir/supervisor.pid
+  case $1 in
+    start)
+      if [ -s "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+        log "supervise: already running (pid $(cat "$pidf"))"
+        return 0
+      fi
+      if command -v setsid >/dev/null 2>&1; then
+        setsid "$0" supervise run </dev/null >>"$dir/logs/supervisor.log" 2>&1 &
+      else
+        nohup "$0" supervise run </dev/null >>"$dir/logs/supervisor.log" 2>&1 &
+      fi
+      echo "$!" >"$pidf"
+      log "supervise: started (pid $!, every ${supervise_interval}s, REFRESH_AFTER ${ch_refresh_after}m; log $dir/logs/supervisor.log)"
+      ;;
+    stop)
+      if [ -s "$pidf" ]; then
+        pid=$(cat "$pidf")
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+          log "supervise: stopped (pid $pid)"
+        fi
+        rm -f "$pidf"
+      fi
+      ;;
+    run)
+      slog "supervise: every ${supervise_interval}s, REFRESH_AFTER ${ch_refresh_after}m"
+      trap 'slog "supervise: stopping"; exit 0' TERM INT
+      while :; do
+        supervise_tick || slog "supervise: a round failed; going on"
+        sleep "$supervise_interval" &
+        wait $! || true
+      done
+      ;;
+    tick) supervise_tick ;;
+    *) usage ;;
+  esac
+}
+
+# ensure kube: the kube tunnels and the login, fresh, for a kubectl call.
+cmd_ensure() {
+  if [ $# -ne 1 ] || [ "$1" != kube ]; then usage; fi
+  local dir vm age
+  dir=$(access_dir)
+  CH_ACCESS_DIR=$dir
+  CH_STATE_DIR=$(state_dir)
+  exec 7>>"$dir/session.lock"
+  flock -w 120 7 || { log "ensure: the session is busy; going on as it is"; return 0; }
+  relogin_if_due
+  [ -s "$dir/access.json" ] || return 0
+  for vm in $(jq -r 'to_entries[] | select(.value.kube_port) | .key' "$dir/access.json"); do
+    age=$(ch_tunnel_age "$vm" kube)
+    ch_due "$age" || continue
+    slog "$vm kube tunnel: age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m); reopening it"
+    reopen_held "$vm" kube || true
+  done
+}
+
 [ $# -ge 1 ] || usage
 action=$1
 shift
@@ -316,6 +582,8 @@ case $action in
   refresh) cmd_refresh "$@" ;;
   probe) cmd_probe "$@" ;;
   ages) cmd_ages "$@" || true ;;
+  supervise) cmd_supervise "$@" ;;
+  ensure) cmd_ensure "$@" ;;
   -h | --help | help) usage ;;
   *) log "unknown command '$action'"; usage ;;
 esac

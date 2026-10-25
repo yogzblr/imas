@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -49,6 +50,11 @@ func (k *Kube) Run(ctx context.Context, stdin []byte, args ...string) ([]byte, e
 	if k.Exec != nil {
 		stdout, stderr, err = k.Exec(ctx, args, stdin)
 	} else {
+		// The kube tunnel and the login, renewed first when past
+		// REFRESH_AFTER (W10).
+		if ferr := sessionFreshness().Ensure(ctx); ferr != nil {
+			fmt.Fprintf(os.Stderr, "uat harness: %s: %v; running kubectl anyway\n", k.Hub, ferr)
+		}
 		bin := k.Kubectl
 		if bin == "" {
 			bin = "kubectl"

@@ -61,8 +61,16 @@ func ctxFor(t *testing.T, d time.Duration) context.Context {
 }
 
 // harnessDriver is the Driver of a real run: saasapi for recipes and
-// cooks, vmctl.sh for the host.
-type harnessDriver struct{ f *harness.Fleet }
+// cooks, vmctl.sh for the host, and (W10) the VM's side of a failure
+// through diagnostics.sh vm.
+type harnessDriver struct {
+	f    *harness.Fleet
+	diag *harness.VMDiag
+}
+
+// longCallTimeout is vmctl.sh's call timeout for a setup or revert script,
+// which may install or remove a package (its default is 120 s).
+const longCallTimeout = 5 * time.Minute
 
 func (d harnessDriver) Upload(ctx context.Context, tenant int, name, content string) error {
 	tok, err := d.f.Admin(ctx, tenant)
@@ -104,5 +112,24 @@ func (d harnessDriver) Cook(ctx context.Context, sp harness.Sprout, recipe strin
 }
 
 func (d harnessDriver) Run(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
-	return d.f.VM.Run(ctx, sp.VM, sp.Family(), script)
+	return d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, harness.RunOptions{})
+}
+
+// RunLong is Run with a longer call timeout (LongRunner).
+func (d harnessDriver) RunLong(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
+	return d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, harness.RunOptions{CallTimeout: longCallTimeout})
+}
+
+// RunOutOfBand is Run through az vm run-command (OutOfBand).
+func (d harnessDriver) RunOutOfBand(ctx context.Context, sp harness.Sprout, script string) (*harness.RunResult, error) {
+	return d.f.VM.RunWith(ctx, sp.VM, sp.Family(), script, harness.RunOptions{OutOfBand: true, CallTimeout: longCallTimeout})
+}
+
+// Diagnose collects the VM's side of a failure (Diagnoser).
+func (d harnessDriver) Diagnose(ctx context.Context, sp harness.Sprout, jids ...string) string {
+	where, err := d.diag.Collect(ctx, sp.VM, jids...)
+	if err != nil {
+		return where + " (incomplete: " + err.Error() + ")"
+	}
+	return where
 }

@@ -8,6 +8,9 @@
 #   ssh_hang               sleep instead of running (a stuck channel)
 #   ssh_no_marker          drop the exit code marker line
 #   ssh.pid                written with this stub's pid (for the kill test)
+#   stale.<port>           the tunnel on the port after -p hangs: fail as
+#                          ssh does when no banner comes
+# "-O exit" (closing an SSH master) only logs.
 set -u
 log_line() {
   if command -v flock >/dev/null 2>&1; then
@@ -21,6 +24,18 @@ for a in "$@"; do
   line+=" $(printf '%q' "$a")"
 done
 log_line "$line"
+port=22
+prev=""
+for a in "$@"; do
+  [ "$prev" = -p ] && port=$a
+  if [ "$prev" = -O ]; then exit 0; fi
+  prev=$a
+done
+if [ -f "$STUB_STATE/stale.$port" ]; then
+  echo "Connection timed out during banner exchange" >&2
+  echo "Connection to 127.0.0.1 port $port timed out" >&2
+  exit 255
+fi
 f=$STUB_STATE/ssh_preexec_fail
 if [ -f "$f" ]; then
   n=$(cat "$f")

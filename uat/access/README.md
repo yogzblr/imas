@@ -23,9 +23,10 @@ the hosted runner.
 ## tunnels.sh
 
 ```sh
-uat/access/tunnels.sh open   <uat.json> <state-dir>
-uat/access/tunnels.sh reopen <uat.json> <state-dir>
-uat/access/tunnels.sh close  <state-dir>
+uat/access/tunnels.sh open       <uat.json> <state-dir>
+uat/access/tunnels.sh reopen     <uat.json> <state-dir>
+uat/access/tunnels.sh reopen-one <uat.json> <state-dir> <vm> <kind>
+uat/access/tunnels.sh close      <state-dir>
 ```
 
 `open` starts one `az network bastion tunnel` in the background per VM and
@@ -94,7 +95,21 @@ to start while tunnels from an earlier `open` of the same directory still run.
 Exit 2 is a usage error.
 
 `open` also writes `<state-dir>/opened_at`, the time the tunnels were ready
-(seconds since the epoch): the tunnels' age `session.sh` reports.
+(seconds since the epoch): the tunnels' age `session.sh` reports; and
+`<state-dir>/opened/<vm>-<kind>`, the same per tunnel (W10).
+
+`reopen-one` (W10) closes one tunnel (`<kind>` is `ssh`, `winrm` or
+`kube`) and opens it again on **the same local port**, waits until it is
+ready as `open` does, and updates `tunnels.pids`, `access.json`, its
+`opened/` stamp and `opened_at` (then the oldest tunnel's). It never moves
+the port: if the port is still taken after the old process stopped, it
+fails and the caller tries again later. The tunnel's log keeps its earlier
+lines, with a `--- tunnels.sh reopen-one at ...` line between. It is what
+`session.sh`'s supervisor and `vmctl.sh`'s recovery use, one tunnel at a
+time, each holding the VM's slots. `open`, `reopen`, `reopen-one` and
+`close` hold `<state-dir>/tunnels.lock`, so two never rewrite the state at
+once, and a tunnel inherits no file descriptor but its log (a lock must not
+live on in it).
 
 `reopen` (W6) closes the tunnels of `<state-dir>` and opens them again,
 each on the local port it had when that port is free, so `access.json` and
@@ -107,7 +122,7 @@ point: see [session.sh](#sessionsh). Without `tunnels.pids` it is `open`.
 `close` stops every tunnel in `tunnels.pids` (TERM to the tunnel's process
 group, so both the `az` wrapper and its Python child stop; KILL after 10 s;
 a process that has exited but is not yet reaped counts as stopped),
-then removes `tunnels.pids`, `access.json` and `opened_at`. It only signals a pid that is
+then removes `tunnels.pids`, `access.json`, `opened_at` and `opened/`. It only signals a pid that is
 still alive and still an `az ... bastion tunnel` process, so a pid reused by
 something else is left alone. It is safe to repeat and exits 0 when there is
 nothing to close.
@@ -141,6 +156,8 @@ uat/access/session.sh phase <name> [--force] [--probe] [--no-tunnels]
 uat/access/session.sh refresh [--no-tunnels]
 uat/access/session.sh probe <name>
 uat/access/session.sh ages <name>
+uat/access/session.sh supervise start|stop|run|tick
+uat/access/session.sh ensure kube
 ```
 
 **Why (W6).** The workflow's az session is a GitHub OIDC login. It cannot
@@ -154,22 +171,36 @@ so every message names both ages, to confirm or refute it on the next run.
 | Command | What it does |
 |---|---|
 | `mark-login` | Records that az has just logged in (after the `azure/login` action, which cannot) |
-| `phase <name>` | Refreshes when `--force` is given or the login or the tunnels are `UAT_SESSION_REFRESH_AFTER_MIN` (15) minutes old or more (or unknown); then the **age guard**: exits 1 with `<name>: refusing to start: azure login age Xm, tunnels age Ym; the limit is 40m` when either is older than `UAT_SESSION_MAX_AGE_MIN` (40); then logs `<name>: azure login age Xm, tunnels age Ym`. `--probe` then probes. `--no-tunnels`: the login only (no access directory needed) |
+| `phase <name>` | Refreshes when `--force` is given or the login or the tunnels are `UAT_SESSION_REFRESH_AFTER_MIN` (default `UAT_REFRESH_AFTER_MIN`, 10) minutes old or more (or unknown); then the **age guard**: exits 1 with `<name>: refusing to start: azure login age Xm, tunnels age Ym; the limit is 40m` when either is older than `UAT_SESSION_MAX_AGE_MIN` (40); then logs `<name>: azure login age Xm, tunnels age Ym`. `--probe` then probes. `--no-tunnels`: the login only (no access directory needed) |
 | `refresh` | Logs az in again (`az-relogin.sh`, with no minimum age), **then** closes and reopens the tunnels (`tunnels.sh reopen`), then rewrites every kubeconfig in `UAT_SESSION_KUBECONFIGS` whose `server: https://127.0.0.1:<port>` is a kube port that changed. A failed login leaves the tunnels as they were; a failed reopen leaves them closed. Both exit 1 naming the ages |
 | `probe <name>` | Every tunnel in `access.json`, at once: SSH by `ssh-keyscan -T 15` (a host key line is alive), WinRM by `curl -sk -m 20 https://127.0.0.1:<port>/wsman` (HTTP 401 or 405 is alive), the Kubernetes API by `/version` (any HTTP answer is alive). Each failure is logged as `<name>: probe FAILED: <vm> <kind> tunnel (127.0.0.1:<port>) is stale or dead: <why>; tunnel age Ym, azure login age Xm, tunnels age Ym`, and the command exits 1 |
 | `ages <name>` | Both ages, each tunnel's process (running or exited) and the last 5 lines of its log. Never fails: the workflow's failure-time diagnostic |
+| `supervise start`, `stop` | One background supervisor per run (W10; pid in `<access dir>/supervisor.pid`, log `<access dir>/logs/supervisor.log`, every line stamped with the UTC time). A second `start` is a no-op while it runs. The workflow starts it at the top of the Tests step and stops it before the tunnels close |
+| `supervise tick` (and `run`, the loop of ticks every `UAT_SUPERVISE_INTERVAL`, 60 s) | One round: (1) the login, renewed when `REFRESH_AFTER` old; (2) the tunnels **one at a time, oldest first**: a tunnel `REFRESH_AFTER` old, or whose protocol probe fails, is reopened on **the same port** (`tunnels.sh reopen-one`) and probed again. An SSH or WinRM tunnel only while holding every `vmctl.sh` slot of its VM, a kube tunnel only once no connection is open on its port (kubectl, a port-forward), waiting up to `UAT_SUPERVISE_WAIT_SECONDS` (30) and otherwise leaving it for the next round: never under a running command; (3) every VM `vmctl.sh` marked dead, at most every `VMCTL_REPROBE_SECONDS` (120): its tunnel probed, reopened when it does not answer, and the mark cleared when it answers. A round skips while a full `refresh` runs (`supervisor.pause`) |
+| `ensure kube` | The login and every kube tunnel, renewed as a round does when `REFRESH_AFTER` old: the Go harness runs it before a kubectl call that would go out on an old one |
 
-Never refresh while something uses a tunnel: the workflow refreshes only at
-phase starts, `uat/enroll/enroll.sh` between its Ansible runs and
-`uat/tests/run.sh` between top-level tests (both through `UAT_SESSION_HOOK`).
+**REFRESH_AFTER** is `UAT_REFRESH_AFTER_MIN` (10 minutes, W10): the
+supervisor's, `vmctl.sh`'s and the harness's limit. UAT Run 2 #6 (rc.20)
+showed the tunnels going stale about 20 minutes after they opened, in the
+middle of one 15-minute top-level test, so refreshing only at boundaries is
+kept as the backstop, not the mechanism.
+
+A full `refresh` (all tunnels at once) is made only at phase starts,
+`uat/enroll/enroll.sh` between its Ansible runs and `uat/tests/run.sh`
+between top-level tests (both through `UAT_SESSION_HOOK`), never while
+something uses a tunnel; it also clears every dead mark of `vmctl.sh`.
 
 The login's time is the modification time of `az-relogin.sh`'s stamp,
 `$AZ_RELOGIN_DIR/az-relogin.stamp`, so a relogin by `vmctl.sh` during the
-tests counts too; the tunnels' time is `<access dir>/opened_at`.
+tests counts too; the tunnels' time is `<access dir>/opened_at` (the oldest
+tunnel's) and each tunnel's own is `<access dir>/opened/<vm>-<kind>`.
 
 Environment: `UAT_SESSION_UAT` (the `uat.json`), `UAT_SESSION_ACCESS`
 (`tunnels.sh`'s state directory), `UAT_SESSION_KUBECONFIGS` (colon
 separated), `UAT_SESSION_REFRESH_AFTER_MIN`, `UAT_SESSION_MAX_AGE_MIN`,
+`UAT_REFRESH_AFTER_MIN`, `UAT_SUPERVISE_INTERVAL`,
+`UAT_SUPERVISE_WAIT_SECONDS`, `UAT_SUPERVISE_PROBE` (0: by age only),
+`VMCTL_STATE_DIR`, `VMCTL_REPROBE_SECONDS`, `VMCTL_DEAD_AFTER`,
 `AZ_RELOGIN_DIR`, and for the tests `UAT_SESSION_RELOGIN`,
 `UAT_SESSION_TUNNELS`, `SSH_KEYSCAN` and `CURL`. The login needs what
 `az-relogin.sh` needs: a job with `id-token: write` (each call fetches a new
@@ -217,41 +248,108 @@ first use into `<state>/known_hosts` under the VM's name
 key. Every successful call logs `<vm>: ran over <channel> (127.0.0.1:<port>)
 in Ns`: the measured per-call time.
 
-**One call per VM at a time.** Every action takes the VM's lock (`flock` on
-`<state>/<vm>.lock`) for its whole length, across processes too, so two
-calls never overlap on a VM; calls to different VMs run in parallel. A
-call that waits more than 5 s says so; one that cannot get the lock within
-`VMCTL_LOCK_WAIT_SECONDS` (900) exits 255.
+**Slots per VM (W10).** Calls to one VM share a counting semaphore,
+`VMCTL_SLOTS_LINUX` (4) or `VMCTL_SLOTS_WINDOWS` (2) slots (`flock` on
+`<state>/<vm>.slot.<i>`), across processes too, well inside sshd's
+`MaxStartups` (10) and `MaxSessions` (10) and WinRM's `MaxShellsPerUser`
+(30). `restart`, `stop-vm`, `start-vm`, a run-command call (Azure runs one
+at a time per VM) and every tunnel reopen take **all** of them, so nothing
+else runs on the VM meanwhile. A call that waits more than 5 s says so; one
+that cannot get its slots within `VMCTL_LOCK_WAIT_SECONDS` (900) exits 255.
+Nothing long-lived started here (an SSH master, a tunnel, a background
+capture) keeps a slot's file open: `channel.sh`'s `ch_closefds`.
+
+**One SSH master per Linux VM.** SSH calls share a persistent master
+(`ControlMaster=auto`, `ControlPath=/tmp/imas-cm-<uid>/<vm>`,
+`ControlPersist` `VMCTL_SSH_PERSIST` 300 s, `ServerAliveInterval` 15 and
+`ServerAliveCountMax` 4), so a call opens no new connection through the
+tunnel; a tunnel reopen closes the master first.
+
+**One pooled WinRM session per Windows VM.** `winrm_exec.py --pool`: the
+first call starts a server process holding the NTLM session and one shell,
+on a Unix socket in the same private directory
+(`/tmp/imas-cm-<uid>/winrm-<vm>.sock`); later calls hand it their script
+and get the output back, so no call opens a new connection or shell through
+the tunnel. It runs one script at a time, exits after
+`VMCTL_WINRM_POOL_IDLE` (300 s) without a call, exits on any failure (the
+next call starts a fresh one), and a watchdog ends it when a script outlives
+its call's timeout, so a hung command never blocks the next one. A tunnel
+reopen closes it first. `VMCTL_WINRM_POOL=0` goes back to a session per
+call.
+
+**Fresh before each command.** When the login (`UAT_AZ_RELOGIN` set) or the
+VM's tunnel is `REFRESH_AFTER` (`UAT_REFRESH_AFTER_MIN`, 10 minutes) old,
+`vmctl.sh` renews it first, under the VM's slots (a call that waited for
+them checks the age again).
 
 **Timeouts.** Each channel call has its own timeout, `VMCTL_CALL_TIMEOUT`
 (120 s), and is killed (TERM, then KILL 5 s later) when it runs over; each
 `az` power operation has `VMCTL_AZ_TIMEOUT` (600 s). The harness's own
-per-call limit (`IMAS_UAT_VMCTL_TIMEOUT`, 15 minutes) kills `vmctl.sh`'s
+per-call limit (`IMAS_UAT_VMCTL_TIMEOUT`, 25 minutes: a restart's own bounds are 20) kills `vmctl.sh`'s
 whole process group, so no `az`, `ssh` or `python3` child survives it.
 
-**Retries, only where nothing ran.** A run-command refused with Conflict is
-retried `VMCTL_CONFLICT_RETRIES` (4) times, 15, 30, 60 and 120 s apart. An
-SSH connection that failed before the command started (refused, closed or
-reset before the banner, `kex_exchange_identification`) or a WinRM shell that
-could not be opened is retried `VMCTL_CONNECT_RETRIES` (2) times. A call
-that may have run (it timed out, or gave no exit code) is never repeated.
+**A channel failure: probe, mend, then retry (W10).** When a call over the
+tunnel comes back with no exit code, `vmctl.sh`, at that moment:
 
-**Dead VMs fail fast.** A call that gives no exit code (exit 255: the
-channel failed, timed out or returned nothing) counts as a channel failure
-of the VM; a success resets the count. After `VMCTL_DEAD_AFTER` (3) in a row
-the VM is marked dead (`<vm> is now marked dead: 3 channel failures in a row
-(last: ...)`), and `run`, `stop-sprout` and `start-sprout` on it exit 255 at
-once for `VMCTL_DEAD_SECONDS` (1800), naming the last failure, instead of
-each spending its timeout. After that one call may try again (and a failure
-marks it dead again). A `restart` or `start-vm` is always tried and, when the
-VM comes back, clears the mark. The state is in `VMCTL_STATE_DIR` (default
-`<access.json's directory>/vmctl`, else `${TMPDIR:-/tmp}/imas-vmctl-<uid>`).
+1. prints one line, `vmctl.sh: CHANNEL ERROR at <UTC time> (epoch <n>):
+   vm=<vm> kind=<ssh|winrm> port=<port> login_age=<XmYYs>
+   tunnel_age=<XmYYs> probe=<ok|fail ...>: <the failure>` (stamped here:
+   the Go tests print a subtest's output only when it ends);
+2. captures the channel's state, before touching it, into
+   `$VMCTL_DIAG_DIR/channel/<epoch>-<vm>-<kind>.txt` (`channel.sh`'s
+   `ch_capture`, below);
+3. probes the tunnel by its protocol (`channel.sh`: the SSH banner within
+   `UAT_PROBE_SSH_SECONDS` 5, an HTTPS answer 401 or 405 on `/wsman` within
+   `UAT_PROBE_HTTPS_SECONDS` 10) and, when the probe fails, reopens the
+   tunnel on its port under every slot of the VM and probes it again;
+4. tries the call once more (`VMCTL_CONNECT_RETRIES`, 1) **only if it
+   certainly never started** (SSH refused, closed, reset or timed out
+   before or during the banner, the master's session never opened,
+   `kex_exchange_identification`; a WinRM shell that never opened). A call
+   that may have run (it timed out, or gave no exit code) is never
+   repeated, but its tunnel is still mended for the next one.
+
+A run-command refused with Conflict is retried `VMCTL_CONFLICT_RETRIES` (4)
+times, 15, 30, 60 and 120 s apart.
+
+**The dead mark: a strike only after the recovery, and a re-probe.** A
+failure that remains after the above is a strike; a success clears them.
+After `VMCTL_DEAD_AFTER` (3) strikes in a row the VM is marked dead
+(`<state>/<vm>.fails`: count, last failure and last re-probe, and the
+failure), and a call to it fails at once with `vmctl.sh: CHANNEL
+UNAVAILABLE: <vm> is marked dead after ... next re-probe in Ns` (the harness
+reports such a case as channel unavailable, not as a product failure).
+There is no fixed hold: a call made `VMCTL_REPROBE_SECONDS` (120) after the
+last failure or re-probe re-probes the tunnel (reopening it when the probe
+fails) and, when it answers, clears the mark and runs; `session.sh`'s
+supervisor does the same every round, and every full refresh, a reopen that
+answers, and a `restart` or `start-vm` that comes back clear it. The state
+is in `VMCTL_STATE_DIR` (default `<access.json's directory>/vmctl`, else
+`${TMPDIR:-/tmp}/imas-vmctl-<uid>`).
+
+**What a capture holds** (`diagnostics/channel/<epoch>-<vm>-<kind>.txt`,
+redacted): the CHANNEL ERROR line; `tunnels.pids` and every `bastion
+tunnel` process (pid, process group, elapsed time, state); the listening
+TCP ports; per tunnel port, its connections by state (`ss`); the end of the
+tunnel's own log (its az process's stderr). Then, at most once per VM per
+`UAT_VM_LIMITS_EVERY_SECONDS` (600) and in the background, through `az vm
+run-command` and never the tunnel, `<epoch>-<vm>-vm-side.txt`: on Linux
+`sshd -T`'s `MaxStartups`, `MaxSessions`, `MaxAuthTries`, `LoginGraceTime`
+and `ClientAlive*`, the connections on port 22 and the end of sshd's
+journal; on Windows `winrm get winrm/config/winrs` (`MaxShellsPerUser`,
+`MaxConcurrentUsers`, `MaxMemoryPerShellMB`), `winrm/config/service`
+(`MaxConnections`), the WinRM service, the connections on 5986 and the last
+WinRM operational events.
+
+`VMCTL_CHANNEL=runcommand` sends a call through `az vm run-command` even
+where there is a tunnel: the harness's way past a dead tunnel to a failed
+cook's job record, and `diagnostics.sh vm`'s.
 
 ### Actions
 
 | Action | What it does | Exit status |
 |---|---|---|
-| `restart` | `az vm restart`, then waits until the power state is running (up to `VMCTL_POWER_WAIT_SECONDS`, 300) and then until the guest answers (up to `VMCTL_GUEST_WAIT_SECONDS`, default `VMCTL_WAIT_SECONDS`, else 600), polling every `VMCTL_POLL_SECONDS` (10). The guest answers when a trivial command succeeds over the tunnel (SSH or WinRM, `VMCTL_PROBE_TIMEOUT` 30 s each) or, with no tunnel, when the guest agent reports `Ready` with a time after the restart began. **Never a run-command**: in Run 2 both Windows restarts timed out with the VM running because the run-command probe never answered | 0 when back, 255 otherwise (naming the power state or the last probe error) |
+| `restart` | `az vm restart` (when that fails, a reboot through `az vm run-command` a few seconds out), then waits, up to `VMCTL_RESTART_WAIT_SECONDS` (default `VMCTL_WAIT_SECONDS`, else 600) in all and polling every `VMCTL_POLL_SECONDS` (10), until the power state is running and the guest answers: the tunnel's protocol probe and then a trivial command over it (`VMCTL_PROBE_TIMEOUT` 30 s). **Every failed probe recreates the tunnel on its port** (W10: UAT Run 2 #6's Windows restarts waited out the 600 s on a tunnel that no longer served, and passed minutes later on a reopened one). With no tunnel, the guest agent reporting `Ready` with a time after the restart began. It never depends on the channel it restarts | 0 when back, 255 otherwise (naming the reason and the last probe's error) |
 | `stop-vm` | `az vm stop` (powered off, still allocated, so it starts again quickly) on a hub node, then waits until the power state is stopped, up to `VMCTL_POWER_WAIT_SECONDS`: the `ha` tier's node stop (`uat/tests`, HA2). Hub nodes only; a sprout is refused | 0 when stopped, 255 otherwise |
 | `start-vm` | `az vm start` on a hub node, then waits as `restart` does. Hub nodes only. The workflow also runs it on every HA hub node after the tests, so a node stop that failed half way leaves no VM stopped | 0 when back, 255 otherwise |
 | `stop-sprout`, `start-sprout` | `systemctl stop` or `start imas-sprout` on Linux, `Stop-Service`/`Start-Service imas-sprout` on Windows (`VMCTL_SPROUT_SERVICE` overrides the name), over the channel above. Sprouts only; a hub is refused | the command's |
@@ -269,10 +367,14 @@ the command could not be run or returned no exit code.
 Environment: `VMCTL_ACCESS` (default `$UAT_SESSION_ACCESS/access.json`,
 else `<uat.json's directory>/access/access.json`), `VMCTL_SSH_KEY`,
 `VMCTL_SSH_USER` and `VMCTL_WINRM_USER` (default the VM's `admin_user`),
-`VMCTL_WINRM_PASSWORD_FILE`, `VMCTL_STATE_DIR`, the timeouts, retries and
-waits above, `VMCTL_BACKOFF_SCALE` (1; the tests set 0), `AZ` and
+`VMCTL_WINRM_PASSWORD_FILE`, `VMCTL_STATE_DIR`, `VMCTL_DIAG_DIR`,
+`VMCTL_CHANNEL`, `VMCTL_SLOTS_LINUX`, `VMCTL_SLOTS_WINDOWS`,
+`VMCTL_SSH_PERSIST`, `VMCTL_SSH_CONTROL_DIR`, `VMCTL_WINRM_POOL`,
+`VMCTL_WINRM_POOL_IDLE`, `UAT_REFRESH_AFTER_MIN`,
+`UAT_PROBE_SSH_SECONDS`, `UAT_PROBE_HTTPS_SECONDS`, the timeouts, retries
+and waits above, `VMCTL_BACKOFF_SCALE` (1; the tests set 0), `AZ` and
 `UAT_AZ_RELOGIN` (an expired az login is renewed once and the call
-repeated). The UAT workflow sets `VMCTL_SSH_KEY` and
+repeated; a login `REFRESH_AFTER` old is renewed before a command). The UAT workflow sets `VMCTL_SSH_KEY` and
 `VMCTL_WINRM_PASSWORD_FILE` to the run's own credentials (never uploaded).
 
 ## Tests

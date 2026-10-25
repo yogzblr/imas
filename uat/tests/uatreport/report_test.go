@@ -544,3 +544,79 @@ func TestOutputOfIsBounded(t *testing.T) {
 		t.Errorf("a 5 MiB line must be cut to %d bytes: %d lines, %d bytes", maxLineBytes, len(got), len(got[len(got)-1]))
 	}
 }
+
+// A case the test channel blocked is CHAN, apart from a product failure,
+// in the summary and the JUnit file (W10); a line with a product failure
+// stays FAIL whatever else failed on it.
+func TestChannelUnavailableLines(t *testing.T) {
+	chanFail := "[I.lgpo.absent os=windows tenant=1 vm=t1-win step=setup] FAIL: running the setup script: " +
+		"UAT CHANNEL UNAVAILABLE: vmctl.sh run t1-win: t1-win is marked dead after 3 channel failures in a row"
+	prodFail := "[I.win_firewall.rule_present os=windows tenant=1 vm=t1-win step=cook in test mode] FAIL: cook in test mode: " +
+		"want the item succeeded, got failed error=job_failed; the job's failed steps: step \"uat firewall rule_present\": netsh.exe: exit status 1"
+	evs := ev(pkg+"/ingredients",
+		"run TestIngredients",
+		"run TestIngredients/I.lgpo.absent",
+		"run TestIngredients/I.lgpo.absent/t1-win",
+		"output TestIngredients/I.lgpo.absent/t1-win     schedule.go:250: "+chanFail,
+		"fail TestIngredients/I.lgpo.absent/t1-win",
+		"fail TestIngredients/I.lgpo.absent",
+		"run TestIngredients/I.win_firewall.rule_present",
+		"run TestIngredients/I.win_firewall.rule_present/t1-win",
+		"output TestIngredients/I.win_firewall.rule_present/t1-win     schedule.go:250: "+prodFail,
+		"output TestIngredients/I.win_firewall.rule_present/t1-win     schedule.go:250: [I.win_firewall.rule_present os=windows tenant=1 vm=t1-win step=revert (host script)] FAIL: the revert script: UAT CHANNEL UNAVAILABLE: vmctl.sh run t1-win: dead",
+		"fail TestIngredients/I.win_firewall.rule_present/t1-win",
+		"fail TestIngredients/I.win_firewall.rule_present",
+		"fail TestIngredients",
+		"run TestIngredientsCoverage",
+		"pass TestIngredientsCoverage",
+	)
+	r := summarize(t, "ingredients", nil, evs)
+	if !r.Failed() {
+		t.Error("a CHAN line fails the run")
+	}
+	if l, ok := lineFor(r, "I.lgpo.absent", "windows", "1"); !ok || l.Status != StatusChan || !strings.Contains(l.Detail, "marked dead") {
+		t.Errorf("channel line: %+v", l)
+	}
+	if l, ok := lineFor(r, "I.win_firewall.rule_present", "windows", "1"); !ok || l.Status != "FAIL" || !strings.Contains(l.Detail, "netsh.exe: exit status 1") {
+		t.Errorf("product line: %+v", l)
+	}
+	// A channel failure first and a product failure after it is a product
+	// failure, named by the product's line.
+	mixed := ev(pkg+"/ingredients",
+		"run TestIngredients",
+		"run TestIngredients/I.file.managed",
+		"run TestIngredients/I.file.managed/t2-ubuntu",
+		"output TestIngredients/I.file.managed/t2-ubuntu     schedule.go:250: [I.file.managed os=ubuntu tenant=2 vm=t2-ubuntu step=tenant scoping] FAIL: running the check on t1-ubuntu: UAT CHANNEL UNAVAILABLE: vmctl.sh run t1-ubuntu: dead",
+		"output TestIngredients/I.file.managed/t2-ubuntu     schedule.go:250: [I.file.managed os=ubuntu tenant=2 vm=t2-ubuntu step=cook in test mode again] FAIL: cook in test mode again: want the item succeeded",
+		"fail TestIngredients/I.file.managed/t2-ubuntu",
+		"fail TestIngredients/I.file.managed",
+		"fail TestIngredients",
+	)
+	if l, ok := lineFor(summarize(t, "ingredients", nil, mixed), "I.file.managed", "ubuntu", "2"); !ok || l.Status != "FAIL" || !strings.Contains(l.Detail, "cook in test mode again") {
+		t.Errorf("a product failure after a channel one: %+v", l)
+	}
+	var sum bytes.Buffer
+	r.Print(&sum)
+	for _, w := range []string{"CHAN   I.lgpo.absent", "CHAN (1): channel unavailable", "lines: 1 pass, 1 fail, 1 channel unavailable, 0 skip"} {
+		if !strings.Contains(sum.String(), w) {
+			t.Errorf("summary lacks %q:\n%s", w, sum.String())
+		}
+	}
+	var buf bytes.Buffer
+	if err := r.WriteJUnit(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc junitSuites
+	if err := xml.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	s := doc.Suites[0]
+	if s.Failures != 1 || s.Errors != 1 {
+		t.Errorf("suite: %d failures, %d errors; want 1 and 1", s.Failures, s.Errors)
+	}
+	for _, c := range s.Cases {
+		if strings.HasPrefix(c.Name, "I.lgpo.absent") && (c.Error == nil || c.Error.Type != "channel-unavailable" || c.Failure != nil) {
+			t.Errorf("the channel case is not an <error type=channel-unavailable>: %+v", c)
+		}
+	}
+}
