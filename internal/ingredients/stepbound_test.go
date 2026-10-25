@@ -199,3 +199,61 @@ func TestBoundedCookerFencesAnAbandonedStep(t *testing.T) {
 		t.Errorf("%d fences left", left)
 	}
 }
+
+// panicCooker panics in Apply once block closes (at once when it is nil).
+type panicCooker struct {
+	mockCooker
+	block chan struct{}
+}
+
+func (p *panicCooker) Apply(context.Context) (cook.Result, error) {
+	if p.block != nil {
+		<-p.block
+	}
+	var s interface{} = "not a map"
+	_ = s.(map[string]string)
+	return cook.Result{Succeeded: true}, nil
+}
+
+// A panic in the bounded step's goroutine cannot reach any caller's
+// recover: it fails the step, whether it comes in time or after the step
+// was abandoned, and leaves no fence behind, so a later step of the same
+// ingredient runs.
+func TestBoundedCookerRecoversAPanic(t *testing.T) {
+	quick := &slowCooker{block: make(chan struct{}), res: cook.Result{Succeeded: true}}
+	close(quick.block)
+	next := func() {
+		t.Helper()
+		res, err := boundedCooker{RecipeCooker: quick, id: "next", ingredient: "win_panic", method: "absent", bound: 5 * time.Second}.Apply(context.Background())
+		if err != nil || !res.Succeeded {
+			t.Fatalf("later step: res=%+v err=%v", res, err)
+		}
+	}
+
+	res, err := boundedCooker{RecipeCooker: &panicCooker{}, id: "boom", ingredient: "win_panic", method: "present", bound: time.Second}.Apply(context.Background())
+	var sp *cook.StepPanicError
+	if !res.Failed || !errors.As(err, &sp) {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	for _, want := range []string{"step boom: win_panic.present (apply) panicked: interface conversion", "(*panicCooker).Apply"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	next()
+
+	// Abandoned at the bound, then panicking: the fence is still released.
+	late := &panicCooker{block: make(chan struct{})}
+	if _, err := (boundedCooker{RecipeCooker: late, id: "late", ingredient: "win_panic", method: "present", bound: 20 * time.Millisecond}).Apply(context.Background()); err == nil ||
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("abandoned step: %v", err)
+	}
+	close(late.block)
+	next()
+	abandonedSteps.Lock()
+	left := len(abandonedSteps.by)
+	abandonedSteps.Unlock()
+	if left != 0 {
+		t.Errorf("%d fences left", left)
+	}
+}

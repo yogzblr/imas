@@ -171,12 +171,7 @@ func CookRecipeEnvelope(envelope RecipeEnvelope) error {
 						runOnExit(ctx, step.OnExit, vars, runtimeCtx, testMode)
 						return
 					}
-					var res Result
-					if testMode {
-						res, err = ingredient.Test(ctx)
-					} else {
-						res, err = ingredient.Apply(ctx)
-					}
+					res, err := runStep(ctx, ingredient, step, testMode)
 
 					// in test mode, res.Changed and res.Notes may not be populated
 					if step.Register != nil && !testMode {
