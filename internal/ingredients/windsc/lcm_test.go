@@ -146,7 +146,7 @@ func TestNoteNamesTheResourcesNotInTheDesiredState(t *testing.T) {
 // SendConfigurationApply with the bytes alone.
 func TestScriptsCallTheLCMMethods(t *testing.T) {
 	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
-	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }", "-notmatch 'Syntax Error') { throw }", "TestConfiguration -Arguments @{ ConfigurationData = $imasData }", "$imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }", "Detail = $imasDetail", "$imasForm = 'length-prefixed'", "localhost.mof"} {
+	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = [byte[]]$imasForms[$imasF] }", "'bare' = $imasBytes; 'length-prefixed' = $imasData; 'bare UTF-8' = $imasU8", "if ($imasN -gt 0) { $imasR = $imasA; $imasForm = $imasF; break }", "refused the configuration in every form", "$imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }", "Detail = $imasDetail", "tried ' + ($imasTried -join '; ')", "localhost.mof"} {
 		if !strings.Contains(test, want) {
 			t.Errorf("test script lacks %q:\n%s", want, test)
 		}
@@ -154,11 +154,16 @@ func TestScriptsCallTheLCMMethods(t *testing.T) {
 	if !strings.Contains(apply, "-MethodName SendConfigurationApply") || !strings.Contains(apply, "ConfigurationData = $imasBytes; Force = $true") {
 		t.Errorf("apply script:\n%s", apply)
 	}
-	// A nonzero ReturnValue fails both, and a directory with several MOFs
+	// A nonzero ReturnValue fails the apply and rules a form out of the
+	// test (every form refused fails it), and a directory with several MOFs
 	// and no localhost.mof is refused rather than its first MOF applied
 	// (review on #319).
 	for name, s := range map[string]string{"test": test, "apply": apply} {
-		for _, want := range []string{"if ($imasR.ReturnValue) { throw", "$imasMofs.Count -gt 1) { throw"} {
+		guard := "if ($imasR.ReturnValue) { throw"
+		if name == "test" {
+			guard = "if ($imasA.ReturnValue) { $imasTried +="
+		}
+		for _, want := range []string{guard, "$imasMofs.Count -gt 1) { throw"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("%s script lacks %q:\n%s", name, want, s)
 			}
