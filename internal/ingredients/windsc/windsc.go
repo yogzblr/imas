@@ -12,11 +12,12 @@
 // ... winrm quickconfig" (UAT I.win_dsc.applied, Run 2 on rc.21). This
 // package opens the session itself, to localhost over DCOM
 // (New-CimSessionOption -Protocol Dcom), which needs no WinRM listener at
-// all. Through that session it calls the LCM's own CIM methods
-// (TestConfiguration, SendConfigurationApply) with the compiled MOF's
-// bytes, rather than the cmdlets: Test-DscConfiguration -Path over a DCOM
-// session sent the LCM a configuration it could not parse (W11 CI on
-// Windows Server 2022).
+// all. Through that session it calls the LCM's own CIM methods rather
+// than the cmdlets (Test-DscConfiguration -Path over a DCOM session sent
+// the LCM a configuration it could not parse, W11 CI on Windows Server
+// 2022): SendConfigurationApply with the compiled MOF's bytes, and
+// TestConfiguration on the LCM's current configuration, checked to be the
+// MOF this ingredient last applied (see lcmClass in lcm.go).
 //
 // Only init (register.go) is Windows-only: the scripts are built and
 // unit-tested on every platform.

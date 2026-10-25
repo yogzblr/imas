@@ -139,31 +139,51 @@ func TestNoteNamesTheResourcesNotInTheDesiredState(t *testing.T) {
 }
 
 // The LCM is asked through its own CIM methods (W11 CI: Test-DscConfiguration
-// -Path over DCOM sent a configuration the LCM could not parse):
-// TestConfiguration with the MOF's bytes, length-prefixed only if the LCM
-// refuses them as a syntax error, its answer always the InDesiredState
-// object parseInDesiredState reads, and no answer an error;
-// SendConfigurationApply with the bytes alone.
+// -Path over DCOM sent a configuration the LCM could not parse). Given a
+// configuration, TestConfiguration did not evaluate it, so the test asks
+// about the LCM's current configuration, and counts it as this one only
+// when the MOF is the one this ingredient last applied (its SHA-256,
+// recorded by the apply) and the evaluated resources are this MOF's.
+// SendConfigurationApply takes the bytes alone.
 func TestScriptsCallTheLCMMethods(t *testing.T) {
 	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
-	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = [byte[]]$imasForms[$imasF] }", "'bare' = $imasBytes; 'length-prefixed' = $imasData; 'bare UTF-8' = $imasU8", "if ($imasN -gt 0) { $imasR = $imasA; $imasForm = $imasF; break }", "refused the configuration in every form", "$imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }", "Detail = $imasDetail", "tried ' + ($imasTried -join '; ')", "localhost.mof"} {
+	for _, want := range []string{
+		"-MethodName TestConfiguration } catch { $imasWhy = 'the LCM could not test its current configuration: '",
+		"if ($imasRecorded -ne $imasHash) {",
+		"$imasHaveIds -ne $imasWantIds",
+		"$imasHaveNames -and $imasHaveNames -ne $imasWantNames",
+		"if ($imasAll.Count -eq 0) {",
+		"$imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }",
+		"InDesiredState = $imasIn; ResourceId = $imasNot; Detail = $imasWhy",
+		"localhost.mof",
+	} {
 		if !strings.Contains(test, want) {
 			t.Errorf("test script lacks %q:\n%s", want, test)
 		}
 	}
-	if !strings.Contains(apply, "-MethodName SendConfigurationApply") || !strings.Contains(apply, "ConfigurationData = $imasBytes; Force = $true") {
-		t.Errorf("apply script:\n%s", apply)
+	if strings.Contains(test, "SendConfigurationApply") || strings.Contains(test, "WriteAllText") {
+		t.Error("the test script changes something")
 	}
-	// A nonzero ReturnValue fails the apply and rules a form out of the
-	// test (every form refused fails it), and a directory with several MOFs
-	// and no localhost.mof is refused rather than its first MOF applied
-	// (review on #319).
-	for name, s := range map[string]string{"test": test, "apply": apply} {
-		guard := "if ($imasR.ReturnValue) { throw"
-		if name == "test" {
-			guard = "if ($imasA.ReturnValue) { $imasTried +="
+	for _, want := range []string{
+		"-MethodName SendConfigurationApply -Arguments @{ ConfigurationData = $imasBytes; Force = $true }",
+		"[IO.File]::WriteAllText($imasRecord, $imasHash)",
+	} {
+		if !strings.Contains(apply, want) {
+			t.Errorf("apply script lacks %q:\n%s", want, apply)
 		}
-		for _, want := range []string{guard, "$imasMofs.Count -gt 1) { throw"} {
+	}
+	// The record is written only after the apply's ReturnValue check.
+	if strings.Index(apply, "WriteAllText") < strings.Index(apply, "SendConfigurationApply returned") {
+		t.Error("the apply records the MOF before checking the LCM's answer")
+	}
+	for name, s := range map[string]string{"test": test, "apply": apply} {
+		for _, want := range []string{
+			"if ($imasR.ReturnValue) { throw",
+			"$imasMofs.Count -gt 1) { throw",
+			"(Get-FileHash -LiteralPath $imasMof -Algorithm SHA256).Hash",
+			`$imasRecord = "$env:ProgramData\imas\state\sprout\win_dsc\current.sha256"`,
+			`'ResourceID\s*=\s*"([^"]+)"'`,
+		} {
 			if !strings.Contains(s, want) {
 				t.Errorf("%s script lacks %q:\n%s", name, want, s)
 			}

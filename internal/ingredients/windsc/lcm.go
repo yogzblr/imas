@@ -39,23 +39,41 @@ func withDcomSession(body string) string {
 // Windows Server 2022: Test-DscConfiguration -Path -CimSession over DCOM
 // sent the LCM a configuration it could not parse, "Syntax Error. Number
 // value is not valid: empty number string"). SendConfigurationApply takes
-// the MOF's bytes alone as ConfigurationData (W11 CI: given them prefixed
-// with the total length as a 4-byte little-endian integer, the form
-// PSDesiredStateConfiguration's own SendConfiguration callers use, it parsed
-// the prefix as MOF text, the same "Syntax Error"). TestConfiguration is
-// tried with the MOF in four forms, bare and length-prefixed, as compiled
-// (UTF-16) and as UTF-8, and the first answer that evaluated any resource
-// is used: given the bare UTF-16 MOF it accepted it (ReturnValue 0) and
-// answered InDesiredState=False with no resource in or out of the desired
-// state, straight after a successful apply (W11 CI), so it had not read
-// the document. With no form evaluated, the first answer stands and the
-// note lists what each form got.
+// the MOF's bytes alone as ConfigurationData (given them prefixed with the
+// total length as a 4-byte little-endian integer, it parsed the prefix as
+// MOF text, the same "Syntax Error").
+//
+// TestConfiguration given a configuration does not evaluate it there: with
+// the compiled MOF bare or length-prefixed, as UTF-16 or UTF-8, it
+// answered ReturnValue 0 and InDesiredState=False with no resource in or
+// out of the desired state, straight after SendConfigurationApply had
+// applied the same bytes (W11 CI). So the test asks about the LCM's
+// current configuration instead (TestConfiguration with no arguments, what
+// Test-DscConfiguration does), and takes the node to be in this
+// configuration's desired state only when
+//   - this ingredient last applied this very MOF: Apply records its SHA-256
+//     under the sprout's state directory (lcmRecord), so a changed MOF is
+//     applied again;
+//   - the LCM's current configuration is this one: the resources it
+//     evaluated carry this MOF's ResourceIDs and ConfigurationName, so a
+//     configuration someone else applied since is not taken for it;
+//   - and the LCM says it is in the desired state, having evaluated at
+//     least one resource (with no current configuration, as after
+//     Remove-DscConfigurationDocument, TestConfiguration fails, which
+//     counts as not in it).
+//
+// Otherwise the note says which of these failed.
 const lcmClass = "-Namespace root/Microsoft/Windows/DesiredStateConfiguration -ClassName MSFT_DSCLocalConfigurationManager"
+
+// lcmRecord is where Apply records the SHA-256 of the MOF it last applied:
+// the LCM holds one current configuration per node, so one record.
+const lcmRecord = `$env:ProgramData\imas\state\sprout\win_dsc\current.sha256`
 
 // mofData is the script lines that read the configuration at path (a .mof
 // file, or a directory holding localhost.mof or a single .mof; several
 // without localhost.mof are refused, one of them may be another node's) into
-// $imasBytes, and the same with its length prefix into $imasData.
+// $imasBytes, its SHA-256 into $imasHash, and its ResourceIDs and
+// ConfigurationNames, sorted, into $imasWantIds and $imasWantNames.
 func mofData(path string) string {
 	return strings.Join([]string{
 		"$imasPath = " + winexec.PSQuote(path),
@@ -69,7 +87,11 @@ func mofData(path string) string {
 		"  } else { $imasMof = $imasPath }",
 		"  if (-not $imasMof -or -not (Test-Path -LiteralPath $imasMof)) { throw \"win_dsc: no compiled configuration (.mof) at $imasPath\" }",
 		"  $imasBytes = [IO.File]::ReadAllBytes($imasMof)",
-		"  [byte[]]$imasData = [BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes",
+		"  $imasHash = (Get-FileHash -LiteralPath $imasMof -Algorithm SHA256).Hash",
+		"  $imasText = [IO.File]::ReadAllText($imasMof)",
+		"  $imasWantIds = (@([regex]::Matches($imasText, 'ResourceID\\s*=\\s*\"([^\"]+)\"') | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique) -join '|'",
+		"  $imasWantNames = (@([regex]::Matches($imasText, 'ConfigurationName\\s*=\\s*\"([^\"]+)\"') | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique) -join '|'",
+		"  $imasRecord = \"" + lcmRecord + "\"",
 	}, "\n")
 }
 
@@ -80,37 +102,48 @@ func returnValueCheck(method string) string {
 	return "  if ($imasR.ReturnValue) { throw \"win_dsc: " + method + " returned $($imasR.ReturnValue)\" }\n"
 }
 
-// testScript asks the LCM whether the node is in the configuration at
-// path, as JSON: InDesiredState, the resources that are not (ResourceId,
-// from WMF 5's ResourcesNotInDesiredState instances or an older flat list),
-// and Detail: which form of the MOF the LCM took and everything it
-// answered, for the step's note when the node is not in the desired state.
+// testScript asks whether the node is in the configuration at path (see
+// lcmClass), as JSON: InDesiredState, the resources that are not
+// (ResourceId), and Detail: why not, for the step's note.
 func testScript(path string) string {
-	call := "Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = [byte[]]$imasForms[$imasF] }"
-	return withDcomSession(mofData(path) + "\n" +
-		"  $imasU8 = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($imasMof))\n" +
-		"  $imasForms = [ordered]@{ 'bare' = $imasBytes; 'length-prefixed' = $imasData; 'bare UTF-8' = $imasU8; 'length-prefixed UTF-8' = [byte[]]([BitConverter]::GetBytes([int]($imasU8.Length + 4)) + $imasU8) }\n" +
-		"  $imasR = $null; $imasForm = $null; $imasTried = @()\n" +
-		"  foreach ($imasF in $imasForms.Keys) {\n" +
-		"    try { $imasA = " + call + " } catch { $imasTried += ($imasF + ': ' + $_.Exception.Message); continue }\n" +
-		"    if ($imasA.ReturnValue) { $imasTried += ($imasF + ': ReturnValue ' + $imasA.ReturnValue); continue }\n" +
-		"    $imasN = @(@($imasA.ResourcesInDesiredState) + @($imasA.ResourcesNotInDesiredState) | Where-Object { $_ }).Count\n" +
-		"    $imasTried += ($imasF + ': InDesiredState=' + $imasA.InDesiredState + ', ' + $imasN + ' resources evaluated')\n" +
-		"    if (-not $imasR) { $imasR = $imasA; $imasForm = $imasF }\n" +
-		"    if ($imasN -gt 0) { $imasR = $imasA; $imasForm = $imasF; break }\n" +
-		"  }\n" +
-		"  if (-not $imasR) { throw ('win_dsc: TestConfiguration refused the configuration in every form: ' + ($imasTried -join '; ')) }\n" +
-		"  if ($null -eq $imasR.InDesiredState) { throw \"win_dsc: TestConfiguration returned no InDesiredState (ReturnValue: $($imasR.ReturnValue))\" }\n" +
-		"  $imasDetail = 'MOF sent ' + $imasForm + ' (' + $imasBytes.Length + ' bytes, starting ' + ((@($imasBytes | Select-Object -First 4) | ForEach-Object { '{0:x2}' -f $_ }) -join '') + '); tried ' + ($imasTried -join '; ') + '; the LCM answered ' + ((@($imasR.PSObject.Properties | Where-Object { $_.Name -notlike 'Cim*' -and $_.Name -ne 'PSComputerName' }) | ForEach-Object { $_.Name + '=' + (@($_.Value | ForEach-Object { if ($_ -is [Microsoft.Management.Infrastructure.CimInstance]) { $_.ResourceId } else { $_ } }) -join ',') }) -join '; ')\n" +
-		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @(@($imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId }) + @($imasR.ResourceId) | Where-Object { $_ }); Detail = $imasDetail } | ConvertTo-Json -Compress")
+	return withDcomSession(mofData(path) + "\n" + strings.Join([]string{
+		"  $imasIn = $false; $imasNot = @(); $imasWhy = ''",
+		"  $imasRecorded = ''",
+		"  if (Test-Path -LiteralPath $imasRecord) { $imasRecorded = ([IO.File]::ReadAllText($imasRecord)).Trim() }",
+		"  if ($imasRecorded -ne $imasHash) {",
+		"    $imasWhy = 'this ingredient has not applied this configuration (SHA-256 ' + $imasHash + ') as the current one'",
+		"  } else {",
+		"    $imasR = $null",
+		"    try { $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration } catch { $imasWhy = 'the LCM could not test its current configuration: ' + $_.Exception.Message }",
+		"  }",
+		"  if ($imasR) {",
+		"  " + returnValueCheck("TestConfiguration") +
+			"    $imasAll = @(@($imasR.ResourcesInDesiredState) + @($imasR.ResourcesNotInDesiredState) | Where-Object { $_ })",
+		"    $imasHaveIds = (@($imasAll | ForEach-Object { $_.ResourceId }) | Sort-Object -Unique) -join '|'",
+		"    $imasHaveNames = (@($imasAll | ForEach-Object { $_.ConfigurationName } | Where-Object { $_ }) | Sort-Object -Unique) -join '|'",
+		"    if ($imasAll.Count -eq 0) {",
+		"      $imasWhy = 'the LCM evaluated no resource of its current configuration'",
+		"    } elseif ($imasHaveIds -ne $imasWantIds -or ($imasHaveNames -and $imasHaveNames -ne $imasWantNames)) {",
+		"      $imasWhy = 'the LCM''s current configuration is another one (' + $imasHaveNames + ': ' + $imasHaveIds + ')'",
+		"    } else {",
+		"      $imasIn = [bool]$imasR.InDesiredState",
+		"      $imasNot = @($imasR.ResourcesNotInDesiredState | ForEach-Object { $_.ResourceId } | Where-Object { $_ })",
+		"      if (-not $imasIn) { $imasWhy = 'the LCM reports it out of the desired state' }",
+		"    }",
+		"  }",
+		"  [pscustomobject]@{ InDesiredState = $imasIn; ResourceId = $imasNot; Detail = $imasWhy } | ConvertTo-Json -Compress",
+	}, "\n"))
 }
 
 // applyScript applies the configuration at path; the method returns once
-// the LCM has applied it.
+// the LCM has applied it. It then records the MOF's SHA-256 (lcmRecord) for
+// testScript.
 func applyScript(path string) string {
 	return withDcomSession(mofData(path) + "\n" +
 		"  $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName SendConfigurationApply -Arguments @{ ConfigurationData = $imasBytes; Force = $true }\n" +
-		returnValueCheck("SendConfigurationApply"))
+		returnValueCheck("SendConfigurationApply") +
+		"  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $imasRecord) | Out-Null\n" +
+		"  [IO.File]::WriteAllText($imasRecord, $imasHash)")
 }
 
 // testAnswer is one node's answer in testScript's output.
