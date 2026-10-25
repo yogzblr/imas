@@ -458,7 +458,7 @@ supervise_dead() {
     [ -f "$f" ] || continue
     vm=$(basename "$f" .fails)
     { read -r count fepoch pepoch && IFS= read -r reason; } <"$f" || continue
-    [[ "${count:-}" =~ ^[0-9]+$ ]] && [ "$count" -ge "$dead_after" ] || continue
+    if ! [[ "${count:-}" =~ ^[0-9]+$ ]] || [ "$count" -lt "$dead_after" ]; then continue; fi
     [[ "${pepoch:-}" =~ ^[0-9]+$ ]] || pepoch=0
     now=$(date +%s)
     last=$fepoch
@@ -556,7 +556,7 @@ cmd_supervise() {
 
 # ensure kube: the kube tunnels and the login, fresh, for a kubectl call.
 cmd_ensure() {
-  [ $# -eq 1 ] && [ "$1" = kube ] || usage
+  if [ $# -ne 1 ] || [ "$1" != kube ]; then usage; fi
   local dir vm age
   dir=$(access_dir)
   CH_ACCESS_DIR=$dir

@@ -86,7 +86,7 @@ ch_closefds() {
   local fd n
   for fd in /proc/"$BASHPID"/fd/*; do
     n=${fd##*/}
-    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt 2 ] || continue
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -le 2 ]; then continue; fi
     eval "exec $n>&-" 2>/dev/null || true
   done
   for n in "${ch_slots_fds[@]}"; do eval "exec $n>&-" 2>/dev/null || true; done
@@ -295,9 +295,17 @@ ch_reopen() {
   return 1
 }
 
-# ch_port_connections <port>: established connections to a local port.
+# ch_port_connections <port>: established connections to a local port
+# (ss, or /proc/net/tcp where ss is missing).
 ch_port_connections() {
-  ss -Htn state established "( sport = :$1 )" 2>/dev/null | wc -l
+  if command -v ss >/dev/null 2>&1; then
+    ss -Htn state established "( sport = :$1 )" 2>/dev/null | wc -l
+    return 0
+  fi
+  local hex
+  hex=$(printf '%04X' "$1")
+  # local_address is IP:PORT in hex; state 01 is ESTABLISHED.
+  cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p=":$hex" '$2 ~ p"$" && $4 == "01"' | wc -l
 }
 
 # --- the record

@@ -1058,12 +1058,16 @@ sv supervise tick
 if [ "$(spid_of t1-ubuntu ssh)" != "$u_pid" ]; then ok "supervise: the next round reopens it once the call is done"; else nok "supervise: later round" "$out"; fi
 kp=$(sport_of uat-dmz kube)
 echo $(($(date +%s) - 12 * 60)) >"$state/opened/uat-dmz-kube"
+# A real tunnel keeps a client's connection open; the stub listener holds
+# it only on a port marked stale.
+touch "$STUB_STATE/stale.$kp"
 python3 -I -c 'import socket,sys,time; c=socket.create_connection(("127.0.0.1", int(sys.argv[1]))); time.sleep(4)' "$kp" &
 conn=$!
 sleep 0.3
 k_pid=$(spid_of uat-dmz kube)
-# ss sees the connection only on Linux with iproute2; skip the check without it.
-if command -v ss >/dev/null 2>&1; then
+# ss, or /proc/net/tcp without it, sees the connection on Linux; skip the
+# check elsewhere.
+if command -v ss >/dev/null 2>&1 || [ -r /proc/net/tcp ]; then
   sv supervise tick
   if printf '%s' "$out" | grep -q "uat-dmz kube tunnel (127.0.0.1:$kp): 1 connections still open after 1s; leaving it for the next round" &&
     [ "$(spid_of uat-dmz kube)" = "$k_pid" ]; then
@@ -1072,6 +1076,7 @@ if command -v ss >/dev/null 2>&1; then
 fi
 kill "$conn" 2>/dev/null
 wait "$conn" 2>/dev/null
+rm -f "$STUB_STATE/stale.$kp"
 # Dead marks: re-probed, un-marked when the tunnel answers; refresh clears all.
 now=$(date +%s)
 printf '3 %s 0\nssh to t1-alma: banner exchange\n' $((now - 300)) >"$state/vmctl/t1-alma.fails"

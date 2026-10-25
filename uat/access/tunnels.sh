@@ -197,7 +197,7 @@ start_tunnel() {
   (
     for fd in /proc/"$BASHPID"/fd/*; do
       n=${fd##*/}
-      [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt 2 ] || continue
+      if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -le 2 ]; then continue; fi
       eval "exec $n>&-" 2>/dev/null || true
     done
     exec 8>&-
@@ -431,7 +431,7 @@ cmd_reopen_one() {
   command -v jq >/dev/null 2>&1 || die "jq is not on PATH"
   command -v "$AZ" >/dev/null 2>&1 || die "$AZ is not on PATH"
   lock_state "$dir"
-  [ -s "$dir/access.json" ] && [ -f "$dir/tunnels.pids" ] || die "no tunnels are open in $dir"
+  if [ ! -s "$dir/access.json" ] || [ ! -f "$dir/tunnels.pids" ]; then die "no tunnels are open in $dir"; fi
   local rg bastion line target all
   rg=$(jq -er '.resource_group' "$uat") || die "$uat has no resource_group"
   bastion=$(jq -er '.bastion.name' "$uat") || die "$uat has no bastion.name"
