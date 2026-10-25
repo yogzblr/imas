@@ -29,8 +29,11 @@ windows:
         user.absent:
           - name: 'iuu@NONCE@'
   check: |
-    if (Get-LocalUser -Name 'iuu@NONCE@' -ErrorAction SilentlyContinue) { exit 1 }
-    exit 0
+    # Absent only on "no such user": a lookup that fails otherwise (the
+    # LocalAccounts module not loading) is not proof of absence.
+    try { Get-LocalUser -Name 'iuu@NONCE@' -ErrorAction Stop | Out-Null; exit 1 } catch [Microsoft.PowerShell.Commands.UserNotFoundException] { exit 0 }
   revert: |
-    Remove-LocalUser -Name 'iuu@NONCE@' -ErrorAction SilentlyContinue
+    # Only "no such user" is fine; any other failure leaves the user behind
+    # and must say so.
+    try { Remove-LocalUser -Name 'iuu@NONCE@' -ErrorAction Stop } catch [Microsoft.PowerShell.Commands.UserNotFoundException] { }
     exit 0

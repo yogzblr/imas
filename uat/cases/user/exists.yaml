@@ -31,8 +31,10 @@ windows:
         user.exists:
           - name: 'iuu@NONCE@'
   check: |
-    if (Get-LocalUser -Name 'iuu@NONCE@' -ErrorAction SilentlyContinue) { exit 0 }
-    exit 1
+    Get-LocalUser -Name 'iuu@NONCE@' -ErrorAction Stop | Out-Null
+    exit 0
   revert: |
-    Remove-LocalUser -Name 'iuu@NONCE@' -ErrorAction SilentlyContinue
+    # Only "no such user" is fine; any other failure leaves the user behind
+    # and must say so.
+    try { Remove-LocalUser -Name 'iuu@NONCE@' -ErrorAction Stop } catch [Microsoft.PowerShell.Commands.UserNotFoundException] { }
     exit 0
