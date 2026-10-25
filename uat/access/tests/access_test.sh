@@ -609,6 +609,9 @@ else nok "vmctl: maybe-ran (rc=$rc)" "$(calls) $err"; fi
 rm -f "$STUB_STATE/ssh_no_marker" "$STUB_STATE/vmctl/t1-ubuntu.fails"
 
 # The dead mark: strikes, the fast failure, the re-probe and what clears it.
+# One reopen per call: the tunnels here stay stale on purpose, and the
+# retries have their own test (supervise: a failed reopen is tried 3 times).
+export CH_REOPEN_ATTEMPTS=1
 new_case vdead
 open_real
 p=$(port_of t1-alma ssh)
@@ -655,6 +658,7 @@ if [ "$rc" -eq 0 ] && [ ! -e "$STUB_STATE/vmctl/t1-alma.fails" ]; then
 else nok "vmctl: restart clears dead (rc=$rc)" "$err"; fi
 
 # Fresh before each command: a tunnel or login past REFRESH_AFTER.
+unset CH_REOPEN_ATTEMPTS
 new_case vfresh
 open_real
 p=$(port_of t1-ubuntu ssh)
