@@ -76,3 +76,20 @@ func TestOtherFailureIsNotAbsent(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// certutil -store on Windows Server 2022 (the W11 CI job on windows-2022)
+// exits NTE_NOT_FOUND, not CRYPT_E_NOT_FOUND, for a thumbprint that isn't
+// in the store: that is "absent".
+func TestNTENotFoundIsAbsent(t *testing.T) {
+	const out = "My \"Personal\"\nCertUtil: -store command FAILED: 0x80090011 (-2146893807 NTE_NOT_FOUND)\nCertUtil: Object was not found."
+	f := fakeCertutil{storeOut: out, storeErr: ingredients.CommandError("certutil.exe", hresultExit(0x80090011), []byte(out), nil)}
+	f.install(t)
+	res, err := parseCert(t, methodCertAbsent).Test(context.Background())
+	if err != nil || res.Changed {
+		t.Fatalf("cert_absent on a missing cert: res=%+v err=%v", res, err)
+	}
+	res, err = parseCert(t, methodCertPresent).Test(context.Background())
+	if err != nil || !res.Changed {
+		t.Fatalf("cert_present on a missing cert: res=%+v err=%v", res, err)
+	}
+}

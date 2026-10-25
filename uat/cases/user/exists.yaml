@@ -20,6 +20,7 @@ windows:
     # New-LocalUser with a SecureString (W11): net.exe's "user /add" with a
     # password over 14 characters asks for confirmation and exits -1 when
     # nobody answers. A random password, never printed.
+    $ErrorActionPreference = 'Stop'
     $b = New-Object byte[] 18
     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
     $pw = ConvertTo-SecureString -String ('Aa1!' + [Convert]::ToBase64String($b)) -AsPlainText -Force

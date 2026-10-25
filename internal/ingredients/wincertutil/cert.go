@@ -32,6 +32,12 @@ var runCLI = winexec.RunCLI
 // with when -store finds no certificate with the thumbprint.
 const cryptENotFound = 0x80092004
 
+// nteNotFound is NTE_NOT_FOUND ("Object was not found."), what certutil
+// -store exits with on Windows Server 2022 when the thumbprint isn't in
+// the store (W11 CI on windows-2022: "CertUtil: -store command FAILED:
+// 0x80090011 (-2146893807 NTE_NOT_FOUND)").
+const nteNotFound = 0x80090011
+
 const (
 	methodCertPresent = "cert_present"
 	methodCertAbsent  = "cert_absent"
@@ -124,7 +130,7 @@ const notFoundText = "Cannot find object or property"
 // user's): the sprout runs as SYSTEM, so a per-user store would be
 // SYSTEM's, not the one an administrator or the UAT check
 // (Cert:\LocalMachine\<store>) reads. certutil exits 0 on a match and with
-// CRYPT_E_NOT_FOUND when the thumbprint isn't in the store; its messages
+// CRYPT_E_NOT_FOUND or NTE_NOT_FOUND when the thumbprint isn't in the store; its messages
 // are localized, so the exit code, not the text, is the signal.
 //
 // Exit 0 is a match, whatever the output says: for a certificate without
@@ -147,7 +153,7 @@ func (c Cert) exists(ctx context.Context) (bool, error) {
 	// CRYPT_E_NOT_FOUND is "doesn't exist", not a failure to determine
 	// state. The code is the locale-independent signal; certutil's exact
 	// English line is kept as a fallback.
-	if code, ok := winexec.ExitCode(runErr); ok && uint32(code) == cryptENotFound {
+	if code, ok := winexec.ExitCode(runErr); ok && (uint32(code) == cryptENotFound || uint32(code) == nteNotFound) {
 		return false, nil
 	}
 	if _, ok := winexec.ExitCode(runErr); ok && strings.Contains(out, notFoundText) {
