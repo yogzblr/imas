@@ -3,7 +3,6 @@ package wintaskscheduler
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	ole "github.com/go-ole/go-ole"
 
@@ -47,23 +46,12 @@ func isNotFoundCode(hr uint32) bool {
 	return hr == hrFileNotFound || hr == hrPathNotFound
 }
 
-// maxXMLQuote bounds how much of the task's XML a registration error
-// quotes.
-const maxXMLQuote = 2048
-
 // registerError is RegisterTaskDefinition's failure: the task, the
-// principal it was registered for, the HRESULTs (winexec.COMError: through
-// IDispatch the reason is the EXCEPINFO scode, which "Exception occurred."
-// alone does not name) and the definition's XML, which is what Task
-// Scheduler validated.
-func registerError(path, userID string, logonType int, err error, xml string) error {
-	err = winexec.COMError(fmt.Sprintf("wintaskscheduler: RegisterTaskDefinition(%q) as %s, logon type %d", path, userID, logonType), err)
-	xml = strings.TrimSpace(xml)
-	if xml == "" {
-		return err
-	}
-	if len(xml) > maxXMLQuote {
-		xml = xml[:maxXMLQuote] + "..."
-	}
-	return fmt.Errorf("%w; task XML: %s", err, xml)
+// principal it was registered for and the HRESULTs (winexec.COMError:
+// through IDispatch the reason is the EXCEPINFO scode, which "Exception
+// occurred." alone does not name). The task's XML is never quoted: it
+// holds the action's command line, which a recipe may fill from a secret,
+// and a step's error is published with the job and written to its log.
+func registerError(path, userID string, logonType int, err error) error {
+	return winexec.COMError(fmt.Sprintf("wintaskscheduler: RegisterTaskDefinition(%q) as %s, logon type %d", path, userID, logonType), err)
 }

@@ -137,3 +137,26 @@ func TestNewRecipeCookerBoundsWindowsSteps(t *testing.T) {
 		t.Errorf("got %T, want boundedCooker", c)
 	}
 }
+
+// A step that honours its context returns ctx.Err() as the bound strikes,
+// often before the bound's own select case is chosen: the error still names
+// the bound, every time.
+func TestBoundedCookerNamesTheBoundWhenTheStepGivesUp(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		s := &slowCooker{block: make(chan struct{})}
+		b := boundedCooker{RecipeCooker: s, ingredient: "win_task", method: "present", bound: time.Millisecond}
+		_, err := b.Test(context.Background())
+		close(s.block)
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "did not finish within 1ms") {
+			t.Fatalf("run %d: err=%v", i, err)
+		}
+	}
+	// A parent cancellation is not the bound's.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &slowCooker{block: make(chan struct{})}
+	_, err := boundedCooker{RecipeCooker: s, ingredient: "win_task", method: "present", bound: time.Minute}.Test(ctx)
+	if err == nil || strings.Contains(err.Error(), "did not finish within") {
+		t.Errorf("parent cancel: %v", err)
+	}
+}

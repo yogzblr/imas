@@ -87,19 +87,19 @@ func (e excepInfoMsg) SCODE() uint32 { return e.scode }
 func (e excepInfoMsg) Error() string { return e.text }
 
 // UAT I.win_task.present, Run 2 on rc.21: "RegisterTaskDefinition(...):
-// call RegisterTaskDefinition: Exception occurred." with no HRESULT.
-func TestRegisterErrorNamesHRESULTAndXML(t *testing.T) {
+// call RegisterTaskDefinition: Exception occurred." with no HRESULT. The
+// error names the HRESULTs and the principal, never the task's XML (its
+// command line may hold a secret).
+func TestRegisterErrorNamesHRESULT(t *testing.T) {
 	inner := ole.NewErrorWithSubError(dispEException, "", excepInfoMsg{scode: 0x80070057, text: "The parameter is incorrect."})
-	err := registerError(`\imas-uat\uat-abc`, "SYSTEM", logonServiceAccount, inner,
-		`<Task><Principals><Principal id="Author"><UserId>S-1-5-18</UserId></Principal></Principals></Task>`)
-	for _, want := range []string{`RegisterTaskDefinition("\\imas-uat\\uat-abc") as SYSTEM, logon type 5`, "HRESULT 0x80020009", "scode 0x80070057", "The parameter is incorrect.", "task XML: <Task>"} {
+	err := registerError(`\imas-uat\uat-abc`, "SYSTEM", logonServiceAccount, inner)
+	for _, want := range []string{`RegisterTaskDefinition("\\imas-uat\\uat-abc") as SYSTEM, logon type 5`, "HRESULT 0x80020009", "scode 0x80070057", "The parameter is incorrect."} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks %q", err, want)
 		}
 	}
-	long := registerError(`\a`, "SYSTEM", 5, inner, strings.Repeat("x", 5000))
-	if len(long.Error()) > 3000 {
-		t.Errorf("the XML quote is not bounded: %d bytes", len(long.Error()))
+	if strings.Contains(err.Error(), "XML") || strings.Contains(err.Error(), "<Task") {
+		t.Errorf("the error quotes the task: %q", err)
 	}
 }
 

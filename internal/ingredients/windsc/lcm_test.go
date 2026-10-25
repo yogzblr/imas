@@ -123,3 +123,11 @@ func TestFailureCarriesTheCmdletError(t *testing.T) {
 		t.Error("exit status lost")
 	}
 }
+
+// Test-DscConfiguration can answer a bare Boolean; the script turns it
+// into the InDesiredState object parseInDesiredState reads.
+func TestTestScriptNormalisesABoolean(t *testing.T) {
+	if s := testScript(`C:\x`); !strings.Contains(s, "-is [bool]") || !strings.Contains(s, "InDesiredState = $_") {
+		t.Errorf("script: %s", s)
+	}
+}

@@ -26,3 +26,30 @@ func TestTransitionFailed(t *testing.T) {
 		}
 	}
 }
+
+// Right after StartService the SCM can still report STOPPED: that alone is
+// not a failure, a STOPPED after START_PENDING is, and so is STOPPED on
+// stoppedPollsLimit polls in a row (a start that failed between polls).
+func TestStartWatch(t *testing.T) {
+	var w startWatch
+	if w.observe(stateRunning, stateStopped) {
+		t.Fatal("a first STOPPED after StartService counted as a failed start")
+	}
+	w.observe(stateRunning, stateStartPending)
+	if !w.observe(stateRunning, stateStopped) {
+		t.Error("STOPPED after START_PENDING is a failed start")
+	}
+	var quick startWatch
+	for i := 1; i < stoppedPollsLimit; i++ {
+		if quick.observe(stateRunning, stateStopped) {
+			t.Fatalf("failed after %d STOPPED polls", i)
+		}
+	}
+	if !quick.observe(stateRunning, stateStopped) {
+		t.Errorf("STOPPED on %d polls in a row is a failed start", stoppedPollsLimit)
+	}
+	var stop startWatch
+	if stop.observe(stateStopped, stateStopped) {
+		t.Error("a wait for STOPPED never fails on STOPPED")
+	}
+}
