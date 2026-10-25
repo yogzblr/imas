@@ -38,11 +38,14 @@ func withDcomSession(body string) string {
 // The LCM's own CIM methods, called through the DCOM session (W11 CI on
 // Windows Server 2022: Test-DscConfiguration -Path -CimSession over DCOM
 // sent the LCM a configuration it could not parse, "Syntax Error. Number
-// value is not valid: empty number string"). TestConfiguration takes the
-// compiled MOF as ConfigurationData prefixed with the total length as a
-// 4-byte little-endian integer; SendConfigurationApply takes the MOF's bytes
-// alone (W11 CI: given the prefix it parsed it as MOF text, the same
-// "Syntax Error", its buffer starting with the length bytes).
+// value is not valid: empty number string"). SendConfigurationApply takes
+// the MOF's bytes alone as ConfigurationData (W11 CI: given them prefixed
+// with the total length as a 4-byte little-endian integer, the form
+// PSDesiredStateConfiguration's own SendConfiguration callers use, it parsed
+// the prefix as MOF text, the same "Syntax Error"). TestConfiguration is
+// sent the bytes alone too, and the prefixed form only if the LCM refuses
+// them as a syntax error: given the prefixed form it answered "not in the
+// desired state" straight after a successful apply (W11 CI).
 const lcmClass = "-Namespace root/Microsoft/Windows/DesiredStateConfiguration -ClassName MSFT_DSCLocalConfigurationManager"
 
 // mofData is the script lines that read the configuration at path (a .mof
@@ -74,13 +77,19 @@ func returnValueCheck(method string) string {
 }
 
 // testScript asks the LCM whether the node is in the configuration at
-// path, as JSON.
+// path, as JSON: InDesiredState, and the resources that are not
+// (ResourceId).
 func testScript(path string) string {
 	return withDcomSession(mofData(path) + "\n" +
-		"  $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasData }\n" +
+		"  try {\n" +
+		"    $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }\n" +
+		"  } catch {\n" +
+		"    if ($_.Exception.Message -notmatch 'Syntax Error') { throw }\n" +
+		"    $imasR = Invoke-CimMethod -CimSession $imasCim " + lcmClass + " -MethodName TestConfiguration -Arguments @{ ConfigurationData = $imasData }\n" +
+		"  }\n" +
 		returnValueCheck("TestConfiguration") +
 		"  if ($null -eq $imasR.InDesiredState) { throw \"win_dsc: TestConfiguration returned no InDesiredState (ReturnValue: $($imasR.ReturnValue))\" }\n" +
-		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState } | ConvertTo-Json -Compress")
+		"  [pscustomobject]@{ InDesiredState = [bool]$imasR.InDesiredState; ResourceId = @($imasR.ResourceId | Where-Object { $_ }) } | ConvertTo-Json -Compress")
 }
 
 // applyScript applies the configuration at path; the method returns once
@@ -91,67 +100,80 @@ func applyScript(path string) string {
 		returnValueCheck("SendConfigurationApply"))
 }
 
+// testAnswer is one node's answer in testScript's output.
+type testAnswer struct {
+	InDesiredState *bool    `json:"InDesiredState"`
+	ResourceID     []string `json:"ResourceId"`
+}
+
 // parseInDesiredState reads testScript's output. TestConfiguration
 // answers one object per node; every one must be in the desired state.
-func parseInDesiredState(out string) (bool, error) {
+// It also returns the resources reported out of it.
+func parseInDesiredState(out string) (bool, []string, error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
-		return false, fmt.Errorf("TestConfiguration returned nothing")
+		return false, nil, fmt.Errorf("TestConfiguration returned nothing")
 	}
-	var one struct {
-		InDesiredState *bool `json:"InDesiredState"`
-	}
+	var many []testAnswer
 	if strings.HasPrefix(out, "[") {
-		var many []struct {
-			InDesiredState *bool `json:"InDesiredState"`
-		}
 		if err := json.Unmarshal([]byte(out), &many); err != nil {
-			return false, fmt.Errorf("parsing TestConfiguration output: %w (output: %s)", err, out)
+			return false, nil, fmt.Errorf("parsing TestConfiguration output: %w (output: %s)", err, out)
 		}
 		if len(many) == 0 {
-			return false, fmt.Errorf("TestConfiguration returned no node")
+			return false, nil, fmt.Errorf("TestConfiguration returned no node")
 		}
-		for _, n := range many {
-			if n.InDesiredState == nil {
-				return false, fmt.Errorf("unexpected TestConfiguration output: %s", out)
-			}
-			if !*n.InDesiredState {
-				return false, nil
-			}
+	} else {
+		var one testAnswer
+		if err := json.Unmarshal([]byte(out), &one); err != nil {
+			return false, nil, fmt.Errorf("parsing TestConfiguration output: %w (output: %s)", err, out)
 		}
-		return true, nil
+		many = []testAnswer{one}
 	}
-	if err := json.Unmarshal([]byte(out), &one); err != nil {
-		return false, fmt.Errorf("parsing TestConfiguration output: %w (output: %s)", err, out)
+	ok := true
+	var ids []string
+	for _, n := range many {
+		if n.InDesiredState == nil {
+			return false, nil, fmt.Errorf("unexpected TestConfiguration output: %s", out)
+		}
+		if !*n.InDesiredState {
+			ok = false
+			ids = append(ids, n.ResourceID...)
+		}
 	}
-	if one.InDesiredState == nil {
-		return false, fmt.Errorf("unexpected TestConfiguration output: %s", out)
+	return ok, ids, nil
+}
+
+// pendingNote names the configuration and, when the LCM said, the
+// resources not in the desired state.
+func (d Dsc) pendingNote(verb string, ids []string) cook.SimpleNote {
+	if len(ids) == 0 {
+		return cook.SimpleNote(fmt.Sprintf("%s %s", d.name, verb))
 	}
-	return *one.InDesiredState, nil
+	return cook.SimpleNote(fmt.Sprintf("%s %s (not in the desired state: %s)", d.name, verb, strings.Join(ids, ", ")))
 }
 
 // inDesiredState asks the LCM about the compiled configuration at d.path.
-func (d Dsc) inDesiredState(ctx context.Context) (bool, error) {
+func (d Dsc) inDesiredState(ctx context.Context) (bool, []string, error) {
 	timeout, err := winexec.ParseTimeout(winexec.StringParamOr(d.params, "timeout", ""))
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	out, err := runPowerShell(ctx, testScript(d.path), timeout)
 	if err != nil {
-		return false, fmt.Errorf("the LCM's TestConfiguration of %s: %w", d.path, err)
+		return false, nil, fmt.Errorf("the LCM's TestConfiguration of %s: %w", d.path, err)
 	}
 	return parseInDesiredState(out)
 }
 
 func (d Dsc) Test(ctx context.Context) (cook.Result, error) {
-	ok, err := d.inDesiredState(ctx)
+	ok, ids, err := d.inDesiredState(ctx)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
 	if ok {
 		return cook.Result{Succeeded: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s is already in the desired state", d.name))}}, nil
 	}
-	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s would be applied", d.name))}}, nil
+	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{d.pendingNote("would be applied", ids)}}, nil
 }
 
 func (d Dsc) Apply(ctx context.Context) (cook.Result, error) {
@@ -159,7 +181,7 @@ func (d Dsc) Apply(ctx context.Context) (cook.Result, error) {
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
-	ok, err := d.inDesiredState(ctx)
+	ok, ids, err := d.inDesiredState(ctx)
 	if err != nil {
 		return cook.Result{Failed: true}, err
 	}
@@ -169,5 +191,5 @@ func (d Dsc) Apply(ctx context.Context) (cook.Result, error) {
 	if _, err := runPowerShell(ctx, applyScript(d.path), timeout); err != nil {
 		return cook.Result{Failed: true}, fmt.Errorf("the LCM's SendConfigurationApply of %s: %w", d.path, err)
 	}
-	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{cook.SimpleNote(fmt.Sprintf("%s has been applied", d.name))}}, nil
+	return cook.Result{Succeeded: true, Changed: true, Notes: []fmt.Stringer{d.pendingNote("has been applied", ids)}}, nil
 }

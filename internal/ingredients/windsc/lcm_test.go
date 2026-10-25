@@ -49,20 +49,23 @@ func TestParseInDesiredState(t *testing.T) {
 	tests := []struct {
 		out     string
 		want    bool
+		ids     string
 		wantErr bool
 	}{
-		{`{"InDesiredState":true}`, true, false},
-		{`{"InDesiredState":false}`, false, false},
-		{`[{"InDesiredState":true},{"InDesiredState":false}]`, false, false},
-		{`[{"InDesiredState":true}]`, true, false},
-		{``, false, true},
-		{`{"Other":1}`, false, true},
-		{`not json`, false, true},
+		{`{"InDesiredState":true,"ResourceId":[]}`, true, "", false},
+		{`{"InDesiredState":false}`, false, "", false},
+		{`{"InDesiredState":false,"ResourceId":["[File]Marker"]}`, false, "[File]Marker", false},
+		{`[{"InDesiredState":true,"ResourceId":["[File]Ignored"]},{"InDesiredState":false,"ResourceId":["[File]B"]}]`, false, "[File]B", false},
+		{`[{"InDesiredState":true}]`, true, "", false},
+		{``, false, "", true},
+		{`[]`, false, "", true},
+		{`{"Other":1}`, false, "", true},
+		{`not json`, false, "", true},
 	}
 	for _, tt := range tests {
-		got, err := parseInDesiredState(tt.out)
-		if got != tt.want || (err != nil) != tt.wantErr {
-			t.Errorf("parseInDesiredState(%q) = %v, %v", tt.out, got, err)
+		got, ids, err := parseInDesiredState(tt.out)
+		if got != tt.want || strings.Join(ids, ",") != tt.ids || (err != nil) != tt.wantErr {
+			t.Errorf("parseInDesiredState(%q) = %v, %q, %v", tt.out, got, ids, err)
 		}
 	}
 }
@@ -121,14 +124,27 @@ func TestFailureCarriesTheCmdletError(t *testing.T) {
 	}
 }
 
+// The resources the LCM reports out of the desired state are named in the
+// step's note, so a run that keeps reapplying says which one (W11 CI).
+func TestNoteNamesTheResourcesNotInTheDesiredState(t *testing.T) {
+	fake(t, func(string) (string, error) {
+		return `{"InDesiredState":false,"ResourceId":["[File]Marker"]}`, nil
+	})
+	res, err := parse(t).Test(context.Background())
+	if err != nil || !res.Changed || len(res.Notes) != 1 || !strings.Contains(res.Notes[0].String(), "would be applied (not in the desired state: [File]Marker)") {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
 // The LCM is asked through its own CIM methods (W11 CI: Test-DscConfiguration
 // -Path over DCOM sent a configuration the LCM could not parse):
-// TestConfiguration with the MOF's bytes length-prefixed, its answer always
-// the InDesiredState object parseInDesiredState reads, and no answer an
-// error; SendConfigurationApply with the bytes alone.
+// TestConfiguration with the MOF's bytes, length-prefixed only if the LCM
+// refuses them as a syntax error, its answer always the InDesiredState
+// object parseInDesiredState reads, and no answer an error;
+// SendConfigurationApply with the bytes alone.
 func TestScriptsCallTheLCMMethods(t *testing.T) {
 	test, apply := testScript(`C:\x`), applyScript(`C:\x`)
-	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "ConfigurationData = $imasData }", "localhost.mof"} {
+	for _, want := range []string{"-MethodName TestConfiguration", "[BitConverter]::GetBytes([int]($imasBytes.Length + 4)) + $imasBytes", "InDesiredState = [bool]$imasR.InDesiredState", "if ($null -eq $imasR.InDesiredState) { throw", "TestConfiguration -Arguments @{ ConfigurationData = $imasBytes }", "-notmatch 'Syntax Error') { throw }", "TestConfiguration -Arguments @{ ConfigurationData = $imasData }", "ResourceId = @($imasR.ResourceId", "localhost.mof"} {
 		if !strings.Contains(test, want) {
 			t.Errorf("test script lacks %q:\n%s", want, test)
 		}
