@@ -474,6 +474,30 @@ v "$uat" run t2-win 'hostname'
 if [ "$rc" -eq 255 ] && [ "$(calls | grep -c '^winrm decoded: hostname')" -eq $((before + 1)) ]; then
   ok "vmctl: a WinRM run with no exit code gives 255 and is not repeated"
 else nok "vmctl: winrm no marker (rc=$rc)" "$(calls) $err"; fi
+rm -f "$STUB_STATE/win_no_marker"
+# W11: the pooled shell dies under its server (a reboot): the next call
+# finds it answering nothing, opens a new session and runs the command once
+# more there.
+v "$uat" run t2-win 'hostname'
+cat "$STUB_STATE/shell_count" >"$STUB_STATE/shells_dead_upto"
+opened=$(calls | grep -c '^winrm open_shell')
+v "$uat" run t2-win 'Write-Output after-reboot'
+if [ "$rc" -eq 0 ] && calls | grep -q "^winrm shell-[0-9]* answered nothing: Write-Output after-reboot" &&
+  [ "$(calls | grep -c '^winrm open_shell')" -eq $((opened + 1)) ] && calls | grep -qxF "winrm decoded: Write-Output after-reboot"; then
+  ok "vmctl: a pooled shell that died under its server is replaced, and the command runs on the new one"
+else nok "vmctl: dead pooled shell (rc=$rc)" "$(calls | tail -n 8) $err"; fi
+touch "$STUB_STATE/win_empty"
+v "$uat" run t2-win 'hostname'
+pool="$STUB_STATE/cm/winrm-t2-win.sock"
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "exited 253 with no exit code: winrm_exec.py: the pooled session returned nothing" &&
+  [ ! -S "$pool" ]; then
+  ok "vmctl: a shell that returns nothing on a new session too is an error (253, never 0), and the pool is gone"
+else nok "vmctl: pool returns nothing (rc=$rc)" "$(calls | tail -n 8) $err"; fi
+VMCTL_WINRM_POOL=0 v "$uat" run t1-win 'hostname'
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "exited 253 with no exit code: winrm_exec.py: the WinRM session returned nothing"; then
+  ok "vmctl: without the pool too, a session that returns nothing is 253, not 0"
+else nok "vmctl: no-pool returns nothing (rc=$rc)" "$err"; fi
+rm -f "$STUB_STATE/win_empty" "$STUB_STATE/shells_dead_upto"
 
 new_case vretry
 write_access
@@ -585,6 +609,9 @@ else nok "vmctl: maybe-ran (rc=$rc)" "$(calls) $err"; fi
 rm -f "$STUB_STATE/ssh_no_marker" "$STUB_STATE/vmctl/t1-ubuntu.fails"
 
 # The dead mark: strikes, the fast failure, the re-probe and what clears it.
+# One reopen per call: the tunnels here stay stale on purpose, and the
+# retries have their own test (supervise: a failed reopen is tried 3 times).
+export CH_REOPEN_ATTEMPTS=1
 new_case vdead
 open_real
 p=$(port_of t1-alma ssh)
@@ -631,6 +658,7 @@ if [ "$rc" -eq 0 ] && [ ! -e "$STUB_STATE/vmctl/t1-alma.fails" ]; then
 else nok "vmctl: restart clears dead (rc=$rc)" "$err"; fi
 
 # Fresh before each command: a tunnel or login past REFRESH_AFTER.
+unset CH_REOPEN_ATTEMPTS
 new_case vfresh
 open_real
 p=$(port_of t1-ubuntu ssh)
@@ -708,7 +736,7 @@ p=$(port_of t2-win winrm)
 touch "$STUB_STATE/heal_on_reopen" "$STUB_STATE/stale.$p"
 v "$uat" restart t2-win
 if [ "$rc" -eq 0 ] && printf '%s' "$err" | grep -q "probe: no HTTPS answer on /wsman within 1s; recreating its tunnel" &&
-  calls | grep -qxF "winrm decoded: exit 0" && printf '%s' "$err" | grep -q "t2-win is back" && [ "$(port_of t2-win winrm)" = "$p" ] &&
+  calls | grep -qxF "winrm decoded: Write-Output 'IMAS_VMCTL_GUEST_OK'" && printf '%s' "$err" | grep -q "t2-win is back" && [ "$(port_of t2-win winrm)" = "$p" ] &&
   ! calls | grep -q "run-command"; then
   ok "vmctl: a Windows restart whose tunnel went stale recreates it on its port and comes back"
 else nok "vmctl: restart recreates tunnel (rc=$rc)" "$(calls) $err"; fi
@@ -721,6 +749,26 @@ if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "t1-win is running; waiting
   ok "vmctl: a restart whose guest never answers gives 255, naming the reason and the last probe error"
 else nok "vmctl: restart guest timeout (rc=$rc)" "$err"; fi
 rm -f "$STUB_STATE/stale.$p"
+# W11 (UAT Run 2's Windows L1): the guest check must print its token; a
+# shell that answers nothing is closed after every failed check, and the
+# failure carries the last attempt's raw output.
+touch "$STUB_STATE/win_empty"
+opened=$(calls | grep -c '^winrm open_shell')
+VMCTL_RESTART_WAIT_SECONDS=2 v "$uat" restart t2-win
+if [ "$rc" -eq 255 ] && printf '%s' "$err" | grep -q "not back after 2s: running, but its guest does not answer over winrm (last: the probe answers, but a command does not: .*pooled session returned nothing.*(stdout '', stderr '" &&
+  [ "$(calls | grep -c '^winrm open_shell')" -ge $((opened + 2)) ]; then
+  ok "vmctl: a guest check whose shell answers nothing fails with the raw output, on a new session each time"
+else nok "vmctl: restart guest returns nothing (rc=$rc)" "$(calls | tail -n 8) $err"; fi
+rm -f "$STUB_STATE/win_empty"
+v "$uat" run t2-win 'hostname'
+if [ "$rc" -eq 0 ] && [ -S "$STUB_STATE/cm/winrm-t2-win.sock" ]; then
+  closes=$(calls | grep -c '^winrm close_shell')
+  v "$uat" restart t2-win
+  if [ "$rc" -eq 0 ] && [ "$(calls | grep -c '^winrm close_shell')" -gt "$closes" ] &&
+    calls | tail -n 30 | grep -qxF "winrm decoded: Write-Output 'IMAS_VMCTL_GUEST_OK'"; then
+    ok "vmctl: a restart closes the VM's pooled WinRM session and checks the guest on a new one"
+  else nok "vmctl: restart closes the pool (rc=$rc)" "$(calls | tail -n 12) $err"; fi
+else nok "vmctl: restart pool setup (rc=$rc)" "$err"; fi
 new_case vrestart_agent
 V_ACCESS=""
 echo "Ready 2000-01-01T00:00:00+00:00" >"$STUB_STATE/agent"
@@ -765,7 +813,7 @@ for _ in $(seq 50); do listening "$p" && break; sleep 0.1; done
 t reopen-one "$uat" "$state" t1-alma ssh
 kill "$blocker" 2>/dev/null
 blocker=""
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "port $p is still taken after its tunnel stopped; not moving it" && [ "$(port_of t1-alma ssh)" = "$p" ]; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "port $p is still taken after its tunnel stopped (by: [0-9 ]*); not moving it" && [ "$(port_of t1-alma ssh)" = "$p" ]; then
   ok "tunnels: reopen-one never moves a tunnel to another port"
 else nok "tunnels: reopen-one taken port (rc=$rc)" "$out"; fi
 t close "$state"
@@ -1082,6 +1130,50 @@ fi
 kill "$conn" 2>/dev/null
 wait "$conn" 2>/dev/null
 rm -f "$STUB_STATE/stale.$kp"
+# W11: a kubectl call holds its kube tunnel's lock shared (the harness,
+# kubelock.go); the supervisor never reopens the tunnel under it.
+mkdir -p "$state/locks"
+( flock -s 9; sleep 4 ) 9>>"$state/locks/kube-$kp.lock" &
+holder=$!
+sleep 0.3
+k_pid=$(spid_of uat-dmz kube)
+sv supervise tick
+if printf '%s' "$out" | grep -q "uat-dmz kube tunnel (127.0.0.1:$kp): kubectl calls held its lock for 1s; leaving it for the next round" &&
+  [ "$(spid_of uat-dmz kube)" = "$k_pid" ]; then
+  ok "supervise: a kube tunnel whose lock a kubectl call holds is not reopened under it"
+else nok "supervise: kube lock (rc=$rc)" "$out"; fi
+wait "$holder"
+sv supervise tick
+if [ "$(spid_of uat-dmz kube)" != "$k_pid" ] && [ ! -e "$state/reopening/uat-dmz-kube" ]; then
+  ok "supervise: the next round reopens it once the call is done, and leaves no reopening marker"
+else nok "supervise: kube lock later round" "$out"; fi
+# W11: tunnels opened together do not all come due together: tunnel i of n
+# is due i * REFRESH_AFTER / 2n early.
+for f in "$state"/opened/*; do echo $(($(date +%s) - 8 * 60)) >"$f"; done
+UAT_SUPERVISE_PROBE=0 UAT_TUNNEL_STAGGER=0 sv supervise tick
+none=$(printf '%s\n' "$out" | grep -c 'reopening it$')
+UAT_SUPERVISE_PROBE=0 sv supervise tick
+some=$(printf '%s\n' "$out" | grep -c 'reopening it$')
+if [ "$none" -eq 0 ] && [ "$some" -eq 6 ] && printf '%s' "$out" | grep -q "this tunnel's staggered limit 7m00s"; then
+  ok "supervise: tunnel limits are staggered (8 minutes old: 6 of 10 due), and UAT_TUNNEL_STAGGER=0 turns it off"
+else nok "supervise: stagger ($none, $some)" "$out"; fi
+# W11: a reopen that fails is tried again at once, 3 times, and says why
+# (tunnels.sh's own error) and that nothing listens on the port.
+p=$(sport_of t2-ubuntu ssh)
+jq -r '.sprouts["t2-ubuntu"].id' "$uat" >"$STUB_STATE/fail_ids"
+echo $(($(date +%s) - 12 * 60)) >"$state/opened/t2-ubuntu-ssh"
+sv supervise tick
+# (On a loaded machine the stub's failure can show as "not ready" rather
+# than "exited": either is tunnels.sh's own reason.)
+if [ "$(printf '%s\n' "$out" | grep -cE '^tunnels.sh: t2-ubuntu ssh: the reopened tunnel (exited|on 127.0.0.1:[0-9]+ not ready)')" -eq 3 ] &&
+  printf '%s' "$out" | grep -q "t2-ubuntu ssh tunnel reopened on 127.0.0.1:$p: fail tunnels.sh reopen-one failed (attempt 3 of 3): tunnels.sh: t2-ubuntu ssh: the reopened tunnel .*; nothing listens on 127.0.0.1:$p now (the next round tries again)"; then
+  ok "supervise: a failed reopen is tried 3 times in a row and names tunnels.sh's error and the dead port"
+else nok "supervise: reopen retries (rc=$rc)" "$out"; fi
+rm -f "$STUB_STATE/fail_ids"
+sv supervise tick
+if listening "$p" && ! printf '%s' "$out" | grep -q "127.0.0.1::"; then
+  ok "supervise: the next round brings the port back; no log line has an empty port"
+else nok "supervise: port back" "$out"; fi
 # Dead marks: re-probed, un-marked when the tunnel answers; refresh clears all.
 now=$(date +%s)
 printf '3 %s 0\nssh to t1-alma: banner exchange\n' $((now - 300)) >"$state/vmctl/t1-alma.fails"

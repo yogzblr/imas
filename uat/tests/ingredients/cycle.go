@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -74,6 +76,10 @@ func (cy *Cycle) diagnose(ctx context.Context, r *recorder, jids ...string) {
 		return
 	}
 	cy.diagnosed = true
+	// The case's own deadline may be what ended it: the collection gets
+	// its own time.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	defer cancel()
 	if where := d.Diagnose(ctx, cy.Sprout, jids...); where != "" {
 		r.Logf("the VM's side of this failure (sprout log, job records, through az vm run-command): %s", where)
 	}
@@ -192,8 +198,25 @@ type Cycle struct {
 	// still fail there.
 	CrossCheck *harness.Sprout
 
+	// Limit, when set, is the case's whole time limit on this sprout (the
+	// caller's context deadline): a case that runs past it says so.
+	Limit time.Duration
+
 	// diagnosed: the VM's side of a failure was collected (diagnose).
 	diagnosed bool
+}
+
+// EnvCaseTimeout overrides CaseLimit for every case (a Go duration).
+const EnvCaseTimeout = "IMAS_UAT_CASE_TIMEOUT"
+
+// CaseLimit bounds one case on one sprout: four cooks and the revert cook
+// of up to the case's cook timeout each, plus the setup, checks and revert
+// scripts; $IMAS_UAT_CASE_TIMEOUT when set.
+func CaseLimit(c *Case) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(EnvCaseTimeout)); err == nil && d > 0 {
+		return d
+	}
+	return 5*c.CookTimeout() + 45*time.Minute
 }
 
 // NewVars returns the placeholder values for a case on a sprout.
@@ -238,6 +261,16 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	c, sp, d := cy.Case, cy.Sprout, cy.Driver
 	r := newRecorder(c.ID, sp)
 	defer func() { r.out.Elapsed = time.Since(start) }()
+	// Runs after the revert: a case stopped by its limit says which step
+	// it was on and what the limit was, not just "context deadline
+	// exceeded" (W11).
+	stoppedAt := ""
+	defer func() {
+		if cy.Limit > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			r.Errorf("the case ran past its time limit of %s on this sprout (%s, default five times the cook timeout of %s plus 45m) at step %q; a cook that never finishes is usually a lost job: see the sprout's log in the diagnostics",
+				cy.Limit, EnvCaseTimeout, c.CookTimeout(), stoppedAt)
+		}
+	}()
 	if ok, reason := c.Runs(sp.OS); !ok {
 		if reason == "" {
 			reason = "the case doesn't list " + sp.OS
@@ -259,6 +292,7 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 	// The revert runs whatever happens below, after the recipes are
 	// cleaned up from the tenant.
 	defer func() {
+		stoppedAt = r.step
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout+5*time.Minute)
 		defer cancel()
 		if part.RevertRecipe != "" {
@@ -296,8 +330,37 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 			r.Fatalf("running the setup script: %v", err)
 			return r.out
 		}
-		if rc, out := scriptResult(res, "SETUP"); rc != 0 {
+		rc, out := scriptResult(res, "SETUP")
+		if rc != 0 {
 			r.Fatalf("the setup script exited %d (not the ingredient's fault; the case can't run): %s", rc, clip(out, 400))
+			return r.out
+		}
+		set, skip, err := SetupDirectives(out)
+		if err != nil {
+			r.Fatalf("the setup script's output: %v", err)
+			return r.out
+		}
+		if skip != "" {
+			// The host lacks what the case needs (W11: Server Core has
+			// no Print Spooler): a skip with the setup's reason, never a
+			// failure. The revert still runs.
+			r.Skipf("the setup found the host can't run this case: %s", oneLine(skip))
+			return r.out
+		}
+		vars := Vars{}
+		for k, v := range cy.Vars {
+			vars[k] = v
+		}
+		for k, v := range set {
+			vars[k] = v
+		}
+		part = c.For(sp.OS).Expand(vars)
+		if left := unsetSetupVars(part); len(left) > 0 {
+			r.Fatalf("the setup script did not set %s (print a line \"%s<NAME>=<value>\")", strings.Join(left, ", "), setupSetPrefix)
+			return r.out
+		}
+		if steps, err = RecipeSteps(part.Recipe); err != nil {
+			r.Fatalf("the case's recipe doesn't parse with the setup's values: %v", err)
 			return r.out
 		}
 	}
@@ -319,8 +382,17 @@ func (cy *Cycle) Run(ctx context.Context) *Outcome {
 			report = r.Fatalf
 		}
 		if err != nil {
+			// A cook that never finished is usually a lost job (UAT Run 2's
+			// I.win_shortcut.present: the sprout restarted under it): the
+			// VM's side, with the job's log lines and, when the sprout
+			// restarted, the event logs (W11).
 			report("%s: %v", what, err)
-			return "", false
+			if it.JID != "" {
+				cy.diagnose(ctx, r, it.JID)
+			} else {
+				cy.diagnose(ctx, r)
+			}
+			return it.JID, false
 		}
 		// The cook's result goes into the report whatever it is: the job
 		// id finds the cook in the hub's and the sprout's logs.
@@ -693,4 +765,67 @@ func clip(s string, n int) string {
 		return "(no output)"
 	}
 	return s
+}
+
+// Setup directives (W11). A setup script prints, on lines of their own,
+//
+//	IMAS_UAT_SET <NAME>=<value>   fills @SETUP_<NAME>@ in the recipe, the
+//	                              check, expect_output and the reverts
+//	IMAS_UAT_SKIP: <reason>       the host can't run the case: a skip
+//
+// so a case can pick at run time what the host has (a service that
+// exists on Server Core) and skip, with a reason, when it has none. A
+// value is 1 to 64 letters, digits, dots, dashes and underscores: it goes
+// into a recipe and scripts as written.
+const (
+	setupSetPrefix  = "IMAS_UAT_SET "
+	setupSkipPrefix = "IMAS_UAT_SKIP:"
+)
+
+var (
+	setupNameRe  = regexp.MustCompile(`^[A-Z0-9_]{1,32}$`)
+	setupValueRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+)
+
+// SetupDirectives reads a setup script's output: the placeholder values
+// it set (by placeholder, "@SETUP_<NAME>@") and its skip reason, if any.
+func SetupDirectives(out string) (Vars, string, error) {
+	set := Vars{}
+	skip := ""
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, setupSkipPrefix):
+			reason := strings.TrimSpace(strings.TrimPrefix(line, setupSkipPrefix))
+			if reason == "" {
+				return nil, "", fmt.Errorf("%s without a reason", strings.TrimSpace(setupSkipPrefix))
+			}
+			skip = reason
+		case strings.HasPrefix(line, setupSetPrefix):
+			name, value, ok := strings.Cut(strings.TrimPrefix(line, setupSetPrefix), "=")
+			if !ok || !setupNameRe.MatchString(name) {
+				return nil, "", fmt.Errorf("bad line %q: want %s<NAME>=<value>, NAME in A-Z, 0-9 and _", clip(line, 80), setupSetPrefix)
+			}
+			if !setupValueRe.MatchString(value) {
+				return nil, "", fmt.Errorf("%s: the value %q is not 1 to 64 letters, digits, '.', '-' or '_'", name, clip(value, 80))
+			}
+			set["@SETUP_"+name+"@"] = value
+		}
+	}
+	return set, skip, nil
+}
+
+// unsetSetupVars lists the @SETUP_...@ placeholders left in a part.
+func unsetSetupVars(p Part) []string {
+	seen := map[string]bool{}
+	var left []string
+	for _, s := range []string{p.Recipe, p.Check, p.ExpectOutput, p.RevertRecipe, p.Revert} {
+		for _, ph := range placeholderRe.FindAllString(s, -1) {
+			if setupVarRe.MatchString(ph) && !seen[ph] {
+				seen[ph] = true
+				left = append(left, ph)
+			}
+		}
+	}
+	return left
 }

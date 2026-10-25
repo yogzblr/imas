@@ -90,6 +90,7 @@ ch_closefds() {
     eval "exec $n>&-" 2>/dev/null || true
   done
   for n in "${ch_slots_fds[@]}"; do eval "exec $n>&-" 2>/dev/null || true; done
+  [ -z "${ch_kube_lock_fd:-}" ] || eval "exec ${ch_kube_lock_fd}>&-" 2>/dev/null || true
 }
 
 # ch_login_age: seconds since the Azure login, or empty when none is recorded.
@@ -121,6 +122,27 @@ ch_fmt_age() {
 # ch_due <age or empty>: is that age past REFRESH_AFTER (an unknown age is
 # not due: there is nothing to refresh)?
 ch_due() { [ -n "${1:-}" ] && [ "$1" -ge $((ch_refresh_after * 60)) ]; }
+
+# ch_tunnel_limit <vm> <kind>: the age in seconds at which that tunnel is
+# due. Staggered (W11): tunnels.sh opens every tunnel at once, so with one
+# limit they all came due in the same supervisor round and were reopened
+# together (UAT Run 2 on rc.21: D1's kubectl hit uat-core's kube tunnel
+# mid-reopen). Tunnel i of the n in tunnels.pids is due i * REFRESH_AFTER /
+# (2n) early, so the reopens spread over half of REFRESH_AFTER and stay
+# apart. UAT_TUNNEL_STAGGER=0: every tunnel at REFRESH_AFTER.
+ch_tunnel_limit() {
+  local limit=$((ch_refresh_after * 60)) n i
+  if [ "${UAT_TUNNEL_STAGGER:-1}" != 0 ] && [ -s "${CH_ACCESS_DIR:-}/tunnels.pids" ]; then
+    n=$(grep -c . "$CH_ACCESS_DIR/tunnels.pids")
+    i=$(awk -F'\t' -v vm="$1" -v k="$2" '$2 == vm && $3 == k { print NR - 1; exit }' "$CH_ACCESS_DIR/tunnels.pids")
+    if [ -n "$i" ] && [ "$n" -gt 0 ]; then limit=$((limit - i * limit / (2 * n))); fi
+  fi
+  echo "$limit"
+}
+
+# ch_tunnel_due <vm> <kind> <age or empty>: is that tunnel's age past its
+# (staggered) limit?
+ch_tunnel_due() { [ -n "${3:-}" ] && [ "$3" -ge "$(ch_tunnel_limit "$1" "$2")" ]; }
 
 # ch_port <vm> <kind>: the tunnel's local port from access.json, or empty.
 ch_port() {
@@ -269,30 +291,73 @@ ch_clear_marks() { rm -f "$CH_STATE_DIR"/*.fails; }
 
 # --- the reopen
 
-# ch_reopen <vm> <kind>: reopens one tunnel on its port and probes it, twice
-# at most; prints the probe's verdict. The caller holds the VM's slots
-# (ch_slots_exclusive) or has drained the port. Exits 0 when the reopened
-# tunnel answers.
+# ch_reopen <vm> <kind>: reopens one tunnel on its port and probes it, up
+# to CH_REOPEN_ATTEMPTS (3) times in a row (W11: a failed reopen left the
+# port with no listener until the next round); prints the probe's verdict,
+# or tunnels.sh's own error. The caller holds the VM's slots
+# (ch_slots_exclusive) or, for a kube tunnel, its lock (ch_kube_lock).
+# While it runs, <access dir>/reopening/<vm>-<kind> exists (the harness
+# retries a refused kubectl call while a kube tunnel's does). Exits 0 when
+# the reopened tunnel answers.
 ch_reopen() {
-  local vm=$1 kind=$2 port verdict
+  local vm=$1 kind=$2 port verdict errf attempt tries=${CH_REOPEN_ATTEMPTS:-3}
   port=$(ch_port "$vm" "$kind")
   [ "$kind" = ssh ] && ch_ssh_master_close "$vm"
   [ "$kind" = winrm ] && ch_winrm_pool_close "$vm"
-  for _ in 1 2; do
-    if ! (ch_closefds; TUNNEL_WAIT_SECONDS=${CH_REOPEN_WAIT_SECONDS:-60} exec "$ch_tunnels" reopen-one "${UAT_UAT_JSON:?}" "$CH_ACCESS_DIR" "$vm" "$kind" >&2); then
-      verdict="fail tunnels.sh reopen-one failed"
+  mkdir -p "$CH_ACCESS_DIR/reopening"
+  : >"$CH_ACCESS_DIR/reopening/$vm-$kind"
+  errf=$(mktemp)
+  for ((attempt = 1; attempt <= tries; attempt++)); do
+    if ! (ch_closefds; TUNNEL_WAIT_SECONDS=${CH_REOPEN_WAIT_SECONDS:-60} exec "$ch_tunnels" reopen-one "${UAT_UAT_JSON:?}" "$CH_ACCESS_DIR" "$vm" "$kind" 2>"$errf"); then
+      # tunnels.sh's own reason: its last line that is not a log line of
+      # the tunnel's (those are indented).
+      verdict="fail tunnels.sh reopen-one failed (attempt $attempt of $tries): $(grep -v '^[[:space:]]' "$errf" | grep -v '^[[:space:]]*$' | tail -n 1)"
+      cat "$errf" >&2
       continue
     fi
+    cat "$errf" >&2
     port=$(ch_port "$vm" "$kind")
     verdict=$(ch_probe "$kind" "$port")
     [ "${verdict%% *}" = ok ] && break
   done
+  rm -f "$errf" "$CH_ACCESS_DIR/reopening/$vm-$kind"
+  if [ "${verdict%% *}" != ok ] && [ -n "$port" ] && ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    verdict="$verdict; nothing listens on 127.0.0.1:$port now (the next round tries again)"
+  fi
   echo "$verdict"
   if [ "${verdict%% *}" = ok ]; then
     ch_clear_mark "$vm"
     return 0
   fi
   return 1
+}
+
+# --- the kube tunnel lock (W11)
+
+# ch_kube_lock_file <port>: the reader/writer lock of the kube tunnel on
+# that port. The harness's kubectl and acceptance.sh calls hold it shared
+# for their whole run (uat/tests/harness/kubelock.go); a reopen holds it
+# exclusively.
+ch_kube_lock_file() { echo "$CH_ACCESS_DIR/locks/kube-$1.lock"; }
+
+# ch_kube_lock <port> <wait seconds>: takes the kube tunnel's lock
+# exclusively, waiting up to <wait> for the calls that hold it shared; 1
+# when they did not finish. ch_kube_unlock gives it back.
+ch_kube_lock() {
+  local fd
+  mkdir -p "$CH_ACCESS_DIR/locks"
+  exec {fd}>>"$(ch_kube_lock_file "$1")"
+  if ! flock -x -w "$2" "$fd"; then
+    exec {fd}>&-
+    return 1
+  fi
+  ch_kube_lock_fd=$fd
+}
+ch_kube_unlock() {
+  [ -n "${ch_kube_lock_fd:-}" ] || return 0
+  flock -u "$ch_kube_lock_fd" 2>/dev/null || true
+  exec {ch_kube_lock_fd}>&-
+  ch_kube_lock_fd=""
 }
 
 # ch_port_connections <port>: established connections to a local port
@@ -348,22 +413,29 @@ ch_capture() {
   } 2>&1 | redact >"$f"
   # In the background, holding none of the caller's streams: the caller's
   # reader (the Go harness) must not wait for it.
-  (ch_closefds; ch_capture_vm_limits "$vm") </dev/null >/dev/null 2>&1 &
+  # A WinRM call that timed out while the tunnel's probe answers points at
+  # the VM itself (busy CPU, WinRM out of shells): always look (W11).
+  local force=0
+  if [ "$kind" = winrm ] && [[ "$line" == *"probe=ok "* ]] && [[ "$line" == *"timed out"* ]]; then force=1; fi
+  (ch_closefds; ch_capture_vm_limits "$vm" "$force") </dev/null >/dev/null 2>&1 &
   disown 2>/dev/null || true
   return 0
 }
 
-# ch_capture_vm_limits <vm>: the VM side of the channel, through az vm
-# run-command (never the tunnel), at most once per VM per
-# UAT_VM_LIMITS_EVERY_SECONDS (600), into
+# ch_capture_vm_limits <vm> [force]: the VM side of the channel, through
+# az vm run-command (never the tunnel), at most once per VM per
+# UAT_VM_LIMITS_EVERY_SECONDS (600) unless force is 1, into
 # $VMCTL_DIAG_DIR/channel/<epoch>-<vm>-vm-side.txt, holding every slot of
 # the VM (waiting up to UAT_VM_LIMITS_WAIT_SECONDS, 600) as any run-command
-# call does.
+# call does. Azure keeps only the last 4096 bytes of the output, so what
+# matters most comes last: on Windows the WinRM events, then its limits,
+# then (W11) the CPU load, the WinRM service and its shells (the
+# wsmprovhost processes and the WSMan shell instances).
 ch_capture_vm_limits() {
-  local vm=$1 dir=${VMCTL_DIAG_DIR:-} stamp id os out f
+  local vm=$1 force=${2:-0} dir=${VMCTL_DIAG_DIR:-} stamp id os out f
   [ -n "$dir" ] && [ -n "${UAT_UAT_JSON:-}" ] || return 0
   stamp="$CH_STATE_DIR/$vm.vm-side"
-  if [ -f "$stamp" ] && [ $(($(ch_now) - $(stat -c %Y "$stamp"))) -lt "${UAT_VM_LIMITS_EVERY_SECONDS:-600}" ]; then
+  if [ "$force" != 1 ] && [ -f "$stamp" ] && [ $(($(ch_now) - $(stat -c %Y "$stamp"))) -lt "${UAT_VM_LIMITS_EVERY_SECONDS:-600}" ]; then
     return 0
   fi
   touch "$stamp"
@@ -375,12 +447,15 @@ ch_capture_vm_limits() {
   ch_slots_exclusive "$vm" "$(ch_slots "$os")" "${UAT_VM_LIMITS_WAIT_SECONDS:-600}" || return 0
   f="$dir/channel/$(ch_now)-$vm-vm-side.txt"
   if [ "$os" = windows ]; then
+    # shellcheck disable=SC2016 # PowerShell, expanded on the VM
     out=$(timeout -k 10 "${UAT_RUNCOMMAND_TIMEOUT:-240}" "${AZ:-az}" vm run-command invoke --ids "$id" \
       --command-id RunPowerShellScript -o json --scripts \
+      'Get-WinEvent -LogName Microsoft-Windows-WinRM/Operational -MaxEvents 12 -ErrorAction SilentlyContinue | ForEach-Object { $m = $_.Message -replace "\s+", " "; if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + "..." }; "$($_.TimeCreated.ToUniversalTime().ToString("o")) $($_.Id): $m" }' \
       'winrm get winrm/config/winrs' 'winrm get winrm/config/service' \
-      'Get-Service WinRM | Format-List Name, Status' \
       'Get-NetTCPConnection -LocalPort 5986 -ErrorAction SilentlyContinue | Group-Object State | Format-Table Name, Count' \
-      'Get-WinEvent -LogName Microsoft-Windows-WinRM/Operational -MaxEvents 30 -ErrorAction SilentlyContinue | Format-List TimeCreated, Id, Message' \
+      '"== CPU load: $((Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average)%; top processes by CPU time:"' \
+      'Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | Format-Table -AutoSize Name, Id, CPU, WorkingSet64' \
+      '"== WinRM service: $((Get-Service WinRM).Status); wsmprovhost processes: $(@(Get-Process wsmprovhost -ErrorAction SilentlyContinue).Count); WSMan shells open: $(@(Get-WSManInstance -ResourceURI shell -Enumerate -ErrorAction SilentlyContinue).Count)"' \
       2>&1) || true
   else
     # shellcheck disable=SC2016 # expanded on the VM

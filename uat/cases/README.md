@@ -93,6 +93,18 @@ and sprout:
 | `@TENANT@` | 1 or 2 |
 | `@SPROUT_ID@` | the sprout's ID |
 | `@CASE@` | the id with dots as dashes |
+| `@SETUP_<NAME>@` | a value the setup script chose on the host (below) |
+
+**Setup directives (W11).** A setup script can print, on lines of their
+own, `IMAS_UAT_SET <NAME>=<value>`, which fills `@SETUP_<NAME>@` in the
+recipe, the check, `expect_output` and the reverts (a value is 1 to 64
+letters, digits, `.`, `-` or `_`), and `IMAS_UAT_SKIP: <reason>`, which
+makes the case a skip on that sprout with the reason (exit 0; the revert
+still runs). So a case picks at run time what the host has, and skips
+rather than fails when it has none: the Windows service state cases use
+the first of `seclogon`, `WerSvc` and `wuauserv` that exists and isn't
+disabled, since Server 2022 Core has no Print Spooler. A placeholder the
+setup didn't set fails the case before any cook.
 
 ## Harmless changes
 
@@ -109,7 +121,10 @@ anything that needs a reboot:
 - **Certificates:** a throwaway public certificate in the Personal store.
 - **Server Manager:** `Telnet-Client`.
 - **Services:** throwaway units (Linux) and a throwaway service plus the
-  Print Spooler's state, recorded and restored (Windows).
+  state of a stopped-by-default service the setup picks (`seclogon`,
+  `WerSvc` or `wuauserv`), recorded and restored (Windows).
+- **Users:** a throwaway local user made with `New-LocalUser` and a random
+  password that is never printed (Windows).
 
 Changing DNS, installing Windows updates, IIS, SMTP and SNMP are skips that
 say why, so the owner can decide.
