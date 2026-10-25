@@ -1,5 +1,3 @@
-//go:build windows
-
 package winshortcut
 
 import (
@@ -24,14 +22,14 @@ func newFakeBackend() *fakeBackend {
 	return &fakeBackend{states: map[string]shortcutState{}}
 }
 
-func (f *fakeBackend) Load(path string) (shortcutState, error) {
+func (f *fakeBackend) Load(_ context.Context, path string) (shortcutState, error) {
 	if f.loadErr != nil {
 		return shortcutState{}, f.loadErr
 	}
 	return f.states[path], nil
 }
 
-func (f *fakeBackend) Save(path string, state shortcutState) error {
+func (f *fakeBackend) Save(_ context.Context, path string, state shortcutState) error {
 	if f.saveErr != nil {
 		return f.saveErr
 	}
