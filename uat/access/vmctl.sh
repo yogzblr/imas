@@ -26,11 +26,15 @@
 # restart       az vm restart (when it fails: a reboot through run-command),
 #               then waits, up to VMCTL_RESTART_WAIT_SECONDS in all, until
 #               Azure reports the VM running and its guest answers: the
-#               tunnel's protocol probe, then a command over it. Every failed
-#               probe recreates the tunnel (a tunnel opened before the reboot
-#               can stop serving: UAT Run 2's Windows L1). With no tunnel, the
-#               guest agent reporting Ready after the restart began. A
-#               failure names the reason and the last probe's error.
+#               tunnel's protocol probe, then a command over it that must
+#               print a known token. Every failed probe recreates the tunnel
+#               (a tunnel opened before the reboot can stop serving: UAT Run
+#               2's Windows L1). The VM's SSH master and pooled WinRM session
+#               are closed before and after the power operation and after
+#               every failed guest check (W11: a pooled shell does not
+#               survive the reboot). With no tunnel, the guest agent
+#               reporting Ready after the restart began. A failure names the
+#               reason and the last check's error and raw output.
 # stop-sprout   stops the sprout service (systemd unit or Windows service
 # start-sprout  imas-sprout) on a sprout VM; refused for the hubs.
 # stop-vm       az vm stop (powered off, still allocated) on a hub node, then
@@ -397,12 +401,19 @@ az_run() {
 
 # ps_wrapper <base64>: the PowerShell wrapper of both Windows channels. It
 # decodes the command (UTF-8, base64), runs it, and prints the exit code
-# marker.
+# marker. The command runs as a script file (& <file>), not a ScriptBlock:
+# `exit N` in a ScriptBlock ends powershell.exe itself, before the marker
+# (W11: the restart's guest check was `exit 0`, so a Windows guest never
+# came back, "exited 0 with no exit code"); in a script file it ends only
+# the script and sets $LASTEXITCODE.
 ps_wrapper() {
   printf '%s\n' \
     "\$__c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$1'))" \
+    "\$__f = Join-Path ([IO.Path]::GetTempPath()) ('imas-vmctl-' + [guid]::NewGuid().ToString('N') + '.ps1')" \
+    "[IO.File]::WriteAllText(\$__f, \$__c, (New-Object Text.UTF8Encoding \$true))" \
+    "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue" \
     "\$global:LASTEXITCODE = 0; \$__ok = \$true" \
-    "try { & ([ScriptBlock]::Create(\$__c)); \$__ok = \$? } catch { Write-Error \$_; \$__ok = \$false }" \
+    "try { & \$__f; \$__ok = \$? } catch { Write-Error \$_; \$__ok = \$false } finally { Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath \$__f }" \
     "if (\$LASTEXITCODE -ne 0) { \$__rc = \$LASTEXITCODE } elseif (-not \$__ok) { \$__rc = 1 } else { \$__rc = 0 }" \
     "Write-Output \"$marker\$__rc\""
 }
@@ -521,7 +532,7 @@ run_winrm() {
     mkdir -p "$(dirname "${pool[1]}")" && chmod 700 "$(dirname "${pool[1]}")"
   fi
   remote_out=$(ch_closefds; ps_wrapper "$b64" | timeout --foreground -k 5 "$secs" python3 "$here/winrm_exec.py" \
-    --host "$tunnel_host" --port "$tunnel_port" --user "$winrm_user" \
+    --host "$tunnel_host" --port "$tunnel_port" --user "$winrm_user" --expect-marker "$marker" \
     --password-file "$VMCTL_WINRM_PASSWORD_FILE" "${pool[@]}" 2>"$errf") || rc=$?
   remote_out=$(printf '%s' "$remote_out" | tr -d '\r')
   remote_err=$(tr -d '\r' <"$errf")
@@ -532,6 +543,9 @@ run_winrm() {
     return 1
   fi
   remote_why="WinRM to $vm ($tunnel_host:$tunnel_port) exited $rc with no exit code: $(printf '%s' "$remote_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
+  # 253: the shell returned nothing, on a new session too; a pool server
+  # that is somehow still there must not carry the next call (W11).
+  [ "$rc" -eq 253 ] && ch_winrm_pool_close "$vm"
   # winrm_exec.py exits 254 when it could not open a shell: nothing ran.
   [ "$rc" -eq 254 ] && return 2
   return 1
@@ -576,7 +590,7 @@ recover_tunnel() {
 # fresh_once: ensure_fresh's reopen, under every slot.
 fresh_once() {
   # Another call may have reopened it while we waited for the slots.
-  ch_due "$(ch_tunnel_age "$vm" "$tunnel_kind")" || return 0
+  ch_tunnel_due "$vm" "$tunnel_kind" "$(ch_tunnel_age "$vm" "$tunnel_kind")" || return 0
   reopen_tunnel
   log "$vm: after the reopen: $recover_verdict"
 }
@@ -592,7 +606,7 @@ ensure_fresh() {
     relogin || log "logging in again failed; going on with the old login"
   fi
   ta=$(ch_tunnel_age "$vm" "$tunnel_kind")
-  ch_due "$ta" || return 0
+  ch_tunnel_due "$vm" "$tunnel_kind" "$ta" || return 0
   log "$vm: its $tunnel_kind tunnel is $(ch_fmt_age "$ta") old (REFRESH_AFTER ${ch_refresh_after}m); reopening it first"
   with_all_slots fresh_once || log "$vm: could not take its slots to reopen the tunnel; going on"
 }
@@ -720,23 +734,46 @@ agent_ready() {
   return 1
 }
 
-# guest_back: over the tunnel, its protocol probe and then a trivial
-# command; a failed probe recreates the tunnel for the next poll. Sets
-# guest_why when not back.
+# guest_token: what the guest check prints; a command that ran prints it.
+guest_token=IMAS_VMCTL_GUEST_OK
+
+# close_sessions: ends the VM's SSH master and pooled WinRM session, so the
+# next call opens new ones (a reboot ends the old ones under them, W11).
+close_sessions() {
+  ch_ssh_master_close "$vm"
+  ch_winrm_pool_close "$vm"
+}
+
+# guest_back: over the tunnel, its protocol probe and then a command that
+# must print guest_token; a failed probe recreates the tunnel for the next
+# poll, and any failure closes the VM's sessions. Sets guest_why (with the
+# last attempt's raw output) when not back.
 guest_back() {
-  local verdict rc=0
+  local verdict rc=0 raw
   verdict=$(ch_probe "$tunnel_kind" "$tunnel_port")
   if [ "${verdict%% *}" != ok ]; then
     guest_why="probe: ${verdict#* }"
     log "$vm: $guest_why; recreating its tunnel"
+    close_sessions
     reopen_tunnel
     log "$vm: after the reopen: $recover_verdict"
     return 1
   fi
-  remote_out="" remote_err="" remote_rc=255
-  run_channel "exit 0" "$probe_timeout" || rc=$?
-  if [ "$rc" -eq 0 ] && [ "$remote_rc" = 0 ]; then return 0; fi
-  guest_why="the probe answers, but a command does not: $remote_why"
+  remote_out="" remote_err="" remote_rc=255 remote_why=""
+  if [ "$os" = windows ]; then
+    run_channel "Write-Output '$guest_token'" "$probe_timeout" || rc=$?
+  else
+    run_channel "echo $guest_token" "$probe_timeout" || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ "$remote_rc" = 0 ] && printf '%s\n' "$remote_out" | grep -qx "$guest_token"; then return 0; fi
+  # The next poll starts on new sessions.
+  close_sessions
+  raw="stdout '$(printf '%s' "$remote_out" | tr '\n' ' ' | cut -c1-300)', stderr '$(printf '%s' "$remote_err" | tr '\n' ' ' | cut -c1-300)'"
+  if [ "$rc" -eq 0 ]; then
+    guest_why="the probe answers, but the check command did not print $guest_token (exit code $remote_rc; $raw)"
+  else
+    guest_why="the probe answers, but a command does not: $remote_why ($raw)"
+  fi
   return 1
 }
 
@@ -814,9 +851,10 @@ case "$action" in
     ;;
   restart)
     log "restarting $vm"
-    # A session held across the reboot would only fail later.
-    ch_ssh_master_close "$vm"
-    ch_winrm_pool_close "$vm"
+    # A session held across the reboot would only fail later: closed
+    # before it, and again after it, since one opened while the VM was
+    # going down (by another call) is dead once it is up (W11).
+    close_sessions
     since=$(date +%s)
     if ! az_run "$az_timeout" vm restart --ids "$vm_id" -o none; then
       log "az vm restart failed for $vm; rebooting it through run-command instead"
@@ -826,6 +864,7 @@ case "$action" in
         exit 255
       fi
     fi
+    close_sessions
     wait_back "$since"
     ;;
   stop-vm | start-vm)
@@ -835,13 +874,13 @@ case "$action" in
     fi
     verb=${action%-vm}
     log "${verb/stop/stopp}ing $vm"
-    ch_ssh_master_close "$vm"
-    ch_winrm_pool_close "$vm"
+    close_sessions
     since=$(date +%s)
     if ! az_run "$az_timeout" vm "$verb" --ids "$vm_id" -o none; then
       log "az vm $verb failed for $vm"
       exit 255
     fi
+    close_sessions
     if [ "$verb" = start ]; then
       wait_back "$since"
     fi

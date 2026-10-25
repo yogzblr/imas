@@ -15,7 +15,14 @@ It prints the script's stdout on stdout and its stderr (CLIXML decoded) on
 stderr. Exit status: 0 when the script ran (its own exit code is whatever
 it prints; vmctl.sh's wrapper prints a marker line), 254 when no shell
 could be opened (nothing ran: safe to retry), 255 on an error after the
-script started, 2 on a usage error.
+script started, 253 when --expect-marker was given and the shell returned
+nothing at all (no output, so no marker: "pooled session returned nothing",
+W11), 2 on a usage error.
+
+--expect-marker M says the script prints a line starting with M (vmctl.sh's
+exit code marker). A shell that answers a script with no output at all then
+did not run it: the shell is dead (UAT Run 2's Windows L1 after a reboot:
+"exited 0 with no exit code"). That is never exit status 0.
 
 With --pool SOCK (W10, vmctl.sh's default) the call goes through one
 pooled WinRM session per VM: a server process holding the NTLM session and
@@ -26,6 +33,14 @@ script at a time; it exits when a call fails in any way (the next call
 starts a fresh one) and when a script outlives --deadline (a watchdog), so a
 hung command never blocks the calls after it. The exit status is the same
 as without it; a server that cannot open its shell makes the call exit 254.
+
+A pooled shell can die under the server (a reboot of the VM ends it while
+the server lives on, W11). So when a script could not be started in the
+shell (254), or, with --expect-marker, came back with no output at all, the
+server closes its session, opens a new one and runs the script once more
+on it; only a second failure is the call's (and ends the server). A
+script that failed after it started (255) is never run twice: it may have
+run.
 
 Needs pywinrm (MIT), which the UAT workflow installs for Ansible.
 """
@@ -123,6 +138,34 @@ def close_session(proto, shell):
         pass
 
 
+NOTHING = "winrm_exec.py: the pooled session returned nothing: no output and no exit code marker (the shell is dead or the script never ran)\n"
+
+
+def returned_nothing(rc, out, marker) -> bool:
+    """A script that ran with no output at all, though it prints marker."""
+    return rc == 0 and bool(marker) and not out.strip()
+
+
+def run_pooled(args, sess, script: bytes, marker):
+    """Runs one script in the pool's session (sess: [proto, shell]); when
+    the shell could not start it, or with a marker expected returned
+    nothing, opens a new session in its place and runs it once more."""
+    rc, out, err = run_script(sess[0], sess[1], script)
+    if rc != 254 and not returned_nothing(rc, out, marker):
+        return rc, out, err
+    why = err.strip() or NOTHING.strip()
+    close_session(sess[0], sess[1])
+    proto, shell, orc, msg = open_session(args)
+    if proto is None:
+        sess[0] = sess[1] = None
+        return (orc if orc == 2 else 254), "", f"{why}\n{msg}\n"
+    sess[0], sess[1] = proto, shell
+    rc, out, err = run_script(proto, shell, script)
+    if returned_nothing(rc, out, marker):
+        return 253, "", err + NOTHING
+    return rc, out, err
+
+
 def serve(args) -> int:
     """The pool's server: one session, one script at a time, on args.serve."""
     sock_path = args.serve
@@ -131,6 +174,7 @@ def serve(args) -> int:
         with open(sock_path + ".err", "w", encoding="utf-8") as f:
             f.write(msg)
         return rc
+    sess = [proto, shell]
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         os.unlink(sock_path)
@@ -159,7 +203,7 @@ def serve(args) -> int:
                 dog = threading.Timer(deadline, os._exit, args=(3,))
                 dog.daemon = True
                 dog.start()
-                rc, out, err = run_script(proto, shell, base64.b64decode(req.get("script", "")))
+                rc, out, err = run_pooled(args, sess, base64.b64decode(req.get("script", "")), req.get("marker", ""))
                 dog.cancel()
                 reply = {"rc": rc, "out": out, "err": err}
                 try:
@@ -169,7 +213,8 @@ def serve(args) -> int:
                 if rc != 0:
                     return 0
     finally:
-        close_session(proto, shell)
+        if sess[0] is not None:
+            close_session(sess[0], sess[1])
         for p in (sock_path, sock_path + ".pid"):
             try:
                 os.unlink(p)
@@ -239,7 +284,8 @@ def via_pool(args, script: bytes) -> int:
     if lock is not None:
         lock.close()
     with conn:
-        req = {"script": base64.b64encode(script).decode("ascii"), "deadline": args.deadline}
+        req = {"script": base64.b64encode(script).decode("ascii"), "deadline": args.deadline,
+               "marker": args.expect_marker or ""}
         try:
             conn.sendall((json.dumps(req) + "\n").encode())
             line = read_line(conn)
@@ -279,6 +325,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pool-idle", type=int, default=300)
     ap.add_argument("--deadline", type=int, default=120, help="seconds the pool lets one script run")
     ap.add_argument("--close-pool", help="end the pool's server on this socket, and exit")
+    ap.add_argument("--expect-marker", help="the script prints a line starting with this: no output at all is a failure (253)")
     ap.add_argument("--serve", help=argparse.SUPPRESS)
     try:
         args = ap.parse_args(argv)
@@ -312,6 +359,9 @@ def main(argv=None) -> int:
     if rc != 0:
         sys.stderr.write(err)
         return 255 if rc == 255 else 254
+    if returned_nothing(rc, out, args.expect_marker):
+        sys.stderr.write(err + NOTHING.replace("pooled session", "WinRM session"))
+        return 253
     sys.stdout.write(out)
     sys.stderr.write(err)
     return 0

@@ -610,6 +610,125 @@ is the tunnel's use, not its age: lower `UAT_REFRESH_AFTER_MIN` and read the
 per-port connection counts.
 
 
+### Run 2 on rc.21: 288 pass, 19 fail (W11, P35)
+
+**Run 2 on `v0.1.0-rc.21`** (run 40166648943, tier `all`, `hub_nodes` 1,
+`dispatch_flags` true, `upgrade_from_tag` `v0.1.0-rc.20`): 288 pass, 19
+fail, 60 skip, no `CHAN`, no VM marked dead. The W10 channel work, the
+firewall fix, L4 and L5 work. 16 of the 19 failures were Windows; the
+other three were D1 (a kube tunnel reopened under kubectl) and
+`I.service.masked`/`unmasked` on AlmaLinux (P35, the ingredient PR). The
+harness half (W11):
+
+- **L1 Windows (t1, t2): the guest check could never pass.** It ran `exit
+  0` over WinRM. `vmctl.sh` wrapped a Windows command in a ScriptBlock, and
+  `exit` in a ScriptBlock ends `powershell.exe` itself, before the exit
+  code marker: "exited 0 with no exit code:" with nothing after it, for
+  600 s. A command now runs as a script file (`exit N` ends only the
+  script), and the guest check must print a token
+  (`IMAS_VMCTL_GUEST_OK`). Also: the VM's SSH master and pooled WinRM
+  session are closed before and after `restart`, `stop-vm` and `start-vm`
+  and after every failed guest check; the pool's server opens a new
+  session and runs a script once more when its shell could not start it or
+  (with `--expect-marker`) answered with no output at all (a shell a reboot
+  killed); `winrm_exec.py` never exits 0 then (253, "the pooled session
+  returned nothing"); a failed guest check names the last attempt's raw
+  stdout and stderr.
+- **D1: a kube tunnel reopened under kubectl.** Each kube tunnel has a
+  reader/writer lock, `<access dir>/locks/kube-<port>.lock`: the
+  harness's kubectl and `acceptance.sh` calls hold it shared for their
+  run, the supervisor's reopen exclusively (it waits up to
+  `UAT_SUPERVISE_WAIT_SECONDS` and otherwise leaves the tunnel for the
+  next round). While a reopen runs, `<access dir>/reopening/<vm>-<kind>`
+  exists, and a kubectl call refused on a tunnel port then is tried again
+  for up to 30 s. The tunnels no longer come due together: tunnel i of n
+  is due `i * REFRESH_AFTER / 2n` early (`UAT_TUNNEL_STAGGER`), so with 10
+  tunnels and 10 minutes the reopens are 30 s apart. A failed reopen is
+  tried again at once, 3 times (`CH_REOPEN_ATTEMPTS`), names tunnels.sh's
+  own error and says when nothing listens on the port; `reopen-one` also
+  stops another bastion tunnel process left holding the port. The
+  "reopened on 127.0.0.1::" line had lost its port; it is passed along now.
+- **`I.win_shortcut.present`: HTTP 401 after 6m10s.** The sprout process
+  died 5 s into the real cook (P35: the shortcut now runs in a child
+  process), and the harness waited for the lost job with the token it had
+  started with, which Keycloak expires after 5 minutes. Now the harness's
+  own calls (a batch, its polls, recipes) get their token per request,
+  refreshed a minute before it expires, and on a 401 renew it and send the
+  request once more (`Client.Authed`); the auth scenarios still send
+  exactly the token they test. A case runs under one limit
+  (`IMAS_UAT_CASE_TIMEOUT`, default five cook timeouts plus 45 minutes)
+  and says when it ran past it, at which step. A cook that never finishes
+  has the VM's side collected for its job id.
+- **`I.service.restarted/running/stopped` on Windows: "no Spooler
+  service".** Server 2022 Core has none. The setup picks the first of
+  `seclogon`, `WerSvc`, `wuauserv` that exists and is not disabled (for
+  `restarted` it must also run in a process of its own) and hands it to the
+  recipe as `@SETUP_SERVICE@`; with none, the case is a skip with the
+  reason, never a setup failure (`uat/cases/README.md`, "Setup
+  directives").
+- **`I.user.absent/exists` on Windows: setup exited -1.** `net user <name>
+  <password> /add` asks for confirmation when the password is over 14
+  characters. The setup uses `New-LocalUser` with a random SecureString
+  that is never printed; the check uses `Get-LocalUser`.
+
+**What a failure leaves now.** `diagnostics/<vm>/<epoch>.txt` (through
+run-command, after a failed or lost cook) has every sprout log line of the
+job, from the whole log, besides the last lines. When the sprout restarted
+without a reboot (a second `registered sdb backend awssm` since the boot;
+on Linux also systemd's `NRestarts`) or a job is lost (no record, or no
+`completed-` line in it), or `DIAG_VM_EVENTS=1`: on Windows the
+Application log's Application Error, Windows Error Reporting and .NET
+Runtime events (faulting module and exception code), the System log's
+Service Control Manager 7031, 7034, 7023 and 7024 events since the boot,
+and `sc.exe qfailure imas-sprout`; on Linux `coredumpctl list`, the
+kernel's OOM kills and the unit's exit lines. A WinRM call that times out
+while the tunnel's probe answers always takes
+`diagnostics/channel/<epoch>-<vm>-vm-side.txt`, which now ends with the
+CPU load, the busiest processes, the WinRM service and its shells
+(`wsmprovhost` processes, WSMan shell instances): Azure keeps only the
+last 4 KB.
+
+**New knobs.**
+
+| Knob | Default | What |
+|---|---|---|
+| `UAT_TUNNEL_STAGGER` | 1 | 0: every tunnel is due at `REFRESH_AFTER`, not staggered |
+| `CH_REOPEN_ATTEMPTS` | 3 | Reopens in a row of a tunnel that fails |
+| `IMAS_UAT_CASE_TIMEOUT` | 5 x cook timeout + 45 m | One ingredient case's whole limit on one sprout |
+| `DIAG_VM_EVENTS` | 0 | 1: `diagnostics/<vm>/` takes the event logs on every collection |
+| `winrm_exec.py --expect-marker` | set by `vmctl.sh` | No output at all is exit 253, never 0 |
+
+**Proven by** the stubbed shell tests (`uat/access/tests/access_test.sh`,
+`uat/scripts/tests/scripts_test.sh`) and Go unit tests only. Only an Azure
+run can show: that `exit` inside the old wrapper was what kept the Windows
+guest check from passing (the code path is certain; the run never printed
+the wrapper's output), that a Windows guest comes back within the wait
+after a real reboot, the PowerShell of the case setups and of the
+diagnostics bundle on Server 2022 Core (there is no PowerShell in the build
+container), and the event log entries of a real sprout crash.
+
+**Re-dispatch** after `v0.1.0-rc.22` is cut and published as in section
+1 (the ingredient fixes need the release; the harness fixes run from the
+checkout):
+
+| Input | Value |
+|---|---|
+| `release_tag` | `v0.1.0-rc.22` |
+| `region` | `centralindia` |
+| `keep_hours` | `0` (3 to read a Windows host after a failure) |
+| `tier` | `all` |
+| `upgrade_from_tag` | `v0.1.0-rc.21` |
+| `scenarios` | empty |
+| `hub_nodes` | `1` |
+| `dispatch_flags` | `true` |
+| `ingress_cidrs` | empty |
+
+```sh
+gh workflow run uat.yml --ref main -f release_tag=v0.1.0-rc.22 -f region=centralindia \
+  -f keep_hours=0 -f tier=all -f upgrade_from_tag=v0.1.0-rc.21 -f hub_nodes=1 -f dispatch_flags=true
+```
+
+
 ## 5. After the runs
 
 Record each run in a status fragment (`docs/status/README.md`): the run id,

@@ -242,10 +242,10 @@ func (r *Runner) run(ctx context.Context, j *Job) *Outcome {
 		nonce = r.Nonce()
 	}
 	// A cycle is four cooks and three host calls, plus the revert.
-	budget := 5*j.Case.CookTimeout() + 45*time.Minute
+	budget := CaseLimit(j.Case)
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	cy := &Cycle{Case: j.Case, Sprout: j.Sprout, Driver: r.Driver, Vars: NewVars(j.Case, j.Sprout, nonce), CrossCheck: j.Cross}
+	cy := &Cycle{Case: j.Case, Sprout: j.Sprout, Driver: r.Driver, Vars: NewVars(j.Case, j.Sprout, nonce), CrossCheck: j.Cross, Limit: budget}
 	return cy.Run(cctx)
 }
 

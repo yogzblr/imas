@@ -58,6 +58,10 @@ func (f *Fleet) CoreProbe(ctx context.Context, stdin []byte, verb string, args .
 	if f.AcceptanceExec != nil {
 		stdout, stderr, runErr = f.AcceptanceExec(cctx, full, stdin)
 	} else {
+		// Its kubectl calls hold the core kube tunnel's shared lock (W11:
+		// UAT Run 2's D1 lost its connection to a reopen).
+		release := holdKubeTunnel(cctx, b.Kubeconfig)
+		defer release()
 		var so, se bytes.Buffer
 		cmd := exec.CommandContext(cctx, filepath.Join(filepath.Dir(b.Script), AcceptanceScriptName), full...)
 		cmd.Stdout, cmd.Stderr = &so, &se

@@ -161,7 +161,12 @@ func TestCasesOfThisRepository(t *testing.T) {
 			for _, os := range c.OS {
 				// Every placeholder must expand; the recipes must stay valid.
 				sp := harness.Sprout{OS: os, Tenant: 1, VM: "t1-" + os, SproutID: "x-01"}
-				p := c.For(os).Expand(NewVars(c, sp, "abcd1234"))
+				vars := NewVars(c, sp, "abcd1234")
+				// A setup's values (@SETUP_<NAME>@) as a setup would set them.
+				for _, ph := range unsetSetupVars(c.For(os)) {
+					vars[ph] = "setupvalue"
+				}
+				p := c.For(os).Expand(vars)
 				for _, s := range []string{p.Setup, p.Recipe, p.Check, p.Revert, p.RevertRecipe} {
 					if m := placeholderRe.FindString(s); m != "" {
 						t.Errorf("%s on %s: %s left unexpanded", c.ID, os, m)

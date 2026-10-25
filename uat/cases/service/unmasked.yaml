@@ -2,7 +2,7 @@ id: I.service.unmasked
 title: 'unmask a service'
 os: [ubuntu, alma, windows]
 notes: |
-  A throwaway unit the setup writes under /usr/local/lib/systemd/system (so masking, which writes /etc/systemd/system, doesn't collide with it) running sleep; the revert removes it. On Windows unmasked restores start type Manual. Start type cases use a throwaway service the setup registers with sc.exe (never started); state cases use the Print Spooler, whose start type and state the setup records and the revert restores.
+  A throwaway unit the setup writes under /usr/local/lib/systemd/system (so masking, which writes /etc/systemd/system, doesn't collide with it) running sleep; the revert removes it. On Windows unmasked restores start type Manual. Start type cases use a throwaway service the setup registers with sc.exe (never started); state cases use the first of seclogon, WerSvc and wuauserv that exists and isn't disabled (Server Core has no Print Spooler; for restarted it must also run in a process of its own), chosen by the setup (`@SETUP_SERVICE@`), whose start type and state the setup records and the revert restores; with none of them the case is a skip.
 linux:
   setup: |
     mkdir -p /usr/local/lib/systemd/system

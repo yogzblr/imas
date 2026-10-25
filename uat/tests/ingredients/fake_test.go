@@ -24,13 +24,15 @@ type fakeSprout struct {
 
 // behaviour switches of fakeDriver.
 type behaviour struct {
-	testApplies   bool // test mode makes the change
-	alwaysChanges bool // every real cook reports a change
-	neverChanges  bool // no real cook reports a change
-	testFails     bool // the test mode cook fails
-	realFails     bool // the real cook fails
-	noJobLog      bool // the sprout keeps no job log
-	setupFails    bool // the setup script exits 1
+	testApplies   bool   // test mode makes the change
+	alwaysChanges bool   // every real cook reports a change
+	neverChanges  bool   // no real cook reports a change
+	testFails     bool   // the test mode cook fails
+	realFails     bool   // the real cook fails
+	noJobLog      bool   // the sprout keeps no job log
+	setupFails    bool   // the setup script exits 1
+	setupOut      string // what the setup script prints (default "setup output")
+	lostJob       bool   // the real cook's batch never finishes (the sprout died under it)
 	// logChannelDown: reading a job log over the test channel fails
 	// (vmctl.sh: CHANNEL UNAVAILABLE); the out of band path still works
 	logChannelDown bool
@@ -121,8 +123,11 @@ func (d *fakeDriver) Delete(_ context.Context, tenant int, name string) {
 	d.deleted = append(d.deleted, fmt.Sprintf("%d/%s", tenant, name))
 }
 
-func (d *fakeDriver) Cook(_ context.Context, sp harness.Sprout, recipe string, test bool, _ time.Duration) (harness.Item, error) {
+func (d *fakeDriver) Cook(ctx context.Context, sp harness.Sprout, recipe string, test bool, _ time.Duration) (harness.Item, error) {
 	defer d.enter(sp.VM, fmt.Sprintf("cook %s test=%v", recipe, test))()
+	if err := ctx.Err(); err != nil {
+		return harness.Item{}, fmt.Errorf("waiting for the batch: %w", err)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	content, ok := d.recipes[fmt.Sprintf("%d/%s", sp.Tenant, recipe)]
@@ -151,6 +156,9 @@ func (d *fakeDriver) Cook(_ context.Context, sp harness.Sprout, recipe string, t
 			h.applied = true
 		}
 	default:
+		if d.b.lostJob {
+			return harness.Item{AssetID: sp.AssetID, JID: jid, Status: "running"}, fmt.Errorf("batch b1 still running after 6m0s")
+		}
 		if d.b.realFails {
 			status, item = StatusFailed, harness.ItemFailed
 			break
@@ -211,7 +219,11 @@ func (d *fakeDriver) run(_ context.Context, sp harness.Sprout, script string) (*
 			rc = "1"
 		}
 		val("SETUP_RC", rc)
-		val("SETUP_OUT", b64("setup output"))
+		o := "setup output"
+		if d.b.setupOut != "" {
+			o = d.b.setupOut
+		}
+		val("SETUP_OUT", b64(o))
 	case strings.Contains(script, harness.ValuePrefix+"REVERT_RC"):
 		h.reverts++
 		h.applied = false

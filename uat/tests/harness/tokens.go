@@ -41,8 +41,12 @@ const (
 	lockoutRetry = 10 * time.Second
 )
 
+// refreshMargin: a cached token is replaced this long before it expires,
+// so a call (or a batch poll) never goes out on one about to expire (W11).
+const refreshMargin = 60 * time.Second
+
 // Tokens gets Keycloak access tokens. Tokens are cached per user and
-// client until 30 seconds before they expire, and one user's token is
+// client until refreshMargin before they expire, and one user's token is
 // fetched once at a time however many tests ask for it. Safe for
 // concurrent use.
 type Tokens struct {
@@ -131,6 +135,26 @@ func (k *Tokens) Tenant(ctx context.Context, tenant int, role Role) (string, err
 	return k.Password(ctx, ClientCreds{ClientID: k.cfg.ClientID, ClientSecret: k.cfg.ClientSecret}, c)
 }
 
+// TenantFunc is a TokenFunc for a tenant's configured user: the cached
+// token, or with renew a new one that replaces it in the cache.
+func (k *Tokens) TenantFunc(tenant int, role Role) TokenFunc {
+	return func(ctx context.Context, renew bool) (string, error) {
+		if renew {
+			if c, err := k.TenantUser(tenant, role); err == nil {
+				k.drop(ClientCreds{ClientID: k.cfg.ClientID, ClientSecret: k.cfg.ClientSecret}, c)
+			}
+		}
+		return k.Tenant(ctx, tenant, role)
+	}
+}
+
+// drop forgets the cached token of one user and client.
+func (k *Tokens) drop(client ClientCreds, user Credentials) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.cache, passwordKey(client, user))
+}
+
 // Fresh returns a new token for a tenant's user, bypassing the cache.
 func (k *Tokens) Fresh(ctx context.Context, tenant int, role Role) (string, error) {
 	c, err := k.TenantUser(tenant, role)
@@ -165,7 +189,7 @@ func (k *Tokens) Password(ctx context.Context, client ClientCreds, user Credenti
 	key := passwordKey(client, user)
 	for {
 		k.mu.Lock()
-		if c, ok := k.cache[key]; ok && k.now().Add(30*time.Second).Before(c.exp) {
+		if c, ok := k.cache[key]; ok && k.now().Add(refreshMargin).Before(c.exp) {
 			k.mu.Unlock()
 			return c.token, nil
 		}

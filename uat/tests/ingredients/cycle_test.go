@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yogzblr/imas/uat/tests/harness"
 )
@@ -249,5 +250,117 @@ func TestParseJobLog(t *testing.T) {
 	}
 	if _, err := ParseJobLog(res, 2); err == nil {
 		t.Error("an absent value is an error")
+	}
+}
+
+const setupVarCase = `id: I.service.running
+os: [windows]
+windows:
+  setup: |
+    'IMAS_UAT_SET SERVICE=seclogon'
+  recipe: |
+    steps:
+      uat service running:
+        service.running:
+          - name: '@SETUP_SERVICE@'
+  check: Get-Service -Name '@SETUP_SERVICE@'
+  revert: Stop-Service -Name '@SETUP_SERVICE@'
+`
+
+func TestCycleSetupSetsPlaceholders(t *testing.T) {
+	o, d := runCycle(t, setupVarCase, behaviour{setupOut: "picked\nIMAS_UAT_SET SERVICE=seclogon\n"}, t1Win, nil)
+	if e := errorsOf(o); e != "" {
+		t.Fatalf("errors:\n%s", e)
+	}
+	for k, v := range d.recipes {
+		if !strings.Contains(v, "- name: 'seclogon'") || strings.Contains(v, "@SETUP_") {
+			t.Errorf("recipe %s not filled from the setup: %s", k, v)
+		}
+	}
+	if len(d.recipes) == 0 {
+		t.Fatal("no recipe uploaded")
+	}
+}
+
+func TestCycleSetupSkips(t *testing.T) {
+	o, d := runCycle(t, setupVarCase, behaviour{setupOut: "IMAS_UAT_SKIP: none of seclogon, WerSvc, wuauserv exists\n"}, t1Win, nil)
+	if e := errorsOf(o); e != "" {
+		t.Fatalf("a setup skip must not fail:\n%s", e)
+	}
+	s, ok := o.Skipped()
+	if !ok || !strings.Contains(s, "SKIP: the setup found the host can't run this case: none of seclogon, WerSvc, wuauserv exists") {
+		t.Errorf("skip line %q", s)
+	}
+	for _, e := range d.events {
+		if strings.Contains(e, "cook") {
+			t.Errorf("a skipped case cooked: %v", d.events)
+		}
+	}
+	if d.hosts[t1Win.VM].reverts != 1 {
+		t.Errorf("the revert must run after a setup skip")
+	}
+}
+
+func TestCycleSetupDirectiveErrors(t *testing.T) {
+	for name, tc := range map[string]struct{ out, want string }{
+		"not set":     {"nothing\n", "the setup script did not set @SETUP_SERVICE@"},
+		"bad value":   {"IMAS_UAT_SET SERVICE=a b'\n", "is not 1 to 64 letters"},
+		"bad name":    {"IMAS_UAT_SET service=x\n", "bad line"},
+		"skip reason": {"IMAS_UAT_SKIP:\n", "without a reason"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o, _ := runCycle(t, setupVarCase, behaviour{setupOut: tc.out}, t1Win, nil)
+			if e := errorsOf(o); !strings.Contains(e, tc.want) {
+				t.Errorf("want %q in:\n%s", tc.want, e)
+			}
+		})
+	}
+}
+
+func TestCaseSetupPlaceholderRules(t *testing.T) {
+	bad := strings.Replace(setupVarCase, "'IMAS_UAT_SET SERVICE=seclogon'", "'@SETUP_SERVICE@'", 1)
+	if _, err := ParseCase([]byte(bad), "service/running.yaml"); err == nil || !strings.Contains(err.Error(), "the setup script can't use @SETUP_SERVICE@") {
+		t.Errorf("a setup using its own placeholder: %v", err)
+	}
+}
+
+// A case that runs past its limit says so, with the step and the limit.
+func TestCycleLimitMessage(t *testing.T) {
+	c := mustCase(t, cycleCase)
+	d := newFakeDriver(behaviour{})
+	d.delay = 40 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	cy := &Cycle{Case: c, Sprout: t1Ubuntu, Driver: d, Vars: NewVars(c, t1Ubuntu, "n0nce123"), Limit: 150 * time.Millisecond}
+	o := cy.Run(ctx)
+	e := errorsOf(o)
+	if !strings.Contains(e, "the case ran past its time limit of 150ms on this sprout (IMAS_UAT_CASE_TIMEOUT") || !strings.Contains(e, `at step "cook`) {
+		t.Errorf("limit message missing:\n%s", e)
+	}
+	if d.hosts[t1Ubuntu.VM].reverts != 1 {
+		t.Error("the revert must still run")
+	}
+}
+
+func TestCaseLimit(t *testing.T) {
+	c := mustCase(t, cycleCase)
+	if got := CaseLimit(c); got != 5*DefaultCookTimeout+45*time.Minute {
+		t.Errorf("default %s", got)
+	}
+	t.Setenv(EnvCaseTimeout, "20m")
+	if got := CaseLimit(c); got != 20*time.Minute {
+		t.Errorf("override %s", got)
+	}
+}
+
+// A lost job (the cook never finishes) has the VM's side collected for
+// its job id (W11).
+func TestCycleLostJobIsDiagnosed(t *testing.T) {
+	o, d := runCycle(t, cycleCase, behaviour{lostJob: true}, t1Ubuntu, nil)
+	if e := errorsOf(o); !strings.Contains(e, "cook for real: batch b1 still running after 6m0s") {
+		t.Errorf("errors:\n%s", e)
+	}
+	if len(d.diagnosed) != 1 || d.diagnosed[0] != "t1-ubuntu:j2" {
+		t.Errorf("diagnosed %v, want the lost job j2", d.diagnosed)
 	}
 }

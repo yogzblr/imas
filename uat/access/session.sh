@@ -57,12 +57,17 @@
 #               1. logs az in again when the login is REFRESH_AFTER
 #                  (UAT_REFRESH_AFTER_MIN, 10) minutes old;
 #               2. takes the tunnels one at a time, oldest first, and reopens
-#                  one that is REFRESH_AFTER old or whose protocol probe fails
-#                  (channel.sh), on the SAME port, then probes it. It never
-#                  reopens a tunnel under a running command: an SSH or WinRM
-#                  tunnel only holding every vmctl.sh slot of its VM, a kube
-#                  tunnel only once no connection is open on its port
-#                  (kubectl, a port-forward), waiting up to
+#                  one that is past its limit (REFRESH_AFTER, staggered per
+#                  tunnel so they do not all come due in one round, W11:
+#                  channel.sh ch_tunnel_limit) or whose protocol probe fails
+#                  (channel.sh), on the SAME port, then probes it; a failed
+#                  reopen is tried again at once, 3 times in all, naming
+#                  tunnels.sh's error. It never reopens a tunnel under a
+#                  running command: an SSH or WinRM tunnel only holding every
+#                  vmctl.sh slot of its VM, a kube tunnel only holding its
+#                  lock exclusively (the harness's kubectl and acceptance.sh
+#                  calls hold it shared, W11) and once no connection is open
+#                  on its port (a port-forward), waiting up to
 #                  UAT_SUPERVISE_WAIT_SECONDS (30) and otherwise leaving it
 #                  for the next round;
 #               3. re-probes every VM vmctl.sh marked dead, at most every
@@ -95,6 +100,10 @@
 #                            kube port's connections (default 30)
 #   UAT_SUPERVISE_PROBE      0: a round reopens by age only, no probes
 #                            (default 1)
+#   UAT_TUNNEL_STAGGER       0: every tunnel is due at REFRESH_AFTER, not
+#                            staggered (default 1)
+#   CH_REOPEN_ATTEMPTS       reopens in a row of a tunnel that fails
+#                            (default 3)
 #   VMCTL_STATE_DIR          vmctl.sh's slots and dead marks (default
 #                            <access dir>/vmctl, as vmctl.sh)
 #   UAT_SESSION_MAX_AGE_MIN  the age guard (default 40)
@@ -396,22 +405,35 @@ relogin_if_due() {
   fi
 }
 
-# reopen_held <vm> <kind>: reopens a tunnel once nothing uses it: every
-# slot of an SSH or WinRM tunnel's VM, or no connection on a kube tunnel's
-# port. 1 when it had to be left for later.
+# reopen_held <vm> <kind> [port]: reopens a tunnel once nothing uses it:
+# every slot of an SSH or WinRM tunnel's VM; for a kube tunnel its lock,
+# exclusively (the harness's kubectl and acceptance.sh calls hold it
+# shared, W11), and no connection left on its port (a port-forward). 1 when
+# it had to be left for later.
 reopen_held() {
-  local vm=$1 kind=$2 port verdict i
-  port=$(ch_port "$vm" "$kind")
+  local vm=$1 kind=$2 port=${3:-} verdict i
+  [ -n "$port" ] || port=$(ch_port "$vm" "$kind")
+  [ -n "$port" ] || port=$(awk -F'\t' -v vm="$vm" -v k="$kind" '$2 == vm && $3 == k { print $4; exit }' "$(access_dir)/tunnels.pids" 2>/dev/null)
+  if [ -z "$port" ]; then
+    slog "$vm $kind tunnel: its port is in neither access.json nor tunnels.pids; leaving it for the next round"
+    return 1
+  fi
   if [ "$kind" = kube ]; then
+    if ! ch_kube_lock "$port" "$supervise_wait"; then
+      slog "$vm kube tunnel (127.0.0.1:$port): kubectl calls held its lock for ${supervise_wait}s; leaving it for the next round"
+      return 1
+    fi
     for ((i = 0; i < supervise_wait; i++)); do
       [ "$(ch_port_connections "$port")" -eq 0 ] && break
       sleep 1
     done
     if [ "$(ch_port_connections "$port")" -ne 0 ]; then
+      ch_kube_unlock
       slog "$vm kube tunnel (127.0.0.1:$port): $(ch_port_connections "$port") connections still open after ${supervise_wait}s; leaving it for the next round"
       return 1
     fi
     verdict=$(ch_reopen "$vm" "$kind") || true
+    ch_kube_unlock
   else
     local os
     os=$(ch_vm_field "$vm" os)
@@ -435,15 +457,15 @@ supervise_tunnels() {
   while IFS=$'\t' read -r age vm kind port; do
     [ -n "${vm:-}" ] || continue
     reason=""
-    if ch_due "$age"; then
-      reason="age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m)"
+    if ch_tunnel_due "$vm" "$kind" "$age"; then
+      reason="age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m, this tunnel's staggered limit $(ch_fmt_age "$(ch_tunnel_limit "$vm" "$kind")"))"
     elif [ "${UAT_SUPERVISE_PROBE:-1}" = 1 ]; then
       verdict=$(ch_probe "$kind" "$port")
       [ "${verdict%% *}" = ok ] || reason="probe: ${verdict#* }"
     fi
     [ -n "$reason" ] || continue
     slog "$vm $kind tunnel (127.0.0.1:$port): $reason; reopening it"
-    reopen_held "$vm" "$kind" || true
+    reopen_held "$vm" "$kind" "$port" || true
   done < <(while IFS=$'\t' read -r _pid vm kind port; do
       [ -n "${vm:-}" ] || continue
       printf '%s\t%s\t%s\t%s\n' "$(ch_tunnel_age "$vm" "$kind")" "$vm" "$kind" "$port"
@@ -567,7 +589,7 @@ cmd_ensure() {
   [ -s "$dir/access.json" ] || return 0
   for vm in $(jq -r 'to_entries[] | select(.value.kube_port) | .key' "$dir/access.json"); do
     age=$(ch_tunnel_age "$vm" kube)
-    ch_due "$age" || continue
+    ch_tunnel_due "$vm" kube "$age" || continue
     slog "$vm kube tunnel: age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m); reopening it"
     reopen_held "$vm" kube || true
   done
