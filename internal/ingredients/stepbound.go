@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yogzblr/imas/internal/cook"
@@ -30,7 +31,11 @@ import (
 //
 // The step's context is cancelled at the bound, so a step that runs
 // child processes (winexec) kills them; a call that cannot be cancelled
-// (an in-process COM call) is abandoned and the step fails anyway.
+// (an in-process COM or Win32 call) is abandoned and the step fails
+// anyway. Such a call may still finish its change later, so until it has
+// returned, a later step of the same ingredient (an on_exit cleanup of the
+// same object, say) waits for it within its own bound, and fails rather
+// than run on top of it (review on #319).
 const (
 	WindowsStepTimeoutEnv     = "IMAS_WINDOWS_STEP_TIMEOUT"
 	DefaultWindowsStepTimeout = 60 * time.Second
@@ -110,6 +115,58 @@ func (b boundedCooker) Apply(ctx context.Context) (cook.Result, error) {
 	return b.run(ctx, "apply", b.RecipeCooker.Apply)
 }
 
+// abandonedSteps counts, per ingredient, the steps abandoned at their bound
+// whose call has not returned yet; idle is closed when the count drops to
+// zero.
+var abandonedSteps = struct {
+	sync.Mutex
+	by map[cook.Ingredient]*abandonFence
+}{by: map[cook.Ingredient]*abandonFence{}}
+
+type abandonFence struct {
+	n    int
+	idle chan struct{}
+}
+
+// abandon records a step of ingredient abandoned while its call runs on;
+// the returned release is called when the call returns.
+func abandon(ingredient cook.Ingredient) (release func()) {
+	abandonedSteps.Lock()
+	defer abandonedSteps.Unlock()
+	f := abandonedSteps.by[ingredient]
+	if f == nil {
+		f = &abandonFence{idle: make(chan struct{})}
+		abandonedSteps.by[ingredient] = f
+	}
+	f.n++
+	return func() {
+		abandonedSteps.Lock()
+		defer abandonedSteps.Unlock()
+		if f.n--; f.n == 0 {
+			close(f.idle)
+			delete(abandonedSteps.by, ingredient)
+		}
+	}
+}
+
+// waitAbandoned waits until no abandoned step of ingredient is running, or
+// ctx ends (false).
+func waitAbandoned(ctx context.Context, ingredient cook.Ingredient) bool {
+	for {
+		abandonedSteps.Lock()
+		f := abandonedSteps.by[ingredient]
+		abandonedSteps.Unlock()
+		if f == nil {
+			return true
+		}
+		select {
+		case <-f.idle:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
 type stepOutcome struct {
 	res cook.Result
 	err error
@@ -118,14 +175,38 @@ type stepOutcome struct {
 func (b boundedCooker) run(ctx context.Context, mode string, fn func(context.Context) (cook.Result, error)) (cook.Result, error) {
 	bctx, cancel := context.WithTimeout(ctx, b.bound)
 	defer cancel()
+	if !waitAbandoned(bctx, b.ingredient) {
+		if ctx.Err() != nil {
+			return cook.Result{Failed: true}, fmt.Errorf("%s.%s (%s): %w", b.ingredient, b.method, mode, ctx.Err())
+		}
+		return cook.Result{Failed: true}, fmt.Errorf("%s.%s (%s) did not start: an earlier %s step abandoned at the Windows step bound is still running, and this one waited %s for it (%s): %w",
+			b.ingredient, b.method, mode, b.ingredient, b.bound, WindowsStepTimeoutEnv, context.DeadlineExceeded)
+	}
 	done := make(chan stepOutcome, 1)
+	var (
+		mu       sync.Mutex
+		returned bool
+		release  func()
+	)
 	go func() {
 		res, err := fn(bctx)
+		mu.Lock()
+		returned = true
+		r := release
+		mu.Unlock()
+		if r != nil {
+			r()
+		}
 		done <- stepOutcome{res, err}
 	}()
 	boundErr := func() error {
-		return fmt.Errorf("%s.%s (%s) did not finish within %s, the Windows step bound (%s; default %s); it was cancelled and abandoned: %w",
-			b.ingredient, b.method, mode, b.bound, WindowsStepTimeoutEnv, DefaultWindowsStepTimeout, context.DeadlineExceeded)
+		mu.Lock()
+		if !returned && release == nil {
+			release = abandon(b.ingredient)
+		}
+		mu.Unlock()
+		return fmt.Errorf("%s.%s (%s) did not finish within %s, the Windows step bound (%s; default %s); it was cancelled and abandoned, and may still complete its change (later %s steps wait for it): %w",
+			b.ingredient, b.method, mode, b.bound, WindowsStepTimeoutEnv, DefaultWindowsStepTimeout, b.ingredient, context.DeadlineExceeded)
 	}
 	// finished keeps a step's own result, except that a step that gave up
 	// because the bound struck (returning its context's error) says so.

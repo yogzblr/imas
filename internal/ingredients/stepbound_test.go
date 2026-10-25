@@ -160,3 +160,42 @@ func TestBoundedCookerNamesTheBoundWhenTheStepGivesUp(t *testing.T) {
 		t.Errorf("parent cancel: %v", err)
 	}
 }
+
+// A call abandoned at the bound may still finish its change, so a later
+// step of the same ingredient waits for it within its own bound, and fails
+// rather than run on top of it (review on #319). Other ingredients do not
+// wait.
+func TestBoundedCookerFencesAnAbandonedStep(t *testing.T) {
+	hung := &slowCooker{block: make(chan struct{}), ignoreCtx: true}
+	if _, err := (boundedCooker{RecipeCooker: hung, ingredient: "win_fence", method: "present", bound: 20 * time.Millisecond}).Apply(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "may still complete its change (later win_fence steps wait for it)") {
+		t.Fatalf("abandoned step: %v", err)
+	}
+
+	quick := &slowCooker{block: make(chan struct{}), res: cook.Result{Succeeded: true}}
+	close(quick.block)
+	res, err := boundedCooker{RecipeCooker: quick, ingredient: "win_fence", method: "absent", bound: 50 * time.Millisecond}.Apply(context.Background())
+	if err == nil || !res.Failed || !errors.Is(err, context.DeadlineExceeded) ||
+		!strings.Contains(err.Error(), "did not start: an earlier win_fence step abandoned at the Windows step bound is still running") {
+		t.Fatalf("step over a running abandoned one: res=%+v err=%v", res, err)
+	}
+	if res, err := (boundedCooker{RecipeCooker: quick, ingredient: "win_other", method: "absent", bound: time.Second}).Apply(context.Background()); err != nil || !res.Succeeded {
+		t.Fatalf("another ingredient waited: res=%+v err=%v", res, err)
+	}
+
+	// The abandoned call returns while the next step waits: that step runs.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(hung.block)
+	}()
+	res, err = boundedCooker{RecipeCooker: quick, ingredient: "win_fence", method: "absent", bound: 5 * time.Second}.Apply(context.Background())
+	if err != nil || !res.Succeeded {
+		t.Fatalf("after the abandoned call returned: res=%+v err=%v", res, err)
+	}
+	abandonedSteps.Lock()
+	left := len(abandonedSteps.by)
+	abandonedSteps.Unlock()
+	if left != 0 {
+		t.Errorf("%d fences left", left)
+	}
+}
