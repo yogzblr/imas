@@ -102,6 +102,7 @@ func windowsStepBound(ingredient cook.Ingredient, params map[string]interface{})
 // boundedCooker runs a step's Test and Apply under its bound.
 type boundedCooker struct {
 	cook.RecipeCooker
+	id         cook.StepID
 	ingredient cook.Ingredient
 	method     string
 	bound      time.Duration
@@ -189,7 +190,21 @@ func (b boundedCooker) run(ctx context.Context, mode string, fn func(context.Con
 		release  func()
 	)
 	go func() {
-		res, err := fn(bctx)
+		var (
+			res cook.Result
+			err error
+		)
+		// A panic here cannot reach any caller's recover, so it is
+		// recovered in this goroutine and fails the step like any other
+		// outcome: the fence is released and done is sent as below.
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					res, err = cook.RecoverStepPanic(b.id, b.ingredient, b.method, mode, p)
+				}
+			}()
+			res, err = fn(bctx)
+		}()
 		mu.Lock()
 		returned = true
 		r := release

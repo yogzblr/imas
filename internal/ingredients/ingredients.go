@@ -115,7 +115,7 @@ func NewRecipeCooker(id cook.StepID, ingredient cook.Ingredient, method string, 
 				return cooker, err
 			}
 			if bound, ok := windowsStepBound(ingredient, params); ok {
-				return boundedCooker{RecipeCooker: cooker, ingredient: ingredient, method: method, bound: bound}, nil
+				return boundedCooker{RecipeCooker: cooker, id: id, ingredient: ingredient, method: method, bound: bound}, nil
 			}
 			return cooker, nil
 		}

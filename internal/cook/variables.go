@@ -269,12 +269,7 @@ func runOnExit(ctx context.Context, steps []Step, vars *runVars, runtimeCtx map[
 			log.Errorf("on_exit step %s: %v", step.ID, redactError(err, vars.sensitiveValues()))
 			continue
 		}
-		var res Result
-		if testMode {
-			res, err = ingredient.Test(ctx)
-		} else {
-			res, err = ingredient.Apply(ctx)
-		}
+		res, err := runStep(ctx, ingredient, step, testMode)
 		if step.Register != nil && !testMode {
 			vars.set(step.Register.Name, captureRegisterValue(res), step.Register.Sensitive)
 		}
