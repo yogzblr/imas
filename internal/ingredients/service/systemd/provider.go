@@ -25,9 +25,9 @@ var (
 	sysUnmask  = systemctl.Unmask
 	sysStatus  = systemctl.Status
 
-	// These come from helpers.go — no variadic args.
-	sysIsEnabled = systemctl.IsEnabled
-	sysIsMasked  = systemctl.IsMasked
+	// The state queries read `systemctl is-enabled` themselves (unitstate.go).
+	sysIsEnabled = isEnabledState
+	sysIsMasked  = isMaskedState
 	sysIsRunning = systemctl.IsRunning
 )
 
