@@ -17,16 +17,21 @@ linux:
     userdel -r iuu@NONCE@ 2>/dev/null; userdel iuu@NONCE@ 2>/dev/null; true
 windows:
   setup: |
-    net user iuu@NONCE@ 'Uat-@NONCE@-Pw1!' /add
-    exit $LASTEXITCODE
+    # New-LocalUser with a SecureString (W11): net.exe's "user /add" with a
+    # password over 14 characters asks for confirmation and exits -1 when
+    # nobody answers. A random password, never printed.
+    $b = New-Object byte[] 18
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+    $pw = ConvertTo-SecureString -String ('Aa1!' + [Convert]::ToBase64String($b)) -AsPlainText -Force
+    New-LocalUser -Name 'iuu@NONCE@' -Password $pw -AccountNeverExpires -ErrorAction Stop | Out-Null
   recipe: |
     steps:
       uat user exists:
         user.exists:
           - name: 'iuu@NONCE@'
   check: |
-    net user iuu@NONCE@ > $null 2>&1
-    exit $LASTEXITCODE
+    if (Get-LocalUser -Name 'iuu@NONCE@' -ErrorAction SilentlyContinue) { exit 0 }
+    exit 1
   revert: |
-    net user iuu@NONCE@ /delete > $null 2>&1
+    Remove-LocalUser -Name 'iuu@NONCE@' -ErrorAction SilentlyContinue
     exit 0

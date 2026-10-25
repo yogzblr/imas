@@ -73,21 +73,14 @@ type harnessDriver struct {
 const longCallTimeout = 5 * time.Minute
 
 func (d harnessDriver) Upload(ctx context.Context, tenant int, name, content string) error {
-	tok, err := d.f.Admin(ctx, tenant)
-	if err != nil {
-		return err
-	}
-	_, err = d.f.API.UploadRecipe(ctx, tok, d.f.TenantID(tenant), name, content)
+	_, err := d.f.AdminAPI(tenant).UploadRecipe(ctx, "", d.f.TenantID(tenant), name, content)
 	return err
 }
 
 func (d harnessDriver) Delete(ctx context.Context, tenant int, name string) {
-	tok, err := d.f.Admin(ctx, tenant)
-	if err != nil {
-		return
-	}
+	api := d.f.AdminAPI(tenant)
 	for i := 0; i < 5; i++ {
-		r, err := d.f.API.DeleteRecipe(ctx, tok, d.f.TenantID(tenant), name)
+		r, err := api.DeleteRecipe(ctx, "", d.f.TenantID(tenant), name)
 		if err != nil || r.Status != 429 {
 			return
 		}
@@ -102,7 +95,12 @@ func (d harnessDriver) Delete(ctx context.Context, tenant int, name string) {
 func (d harnessDriver) Cook(ctx context.Context, sp harness.Sprout, recipe string, test bool, timeout time.Duration) (harness.Item, error) {
 	b, err := d.f.DoAssets(ctx, sp.Tenant, []string{sp.AssetID}, harness.CookAction(recipe, test), timeout)
 	if err != nil {
-		return harness.Item{}, err
+		// The item as last read, if any: its job id finds the lost job.
+		var it harness.Item
+		if b != nil {
+			it, _ = b.For(sp)
+		}
+		return it, err
 	}
 	it, ok := b.For(sp)
 	if !ok {

@@ -108,6 +108,26 @@ type Client struct {
 	BaseURL      string
 	InternalAuth string
 	HTTP         *http.Client
+
+	// auth, set by Authed, supplies the token of a request that has none.
+	auth TokenFunc
+}
+
+// TokenFunc returns a bearer token for a call. renew asks for a new one,
+// past any cache: saasapi answered 401 to the last one.
+type TokenFunc func(ctx context.Context, renew bool) (string, error)
+
+// Authed returns a copy of the client that gets the token of every
+// request without one from tok, and when saasapi answers such a request
+// 401 (the token expired: a Keycloak access token lives 5 minutes, and
+// UAT Run 2's I.win_shortcut.present waited 6 minutes on one batch, W11)
+// renews it and sends the request once more. The harness's own calls (a
+// batch and its wait, recipes) go through it; the auth scenarios call Do
+// with the exact token they test, never renewed.
+func (c *Client) Authed(tok TokenFunc) *Client {
+	cp := *c
+	cp.auth = tok
+	return &cp
 }
 
 // NewClient returns a Client for baseURL (without /v1).
@@ -116,8 +136,28 @@ func NewClient(baseURL, internalAuth string, hc *http.Client) *Client {
 }
 
 // Do sends req. The error is for transport failures only: any HTTP status
-// comes back as a Response.
+// comes back as a Response. On an Authed client, a request without a token
+// gets one, and is sent once more with a renewed one after a 401.
 func (c *Client) Do(ctx context.Context, req Request) (*Response, error) {
+	if c.auth == nil || req.Token != "" {
+		return c.do(ctx, req)
+	}
+	tok, err := c.auth(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: getting a token: %w", req.Method, req.Path, err)
+	}
+	req.Token = tok
+	r, err := c.do(ctx, req)
+	if err != nil || r.Status != http.StatusUnauthorized {
+		return r, err
+	}
+	if req.Token, err = c.auth(ctx, true); err != nil {
+		return r, nil
+	}
+	return c.do(ctx, req)
+}
+
+func (c *Client) do(ctx context.Context, req Request) (*Response, error) {
 	var body io.Reader
 	contentType := req.ContentType
 	switch {

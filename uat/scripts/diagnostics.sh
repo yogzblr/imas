@@ -36,12 +36,22 @@
 # vm writes <out-dir>/<epoch>.txt (the harness passes
 # <report>/diagnostics/<vm>), read through az vm run-command and never the
 # test channel (vmctl.sh with VMCTL_CHANNEL=runcommand), so it works when
-# the tunnel is what failed: the sprout service's state, the last
+# the tunnel is what failed: the sprout service's state, every log line of
+# each job id (W11: from the whole log, however far back), the last
 # DIAG_VM_LOG_LINES (300) lines of its log (journalctl -u imas-sprout on
 # Linux, %ProgramData%\imas\logs\sprout.log and the end of
 # sprout-crash.log on Windows) and each job id's record (the sprout's
 # <joblogdir>/<id>.jsonl: /var/cache/imas/sprout/jobs on Linux,
-# %ProgramData%\imas\cache\sprout\jobs on Windows). Azure keeps only the
+# %ProgramData%\imas\cache\sprout\jobs on Windows). When the sprout
+# restarted without a reboot (a second startup line, "registered sdb
+# backend awssm", since the boot; on Linux also systemd's NRestarts) or a job is
+# lost (no record, or no completion in it), or DIAG_VM_EVENTS=1, it also
+# takes what killed the process (W11: UAT Run 2's win_shortcut cook): on
+# Windows the Application log's Application Error, Windows Error Reporting
+# and .NET Runtime events (faulting module, exception code), the System
+# log's Service Control Manager 7031, 7034, 7023 and 7024 events since the
+# boot (at most 3 hours back) and `sc.exe qfailure imas-sprout`; on Linux
+# coredumpctl's list, the kernel's OOM kills and the unit's exit lines. Azure keeps only the
 # last 4096 bytes of a run-command's output, so the VM packs it all
 # (gzip, base64) into a file and hands it over in pieces, one call each, at
 # most DIAG_VM_CHUNKS (6) of them; when it does not fit, it is made again
@@ -68,6 +78,8 @@
 #   DIAG_SPROUT_SERVICE  the sprout service (default imas-sprout)
 #   DIAG_VM_LOG_LINES  sprout log lines for vm (default 300)
 #   DIAG_VM_CHUNKS     run-command calls for vm's pieces (default 6)
+#   DIAG_VM_EVENTS     1: take the event logs (vm) even when the sprout did
+#                      not restart and no job is lost (default 0)
 #   DIAG_VM_JOBDIR     the Linux sprout's joblogdir (default
 #                      /var/cache/imas/sprout/jobs, as packaged)
 #   KUBECTL, AZ        the tools (default kubectl, az)
@@ -133,14 +145,32 @@ vm_bundle_linux() {
   shift 3
   [ $# -eq 0 ] || jobs=$(printf "'%s' " "$@")
   cat <<EOF
+# W11: did the sprout restart since boot (systemd's NRestarts, or more
+# than one start in this boot's journal), or is a job lost (no record, or
+# no completion in it)? Then what killed it: core dumps and OOM kills.
+starts=\$(journalctl -b -u '$service' --no-pager -o cat 2>/dev/null | grep -c 'registered sdb backend awssm')
+restarts=\$(systemctl show -p NRestarts --value '$service' 2>/dev/null)
+lost=0
+for j in $jobs; do grep -qs '"ID":"completed-' "$jobdir/\$j.jsonl" || lost=1; done
 for n in $lines 150 60 20; do
   {
     echo "== the sprout service"; systemctl status '$service' --no-pager -l 2>&1 | head -n 20
+    echo "== sprout starts in this boot's journal: \${starts:-0}; systemd NRestarts: \${restarts:-unknown}; a job lost: \$lost"
+    for j in $jobs; do
+      echo "== journalctl -u $service: every line of job \$j"
+      journalctl -u '$service' --no-pager -o short-iso 2>&1 | grep -F -- "\$j" | tail -n 100
+    done
     echo "== journalctl -u $service (last \$n lines)"; journalctl -u '$service' --no-pager -n "\$n" -o short-iso 2>&1
     for j in $jobs; do
       echo "== job \$j ($jobdir/\$j.jsonl)"
       cat "$jobdir/\$j.jsonl" 2>&1 || echo "(no record)"
     done
+    if [ "\${starts:-0}" -gt 1 ] || [ "\${restarts:-0}" != 0 ] || [ "\$lost" = 1 ] || [ '${DIAG_VM_EVENTS:-0}' = 1 ]; then
+      echo "== the sprout restarted or a job was lost: core dumps and OOM kills"
+      coredumpctl list --no-pager 2>&1 | tail -n 10
+      journalctl -k -b --no-pager -o short-iso 2>/dev/null | grep -Ei 'out of memory|oom-kill|killed process' | tail -n 20
+      journalctl -b --no-pager -o short-iso -u '$service' 2>/dev/null | grep -Ei 'main process exited|dumped core|failed with result|scheduled restart' | tail -n 20
+    fi
   } | gzip -9 | base64 -w0 >'$file'
   [ "\$(wc -c <'$file')" -le $limit ] && break
 done
@@ -156,11 +186,47 @@ vm_bundle_windows() {
   jobs=${jobs%,}
   cat <<EOF
 \$f = Join-Path \$env:TEMP '$file'
+\$d = Join-Path \$env:ProgramData 'imas\\logs'
+\$log = Join-Path \$d 'sprout.log'
+# W11: a sprout that restarted without a reboot (more than one startup
+# line, "registered sdb backend awssm" (one per start), after the boot) or a lost job (no record,
+# or no completion in it): what killed it, from the event logs.
+\$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+\$starts = 0
+if (Test-Path -LiteralPath \$log) {
+  foreach (\$m in (Select-String -LiteralPath \$log -Pattern 'registered sdb backend awssm' -SimpleMatch)) {
+    \$t = \$null
+    if (\$m.Line -match '^(\\d{4}[/-]\\d{2}[/-]\\d{2}[ T]\\d{2}:\\d{2}:\\d{2})') { try { \$t = [datetime]::Parse((\$Matches[1] -replace '/', '-')) } catch { } }
+    if (-not \$t -or \$t -ge \$boot) { \$starts++ }
+  }
+}
+\$lost = \$false
+foreach (\$j in @($jobs)) {
+  \$p = Join-Path \$env:ProgramData "imas\\cache\\sprout\\jobs\\\$j.jsonl"
+  if (-not (Test-Path -LiteralPath \$p) -or -not (Select-String -LiteralPath \$p -Pattern '"ID":"completed-' -SimpleMatch -Quiet)) { \$lost = \$true }
+}
+\$ev = New-Object Text.StringBuilder
+[void]\$ev.AppendLine("== sprout starts since the boot at \$(\$boot.ToUniversalTime().ToString('o')): \$starts; a job lost: \$lost")
+if (\$starts -gt 1 -or \$lost -or '${DIAG_VM_EVENTS:-0}' -eq '1') {
+  \$since = (Get-Date).AddHours(-3)
+  if (\$boot -gt \$since) { \$since = \$boot }
+  \$short = { param(\$e) "\$(\$e.TimeCreated.ToUniversalTime().ToString('o')) \$(\$e.ProviderName) \$(\$e.Id): " + ((\$e.Message -replace '\\s+', ' ') -replace '^(.{600}).*', '\$1...') }
+  [void]\$ev.AppendLine('== Application log: Application Error, Windows Error Reporting, .NET Runtime (faulting module, exception code)')
+  Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error', 'Windows Error Reporting', '.NET Runtime'; StartTime = \$since } -MaxEvents 12 -ErrorAction SilentlyContinue | ForEach-Object { [void]\$ev.AppendLine((& \$short \$_)) }
+  [void]\$ev.AppendLine('== System log: Service Control Manager 7031, 7034, 7023, 7024 (a service ended unexpectedly)')
+  Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7031, 7034, 7023, 7024; StartTime = \$since } -MaxEvents 12 -ErrorAction SilentlyContinue | ForEach-Object { [void]\$ev.AppendLine((& \$short \$_)) }
+  [void]\$ev.AppendLine('== sc.exe qfailure $service')
+  [void]\$ev.AppendLine((sc.exe qfailure '$service' | Out-String))
+}
 foreach (\$n in @($lines, 150, 60, 20)) {
   \$sb = New-Object Text.StringBuilder
   [void]\$sb.AppendLine('== the sprout service')
   [void]\$sb.AppendLine((Get-Service -Name '$service' -ErrorAction SilentlyContinue | Format-List Name, Status, StartType | Out-String))
-  \$d = Join-Path \$env:ProgramData 'imas\\logs'
+  [void]\$sb.Append(\$ev.ToString())
+  foreach (\$j in @($jobs)) {
+    [void]\$sb.AppendLine("== \$log: every line of job \$j")
+    if (Test-Path -LiteralPath \$log) { Select-String -LiteralPath \$log -Pattern \$j -SimpleMatch | Select-Object -Last 100 | ForEach-Object { [void]\$sb.AppendLine(\$_.Line) } }
+  }
   foreach (\$p in @(@((Join-Path \$d 'sprout.log'), \$n), @((Join-Path \$d 'sprout-crash.log'), 50))) {
     if (Test-Path -LiteralPath \$p[0]) {
       [void]\$sb.AppendLine("== \$(\$p[0]) (last \$(\$p[1]) lines)")

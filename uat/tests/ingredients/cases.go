@@ -123,6 +123,8 @@ var (
 	caseIDRe      = regexp.MustCompile(`^I\.([a-z0-9_]+)\.([a-z0-9_]+)$`)
 	needRe        = regexp.MustCompile(`^[a-z0-9-]+(:[A-Za-z0-9_.-]+)?$`)
 	placeholderRe = regexp.MustCompile(`@[A-Z0-9_]+@`)
+	// setupVarRe is a placeholder the setup script fills (SetupVars).
+	setupVarRe = regexp.MustCompile(`^@SETUP_[A-Z0-9_]+@$`)
 )
 
 // Placeholders a case may use in its scripts and recipes; the runner
@@ -309,9 +311,17 @@ func (c *Case) Validate() error {
 				bad("%s: revert_recipe: %v", o, err)
 			}
 		}
-		for _, s := range []string{p.Setup, p.Recipe, p.Check, p.ExpectOutput, p.RevertRecipe, p.Revert} {
+		for i, s := range []string{p.Setup, p.Recipe, p.Check, p.ExpectOutput, p.RevertRecipe, p.Revert} {
 			for _, ph := range placeholderRe.FindAllString(s, -1) {
-				if _, ok := Placeholders[ph]; !ok {
+				if _, ok := Placeholders[ph]; ok {
+					continue
+				}
+				switch {
+				case setupVarRe.MatchString(ph) && i == 0:
+					bad("%s: the setup script can't use %s: the setup sets it", o, ph)
+				case setupVarRe.MatchString(ph) && p.Setup == "":
+					bad("%s: %s needs a setup script that sets it", o, ph)
+				case !setupVarRe.MatchString(ph):
 					bad("%s: unknown placeholder %s", o, ph)
 				}
 			}

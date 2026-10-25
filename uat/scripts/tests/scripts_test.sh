@@ -473,8 +473,11 @@ printf '#!/usr/bin/env bash\necho "imas-sprout.service - active (running); passw
 # 400 log lines that do not compress, so the bundle needs several pieces
 # and is made again with fewer lines.
 # shellcheck disable=SC2016 # the stub's own script
-printf '#!/usr/bin/env bash\nn=400; while [ $# -gt 0 ]; do [ "$1" = -n ] && n=$2; shift; done\nfor i in $(seq $((401 - n)) 400); do echo "log line $i $(head -c 45 /dev/urandom | base64)"; done\n' >"$STUB_STATE/bin/journalctl"
-chmod +x "$STUB_STATE/bin/systemctl" "$STUB_STATE/bin/journalctl" "$STUB_STATE/vmctl"
+# Without -n (the whole log, as for a job's lines and the start count) it
+# also has two sprout starts and a line of the job (W11).
+printf '#!/usr/bin/env bash\nn=400; while [ $# -gt 0 ]; do [ "$1" = -n ] && n=$2; shift; done\nif [ "$n" = 400 ]; then echo "registered sdb backend awssm"; echo "cooking job ace3f2c3-0862: uat firewall rule_present"; echo "registered sdb backend awssm"; fi\nfor i in $(seq $((401 - n)) 400); do echo "log line $i $(head -c 45 /dev/urandom | base64)"; done\n' >"$STUB_STATE/bin/journalctl"
+printf '#!/usr/bin/env bash\necho "TIME PID UID GID SIG COREFILE EXE"\necho "Sat 2026-10-25 07:41:28 UTC 4242 0 0 SIGSEGV present /usr/bin/imas-sprout"\n' >"$STUB_STATE/bin/coredumpctl"
+chmod +x "$STUB_STATE/bin/systemctl" "$STUB_STATE/bin/journalctl" "$STUB_STATE/bin/coredumpctl" "$STUB_STATE/vmctl"
 echo '{"ID":"uat firewall rule_present","CompletionStatus":3,"Error":"netsh.exe: exit status 1"}' >"$STUB_STATE/jobs/ace3f2c3-0862.jsonl"
 d="$STUB_STATE/out/t1-ubuntu"
 DIAG_UAT="$access_uat" DIAG_VMCTL="$STUB_STATE/vmctl" DIAG_VM_JOBDIR="$STUB_STATE/jobs" DIAG_VM_CHUNKS=4 \
@@ -488,6 +491,9 @@ check "vm: ... shortened to fit the pieces" test -z "$(grep '^log line 1 ' "$f")
 check "vm: the failed job's record" grep -q '"Error":"netsh.exe: exit status 1"' "$f"
 check "vm: a malformed job id is never sent" test -z "$(grep -F 'bad;id' "$f")"
 check "vm: redacted" test -z "$(grep 'stub-value-9' "$f")"
+check "vm: every sprout log line of the failed job, from the whole log (W11)" grep -q "^cooking job ace3f2c3-0862: uat firewall rule_present" "$f"
+check "vm: a second sprout start in this boot is counted (W11)" grep -q "sprout starts in this boot's journal: 2" "$f"
+check "vm: ... and then what killed it: core dumps (W11)" grep -q "SIGSEGV present /usr/bin/imas-sprout" "$f"
 check "vm: the VM's temporary file is removed" test -z "$(find /tmp -maxdepth 1 -name 'imas-diag-*.b64' -newer "$STUB_STATE/vmctl" 2>/dev/null)"
 
 ###############################################################################

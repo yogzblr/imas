@@ -81,6 +81,13 @@ func (f *Fleet) Admin(ctx context.Context, n int) (string, error) {
 	return f.Tokens.Tenant(ctx, n, RoleAdmin)
 }
 
+// AdminAPI is the API client for tenant n's admin: it gets the token
+// itself, refreshed a minute before it expires and renewed once on a 401
+// (Client.Authed).
+func (f *Fleet) AdminAPI(n int) *Client {
+	return f.API.Authed(f.Tokens.TenantFunc(n, RoleAdmin))
+}
+
 // Filter selects sprouts.
 type Filter func(Sprout) bool
 
@@ -295,15 +302,14 @@ func (f *Fleet) Do(ctx context.Context, n int, sprouts []Sprout, act Action) (*B
 
 // DoAssets is Do for raw asset IDs and a timeout of the caller's.
 func (f *Fleet) DoAssets(ctx context.Context, n int, assets []string, act Action, timeout time.Duration) (*Batch, error) {
-	tok, err := f.Admin(ctx, n)
-	if err != nil {
-		return nil, err
-	}
-	id, err := f.API.StartBatch(ctx, tok, f.TenantID(n), assets, act)
+	// Each request gets a current token: a cook's batch can outlive the
+	// token it started with (W11).
+	api := f.AdminAPI(n)
+	id, err := api.StartBatch(ctx, "", f.TenantID(n), assets, act)
 	if err != nil {
 		return nil, fmt.Errorf("posting the %s batch: %w", act.Type, err)
 	}
-	return f.API.WaitBatch(ctx, tok, f.TenantID(n), id, timeout)
+	return api.WaitBatch(ctx, "", f.TenantID(n), id, timeout)
 }
 
 // Cook cooks a recipe on the sprouts of tenant n and waits for it.

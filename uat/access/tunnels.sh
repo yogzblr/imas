@@ -97,6 +97,13 @@ read_banner() {
   timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" && head -c 4 <&3' _ "$1" 2>/dev/null || true
 }
 
+# port_listeners <port>: the pids listening on 127.0.0.1:<port> (ss), one
+# per line; nothing without ss.
+port_listeners() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -Hltnp "( sport = :$1 )" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+}
+
 # Is pid $1 running? A zombie (exited, not yet reaped by whatever adopted
 # it) is not.
 alive() {
@@ -448,8 +455,24 @@ cmd_reopen_one() {
     port_in_use "$port" || break
     sleep 0.5
   done
+  # A bastion tunnel process left holding the port (not the one in
+  # tunnels.pids: an orphan of an earlier reopen) is stopped too (W11: a
+  # reopen of uat-dmz's kube tunnel failed after 25 s with no reason given).
   if port_in_use "$port"; then
-    die "$want_vm $want_kind: port $port is still taken after its tunnel stopped; not moving it"
+    local holder
+    for holder in $(port_listeners "$port"); do
+      if is_tunnel_pid "$holder"; then
+        log "$want_vm $want_kind: port $port is held by another bastion tunnel process ($holder); stopping it"
+        stop_pid "$holder"
+      fi
+    done
+    for ((i = 0; i < 10; i++)); do
+      port_in_use "$port" || break
+      sleep 0.5
+    done
+  fi
+  if port_in_use "$port"; then
+    die "$want_vm $want_kind: port $port is still taken after its tunnel stopped (by: $(port_listeners "$port" | tr '\n' ' ')); not moving it"
   fi
   local log="$dir/logs/$want_vm-$want_kind.log" pid rc=0
   mkdir -p "$dir/logs"

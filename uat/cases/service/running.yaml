@@ -2,7 +2,7 @@ id: I.service.running
 title: 'start a stopped service'
 os: [ubuntu, alma, windows]
 notes: |
-  A throwaway unit the setup writes under /usr/local/lib/systemd/system (so masking, which writes /etc/systemd/system, doesn't collide with it) running sleep; the revert removes it. Start type cases use a throwaway service the setup registers with sc.exe (never started); state cases use the Print Spooler, whose start type and state the setup records and the revert restores.
+  A throwaway unit the setup writes under /usr/local/lib/systemd/system (so masking, which writes /etc/systemd/system, doesn't collide with it) running sleep; the revert removes it. Start type cases use a throwaway service the setup registers with sc.exe (never started); state cases use the first of seclogon, WerSvc and wuauserv that exists and isn't disabled (Server Core has no Print Spooler; for restarted it must also run in a process of its own), chosen by the setup (`@SETUP_SERVICE@`), whose start type and state the setup records and the revert restores; with none of them the case is a skip.
 linux:
   setup: |
     mkdir -p /usr/local/lib/systemd/system
@@ -23,24 +23,32 @@ linux:
     systemctl daemon-reload; true
 windows:
   setup: |
-    $s = Get-CimInstance Win32_Service -Filter "Name='Spooler'"
-    if (-not $s) { 'no Spooler service'; exit 1 }
-    "$($s.StartMode) $($s.State)" | Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.spooler'
-    Stop-Service -Name Spooler -Force
+    # Server 2022 Core has no Print Spooler (W11): the first of these that
+    # exists and isn't disabled, else a skip. Recorded for the revert.
+    $pick = $null
+    foreach ($n in 'seclogon', 'WerSvc', 'wuauserv') {
+      $s = Get-CimInstance Win32_Service -Filter "Name='$n'"
+      if (-not $s -or $s.StartMode -eq 'Disabled') { continue }
+      $pick = $s; break
+    }
+    if (-not $pick) { 'IMAS_UAT_SKIP: none of seclogon, WerSvc and wuauserv exists here with a start type other than Disabled'; exit 0 }
+    "$($pick.Name) $($pick.StartMode) $($pick.State)" | Set-Content -LiteralPath 'C:\Windows\Temp\imas-uat-@NONCE@.svc'
+    'IMAS_UAT_SET SERVICE=' + $pick.Name
+    Stop-Service -Name $pick.Name -Force
   recipe: |
     steps:
       uat service running:
         service.running:
-          - name: 'Spooler'
+          - name: '@SETUP_SERVICE@'
   check: |
-    if ((Get-Service -Name Spooler).Status -eq 'Running') { exit 0 }
+    if ((Get-Service -Name '@SETUP_SERVICE@').Status -eq 'Running') { exit 0 }
     exit 1
   revert: |
-    $p = 'C:\Windows\Temp\imas-uat-@NONCE@.spooler'
+    $p = 'C:\Windows\Temp\imas-uat-@NONCE@.svc'
     if (Test-Path -LiteralPath $p) {
-      $mode, $state = (Get-Content -LiteralPath $p).Split(' ')
+      $name, $mode, $state = (Get-Content -LiteralPath $p).Split(' ')
       $t = @{ Auto = 'Automatic'; Manual = 'Manual'; Disabled = 'Disabled' }[$mode]
-      if ($t) { Set-Service -Name Spooler -StartupType $t }
-      if ($state -eq 'Running') { Start-Service -Name Spooler } else { Stop-Service -Name Spooler -Force }
+      if ($t) { Set-Service -Name $name -StartupType $t }
+      if ($state -eq 'Running') { Start-Service -Name $name } else { Stop-Service -Name $name -Force }
       Remove-Item -Force -LiteralPath $p
     }

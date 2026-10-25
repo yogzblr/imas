@@ -55,10 +55,26 @@ func (k *Kube) Run(ctx context.Context, stdin []byte, args ...string) ([]byte, e
 		if ferr := sessionFreshness().Ensure(ctx); ferr != nil {
 			fmt.Fprintf(os.Stderr, "uat harness: %s: %v; running kubectl anyway\n", k.Hub, ferr)
 		}
-		bin := k.Kubectl
-		if bin == "" {
-			bin = "kubectl"
-		}
+		stdout, stderr, err = k.runKubectl(ctx, stdin, args)
+	}
+	if err != nil {
+		return stdout, fmt.Errorf("%s: kubectl %s: %v: %s", k.Hub, describeArgs(args), err, tail(stderr, 600))
+	}
+	return stdout, nil
+}
+
+// runKubectl runs kubectl holding its kube tunnel's shared lock, so the
+// session's supervisor never reopens the tunnel under it (W11); a refused
+// connection while a kube tunnel is being reopened anyway is tried again
+// for up to kubeReopenRetry.
+func (k *Kube) runKubectl(ctx context.Context, stdin []byte, args []string) ([]byte, []byte, error) {
+	bin := k.Kubectl
+	if bin == "" {
+		bin = "kubectl"
+	}
+	give := time.Now().Add(kubeReopenRetry)
+	for {
+		release := holdKubeTunnel(ctx, k.Kubeconfig)
 		cmd := exec.CommandContext(ctx, bin, append([]string{"--kubeconfig", k.Kubeconfig}, args...)...)
 		var so, se bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &so, &se
@@ -66,13 +82,16 @@ func (k *Kube) Run(ctx context.Context, stdin []byte, args ...string) ([]byte, e
 			cmd.Stdin = bytes.NewReader(stdin)
 		}
 		cmd.WaitDelay = time.Second
-		err = cmd.Run()
-		stdout, stderr = so.Bytes(), se.Bytes()
+		err := cmd.Run()
+		release()
+		if err == nil || !refusedOnTunnel(se.Bytes()) || !kubeReopening() || time.Now().After(give) || ctx.Err() != nil {
+			return so.Bytes(), se.Bytes(), err
+		}
+		fmt.Fprintf(os.Stderr, "uat harness: %s: kubectl %s: connection refused while a kube tunnel is reopened; trying again\n", k.Hub, describeArgs(args))
+		if serr := sleep(ctx, 2*time.Second); serr != nil {
+			return so.Bytes(), se.Bytes(), err
+		}
 	}
-	if err != nil {
-		return stdout, fmt.Errorf("%s: kubectl %s: %v: %s", k.Hub, describeArgs(args), err, tail(stderr, 600))
-	}
-	return stdout, nil
 }
 
 // describeArgs is a kubectl command line for a message: the verb and its
