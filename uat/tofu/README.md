@@ -14,9 +14,9 @@ in one resource group, `imas-uat-<run_id>`, and destroys it afterwards:
   `10.60.2.0/24`, `tenants` `10.60.3.0/24` and `AzureBastionSubnet`
   `10.60.4.0/26`, one network security group per subnet;
 - one Azure Bastion (Standard SKU, native client tunnelling on, its own
-  Standard public IP), the only path to SSH, WinRM and the Kubernetes API;
-  on an HA run also IP-based connection (`ip_connect_enabled`), for the
-  tunnel to each HA hub's API address (`uat/access`);
+  Standard public IP), the only path to SSH, WinRM and the Kubernetes API,
+  every tunnel by the VM's resource id; IP-based connection stays off (it
+  allows ports 22 and 3389 only, W12);
 - the two hubs, `uat-dmz` and `uat-core`, and the six sprouts, `t1-ubuntu`,
   `t1-alma`, `t1-win`, `t2-ubuntu`, `t2-alma` and `t2-win`, each with its own
   Standard public IP;
@@ -339,7 +339,12 @@ With more nodes (the HA run is 3 and 3, owner 2026-10-13; P24):
   subnet both ways: TCP 179 (kube-router BGP), 2379-2380 (etcd), 6443 (API),
   8132 (konnectivity), 9443 (k0s join API), 10250 (kubelet) and UDP 5555
   (kube-router's FOU overlay; Azure drops IP-in-IP inside a VNet, so the pod
-  overlay must be UDP), and the load balancer's health probes
+  overlay must be UDP); the hub's own hostPorts (W12: core 443, 5405, 9000;
+  the DMZ 8443, 8442), because CoreDNS maps a hub's own FQDN to every one of
+  its nodes, so a pod on one node dials another node's hostPort (saasapi
+  fetching Keycloak's JWKS from the core FQDN on 443), a flow kube-router
+  masquerades to the node's own address, which `DenyVnetIn` would drop; and
+  the load balancer's health probes
   (`AzureLoadBalancer`, which `DenyAllIn` would drop) on the load-balanced
   ports. The tenants' deny rules cover every public IP of the hub (nodes and
   load balancer). The table:
@@ -348,10 +353,13 @@ With more nodes (the HA run is 3 and 3, owner 2026-10-13; P24):
 |---|---|---|---|---|---|---|
 | dmz, core | in | 150 | AllowHubNodesTcpIn | the hub's subnet | the hub's subnet | TCP 179, 2379-2380, 6443, 8132, 9443, 10250 |
 | dmz, core | in | 151 | AllowHubNodesUdpIn | the hub's subnet | the hub's subnet | UDP 5555 |
+| core | in | 152 | AllowHubNodesServiceIn | core | core | TCP `core_public_port` (443), `farmer_api_port` (5405), `accounts_store_port` (9000) |
+| dmz | in | 152 | AllowHubNodesServiceIn | dmz | dmz | TCP `envoy_port` (8443), `bus_port` (8442) |
 | dmz | in | 160 | AllowLoadBalancerProbeIn | AzureLoadBalancer | dmz | TCP 6443, `envoy_port`, `bus_port` |
 | core | in | 160 | AllowLoadBalancerProbeIn | AzureLoadBalancer | core | TCP 6443, `farmer_api_port`, `accounts_store_port`, `core_public_port` |
 | dmz, core | out | 150 | AllowHubNodesTcpOut | the hub's subnet | the hub's subnet | as 150 in |
 | dmz, core | out | 151 | AllowHubNodesUdpOut | the hub's subnet | the hub's subnet | UDP 5555 |
+| dmz, core | out | 152 | AllowHubNodesServiceOut | the hub's subnet | the hub's subnet | as 152 in |
 
 - **Private DNS.** `<hub>.<zone>` and `<hub>-api.<zone>` resolve to the
   internal load balancer; every node has `<node>.<zone>`.
@@ -360,11 +368,16 @@ With more nodes (the HA run is 3 and 3, owner 2026-10-13; P24):
   the hub must therefore not use `api_address` to reach its own hub's API;
   k0s's node-local load balancing does not, and `uat/k0s` sets no
   `externalAddress` (`uat/k0s/README.md`, "HA hubs").
-- **Bastion.** On an HA run the Bastion allows IP-based connections
-  (`ip_connect_enabled`), so `uat/access/tunnels.sh` opens a kube tunnel to
-  each HA hub's `api_address`, which is no VM. The NSG rules above already
-  admit the Bastion subnet on 6443 to the hub's subnet, and a load balancer
-  keeps the client's address. The single-node run keeps it off.
+- **Bastion.** `ip_connect_enabled` stays off on every run (W12). Azure
+  Bastion's IP-based connection tunnels to ports 22 and 3389 only: Azure
+  UAT Run 3 failed in setup with "Custom ports are not allowed. Allowed
+  ports for Tunnel with IP connect is 22, 3389." opening a 6443 tunnel to
+  each hub's `api_address`. `uat/access` reaches an HA hub's k0s API
+  through the nodes' own kube tunnels (by resource id, any port the NSGs
+  allow: 6443 from the Bastion subnet, `AllowBastionSshKubeIn`), failing
+  over between them (`uat/RUNBOOK.md`, "HA access"). The internal load
+  balancer's 6443 rule stays for clients inside the VNet; the runner does
+  not use it.
 - **Object store** (P24, brief H4; design D18). When core has more than one
   node, a StorageV2 account `imasuat<run_id>` in the run's group: zone
   redundant (locally redundant in a region without zones), HTTPS only, TLS
@@ -513,7 +526,7 @@ az resource list --tag run_id=<run_id> -o table   # must be empty
 | `uat-core` | 1 | Standard_D8s_v5: 8 vCPU, 32 GiB; 128 GB Standard SSD |
 | `t1-ubuntu`, `t2-ubuntu`, `t1-alma`, `t2-alma` | 4 | Standard_B2ls_v2: 2 vCPU, 4 GiB; 30 GB Standard SSD |
 | `t1-win`, `t2-win` | 2 | Standard_B2ls_v2: 2 vCPU, 4 GiB; 30 GB Standard SSD |
-| Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units; IP-based connection on an HA run only |
+| Azure Bastion `uat-bastion` | 1 | Standard SKU, 2 scale units; no IP-based connection (W12) |
 | Standard public IPs | 9 | 8 VMs and the Bastion; static |
 | VNet, subnets, NSGs, NICs | 1, 4, 4, 8 | |
 | Private DNS zone, VNet link, A records | 1, 1, 6 | `dmz`, `core`, `dmz-api`, `core-api`, `uat-dmz`, `uat-core` |
@@ -562,8 +575,8 @@ What ran here (no Azure access):
   members, the added NSG rules and that every single-node rule is kept, that
   management ports are open only to the Bastion, the hub's own nodes and the
   probe, the private DNS records, the `uat` and `ha_node_names` outputs, the
-  Bastion's IP-based connection (on with an HA hub, off in the single-node
-  run), one hub HA and the other single, the node count validation, and the
+  Bastion's IP-based connection (off on every run, W12), the HA hubs' own
+  hostPorts open node to node (W12), one hub HA and the other single, the node count validation, and the
   object store account (one, tagged, HTTPS only, private, ZRS or LRS without
   zones, the `object_store` and key outputs; none in the single-node run).
 - `tests/destroy_test.sh`: `destroy.sh` against stubbed `tofu` and `az`, all

@@ -201,6 +201,137 @@ pinned chart has no Sentinel) and Keycloak (UAT only). A stateful pod on a
 stopped node stays down until the node returns while its replicas serve
 (local volumes; owner, 2026-10-11).
 
+### Run 3 on rc.22: Bastion refused the tunnel to the load balancer (W12)
+
+**What happened.** Azure UAT Run 3 (`tier=ha`, `hub_nodes=3`,
+`dispatch_flags=false`, `v0.1.0-rc.22`) applied tofu (about 21 minutes,
+fine) and opened every node's SSH and kube tunnel by resource id (ports
+20100 to 20105 for `uat-dmz-1` to `uat-dmz-3` came up), then failed in
+the tunnel phase (02:08Z):
+
+```
+tunnel to dmz-api (kube) exited; starting it again (attempt 2 of 3)
+... (attempt 3 of 3)
+ERROR: Custom ports are not allowed. Allowed ports for Tunnel with IP connect is 22, 3389.
+```
+
+`tunnels.sh` (reworked for HA in H2) opened one more tunnel per hub, to its
+internal load balancer's address on 6443, by IP (`az network bastion tunnel
+--target-ip-address`). **Azure Bastion's IP-based connection allows ports
+22 and 3389 only**; a tunnel by resource id (`--target-resource-id`, every
+other tunnel of the gate) allows any port. The single-node run never takes
+that path, which is why `tier=all` on one node is green (307 pass, 0 fail,
+60 skip) and this was the first time the HA path ran. `core-api` would
+have failed the same way.
+
+### HA access: the k0s API through the nodes' own tunnels (W12)
+
+**No Bastion tunnel goes by IP any more, and none to a load balancer.**
+`tunnels.sh` opens SSH (22) and the k0s API (6443) on every hub node, by
+resource id, as on the single-node run, on the same local ports as before;
+there is no `dmz-api` or `core-api` entry in `access.json`. `uat/tofu`
+turns the Bastion's IP-based connection off on every run.
+
+**How kubectl reaches an HA hub.** Each hub's kubeconfig (`core.kubeconfig`,
+`dmz.kubeconfig`) points at one node's kube tunnel,
+`https://127.0.0.1:<kube_port>`: the first node's after `uat/k0s`. Every
+node's API certificate names 127.0.0.1 (`spec.api.sans`, the same for every
+controller) and the nodes share the cluster CA and the admin credential, so
+the one kubeconfig works through any node's tunnel; only the port changes.
+`uat/access/session.sh kube-select` keeps it on a node that answers: the
+node it is on while that one answers HTTPS `/version` (k0s: HTTP 401) and is
+not stopped, else the hub's nodes in order, the first that answers. It
+rewrites the server line in place (0600) and logs the move; a hub with no
+answering node exits 1 and leaves the file as it was. A single-node hub's
+kubeconfig is never touched. It runs:
+
+- at every `session.sh phase` (the workflow's steps, and `run.sh` before
+  each top-level test);
+- every supervisor round (`kube-select: ...` lines in `supervisor.log`, only
+  for a move or a hub with no answering node);
+- in `vmctl.sh stop-vm`, **before** `az vm stop`: the node is marked
+  stopped (`<access dir>/stopped/<vm>`) and every kubeconfig on it moves to
+  another node; `start-vm` clears the mark. While marked, the supervisor,
+  `ensure kube` and `probe` leave its tunnels alone instead of reopening
+  them every round;
+- in the harness, when kubectl says `Unable to connect to the server` or the
+  local tunnel refused (the request never reached the API): it moves the
+  kubeconfig and runs the call again, at most twice per call; and before
+  `helm upgrade` (HA3), `check.sh` (HA3) and `acceptance.sh` on an HA core
+  hub, which it never retries;
+- in `run.sh` before a failed test's diagnostics.
+
+**Which node, and why there is no "safe" one.** HA2 picks the node it stops
+from where the pods run (core: a node with a farmer pod and a replica of
+PXC, OpenBao and Valkey, but not Valkey's primary or Keycloak; DMZ: the last
+node with a bus and an Envoy pod), so it may be the first node. The kubeconfig
+is moved off the node before it stops, whichever it is; the other two nodes
+keep etcd's quorum and serve the API. HA1 and HA3 to HA6 stop no VM, so for
+them the kubeconfig stays where it is unless a node stops answering.
+
+**What it does not cover.** A call already running on a node when that node
+stops (a `kubectl port-forward`, a `helm upgrade --wait`) fails; HA2 issues
+no kubectl call while it stops a node, and the stop moves the kubeconfig
+first. The fallback, if per-node failover ever proves not enough: one SSH
+tunnel per hub through a node's port 22 tunnel (`ssh -N -L
+<port>:<api_address>:6443`), which keeps the load balancer in the path; not
+built, because no HA test needs it.
+
+**The Bastion port limit, checked.** `tunnels.sh` refuses a tunnel by IP to
+any port but 22 and 3389 before `az` runs; `tunnels.sh plan <uat.json>`
+lists the tunnels `open` would start; `uat/access/check-bastion-ports.sh`
+fails when any of the test uat.json files plans such a tunnel or any script
+or workflow but `tunnels.sh` passes `--target-ip-address`. The access tests
+run it, and their stub `az` refuses such a tunnel with Azure's message.
+
+**Diagnosing "the API does not answer" on an HA run.**
+
+1. The step's log or `build.log`: `kube-select: <kubeconfig>: core API
+   moved from uat-core-1 to uat-core-2 (...)` is a failover that worked;
+   `no node of core answers on its kube tunnel (<each node's verdict>)` is
+   the failure, with each node's reason (`stopped by the ha tier`, `no HTTPS
+   answer on /version within 10s`, `no kube tunnel in access.json`).
+2. `session.sh ages` (the "Azure login and tunnel ages" step on a failure)
+   prints each tunnel's process state, "VM stopped by the ha tier" where it
+   applies, and where each kubeconfig points (port and node).
+3. `<access dir>/logs/supervisor.log` in the report: the rounds' moves, and
+   any kube tunnel reopened by age or a failed probe.
+4. `<access dir>/stopped/`: a mark left behind means a `stop-vm` with no
+   `start-vm` after it; the workflow's "Start the HA hubs' VMs" step starts
+   every node and clears them.
+5. Every node's API down at once is the cluster, not the tunnels: look at
+   etcd (`check.sh`'s etcd line; `sudo k0s etcd member-list` on a node over
+   its SSH tunnel) and the k0s controller logs (`sudo journalctl -u
+   k0scontroller`).
+
+### Run 3 again, after W12
+
+The same inputs as the failed run; the release is unchanged, since W12
+touches only the UAT gate:
+
+| Input | Value |
+|---|---|
+| `release_tag` | `v0.1.0-rc.22` |
+| `region` | `centralindia` (the region holding the 18 DSv5 vCPU) |
+| `keep_hours` | `0` |
+| `tier` | `ha` |
+| `upgrade_from_tag` | empty |
+| `scenarios` | empty |
+| `hub_nodes` | `3` |
+| `dispatch_flags` | `false` |
+| `ingress_cidrs` | empty |
+
+```sh
+gh workflow run uat.yml --ref main -f release_tag=v0.1.0-rc.22 -f region=centralindia \
+  -f keep_hours=0 -f tier=ha -f scenarios= -f hub_nodes=3 -f dispatch_flags=false
+```
+
+Before dispatching, check that no other Dsv5 VM runs in the subscription:
+the HA run needs 18 of the 20 Dsv5 vCPU (3 x D4s_v5 core + 3 x D2s_v5 DMZ)
+and the quota check refuses the plan otherwise (`az vm list -d --query
+"[?contains(hardwareProfile.vmSize, '_v5')].[name, resourceGroup,
+hardwareProfile.vmSize, powerState]" -o table`).
+
 ## 4. Reading the report
 
 Each run uploads `uat-report-<run_id>` and `uat-outputs-<run_id>`; the job

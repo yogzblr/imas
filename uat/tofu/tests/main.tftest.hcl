@@ -174,7 +174,7 @@ run "names_tags_and_layout" {
       azurerm_bastion_host.uat.shareable_link_enabled == false &&
       azurerm_bastion_host.uat.ip_connect_enabled == false
     )
-    error_message = "Bastion must be Standard with native client tunnelling on, and no IP-based connection in the single-node run"
+    error_message = "Bastion must be Standard with native client tunnelling on, and no IP-based connection"
   }
 
   assert {
@@ -656,8 +656,8 @@ run "ha_three_plus_three" {
   }
 
   assert {
-    condition     = azurerm_bastion_host.uat.ip_connect_enabled == true
-    error_message = "HA: the Bastion allows IP-based connections (the tunnel to each hub's api_address, uat/access)"
+    condition     = azurerm_bastion_host.uat.ip_connect_enabled == false
+    error_message = "HA: no IP-based Bastion connection: it tunnels to 22 and 3389 only (Azure UAT Run 3); uat/access reaches the k0s API through the nodes' own tunnels (W12)"
   }
 
   assert {
@@ -725,16 +725,16 @@ run "ha_three_plus_three" {
   # single-node rule.
   assert {
     condition = alltrue([for n in ["dmz", "core"] :
-      length([for r in azurerm_network_security_group.subnet[n].security_rule : r if contains(["AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowLoadBalancerProbeIn", "AllowHubNodesTcpOut", "AllowHubNodesUdpOut"], r.name)]) == 5
+      length([for r in azurerm_network_security_group.subnet[n].security_rule : r if contains(["AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowHubNodesServiceIn", "AllowLoadBalancerProbeIn", "AllowHubNodesTcpOut", "AllowHubNodesUdpOut", "AllowHubNodesServiceOut"], r.name)]) == 7
     ])
     error_message = "HA: each hub NSG adds node-to-node rules both ways and the probe rule"
   }
 
   assert {
     condition = (
-      toset([for r in azurerm_network_security_group.subnet["core"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowDmzFarmerApiIn", "AllowRunnerHttpsIn", "AllowDmzAccountsStoreIn", "AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowLoadBalancerProbeIn"]) &&
-      toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowSproutsEnvoyPrivateIn", "AllowRunnerEnvoyIn", "AllowCoreBusIn", "AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowLoadBalancerProbeIn"]) &&
-      toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Outbound" && r.access == "Allow"]) == toset(["AllowFarmerApiOut", "AllowAccountsStoreOut", "AllowHubNodesTcpOut", "AllowHubNodesUdpOut"])
+      toset([for r in azurerm_network_security_group.subnet["core"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowDmzFarmerApiIn", "AllowRunnerHttpsIn", "AllowDmzAccountsStoreIn", "AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowHubNodesServiceIn", "AllowLoadBalancerProbeIn"]) &&
+      toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Inbound" && r.access == "Allow"]) == toset(["AllowBastionSshKubeIn", "AllowSproutsEnvoyPrivateIn", "AllowRunnerEnvoyIn", "AllowCoreBusIn", "AllowHubNodesTcpIn", "AllowHubNodesUdpIn", "AllowHubNodesServiceIn", "AllowLoadBalancerProbeIn"]) &&
+      toset([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r.name if r.direction == "Outbound" && r.access == "Allow"]) == toset(["AllowFarmerApiOut", "AllowAccountsStoreOut", "AllowHubNodesTcpOut", "AllowHubNodesUdpOut", "AllowHubNodesServiceOut"])
     )
     error_message = "HA: every single-node rule is kept, and only the node-to-node and probe rules are added"
   }
@@ -751,6 +751,22 @@ run "ha_three_plus_three" {
       )
     ]]))
     error_message = "HA: node to node inside the hub only: etcd 2379-2380, API 6443, join 9443, konnectivity 8132, kubelet 10250, kube-router BGP 179 and FOU 5555/udp"
+  }
+
+  # W12: a pod dials its own hub's FQDN, which CoreDNS maps to every node,
+  # so another node's hostPorts must be open inside the hub, both ways.
+  assert {
+    condition = (
+      length([for r in azurerm_network_security_group.subnet["core"].security_rule : r if
+        contains(["AllowHubNodesServiceIn", "AllowHubNodesServiceOut"], r.name) && r.protocol == "Tcp" && r.priority == 152 &&
+        r.source_address_prefix == "10.60.2.0/24" && r.destination_address_prefix == "10.60.2.0/24" &&
+      toset(r.destination_port_ranges) == toset(["5405", "9000", "443"])]) == 2 &&
+      length([for r in azurerm_network_security_group.subnet["dmz"].security_rule : r if
+        contains(["AllowHubNodesServiceIn", "AllowHubNodesServiceOut"], r.name) && r.protocol == "Tcp" && r.priority == 152 &&
+        r.source_address_prefix == "10.60.1.0/24" && r.destination_address_prefix == "10.60.1.0/24" &&
+      toset(r.destination_port_ranges) == toset(["8443", "8442"])]) == 2
+    )
+    error_message = "HA: each hub's own hostPorts (core 443, 5405, 9000; DMZ 8443, 8442) open node to node inside the hub, both ways"
   }
 
   assert {
@@ -916,8 +932,8 @@ run "ha_core_only" {
   }
 
   assert {
-    condition     = azurerm_bastion_host.uat.ip_connect_enabled == true
-    error_message = "one HA hub is enough for the Bastion's IP-based connection"
+    condition     = azurerm_bastion_host.uat.ip_connect_enabled == false
+    error_message = "one HA hub: still no IP-based Bastion connection (W12)"
   }
 }
 

@@ -817,7 +817,7 @@ bad_ha "a bad node name" '.core.node_names[1] = "Uat_Core"' "bad core node name"
 bad_ha "a node twice" '.core.node_names[2] = "uat-core-2"' "node uat-core-2 appears twice"
 bad_ha "the hub's name is not the first node" '.dmz.name = "uat-dmz-2"' "must be the first node's"
 bad_ha "node_names not a list of strings" '.dmz.node_names = "uat-dmz-1"' "dmz.node_names must be a list of strings"
-bad_ha "no API tunnel" '.' "no host for VM core-api" 'del(.["core-api"])'
+bad_ha "no kube tunnel on the first node" '.' "no kube_port for VM uat-core-1" 'del(.["uat-core-1"].kube_port)'
 t "ha render: --nodes matches the hubs"
 boot --uat "$HA_UAT" --access "$HA_ACCESS" --ssh-key "$CASE/id_test" --out "$CASE/out" --render-only --nodes 3
 expect_rc 0
@@ -842,21 +842,21 @@ ha_full() { boot --uat "$HA_UAT" --access "$HA_ACCESS" --ssh-key "$CASE/id_test"
 
 fresh_case haflow
 ha_fix
-t "ha flow: both hubs, kubeconfig through the API tunnel, waits for 3 nodes and 3 etcd members"
+t "ha flow: both hubs, kubeconfig through the first node's kube tunnel, waits for 3 nodes and 3 etcd members"
 ha_full --skip-check
 expect_rc 0
 expect_log_order "$CASE/log" \
   "k0sctl apply --config $CASE/out/k0sctl-dmz.yaml" \
-  "k0sctl kubeconfig --config $CASE/out/k0sctl-dmz.yaml --cluster imas-uat-abc123-dmz --address https://127.0.0.1:56450" \
+  "k0sctl kubeconfig --config $CASE/out/k0sctl-dmz.yaml --cluster imas-uat-abc123-dmz --address https://127.0.0.1:56443" \
   "kubectl dmz get nodes" \
   "kubectl dmz wait --for=condition=Ready node --all" \
   "kubectl dmz get etcdmembers.etcd.k0sproject.io" \
   "k0sctl apply --config $CASE/out/k0sctl-core.yaml" \
-  "k0sctl kubeconfig --config $CASE/out/k0sctl-core.yaml --cluster imas-uat-abc123-core --address https://127.0.0.1:56550" \
+  "k0sctl kubeconfig --config $CASE/out/k0sctl-core.yaml --cluster imas-uat-abc123-core --address https://127.0.0.1:56543" \
   "kubectl core get etcdmembers.etcd.k0sproject.io"
 expect_err "dmz: 3 node(s) Ready"
 expect_err "core: etcd has 3 members"
-expect_file_has "$CASE/out/core.kubeconfig" "server: https://127.0.0.1:56550"
+expect_file_has "$CASE/out/core.kubeconfig" "server: https://127.0.0.1:56543"
 [[ $(grep -c '^k0sctl apply' "$CASE/log") == 2 ]] && pass || fail "want one k0sctl apply per hub"
 
 t "ha flow: with the check at the end"

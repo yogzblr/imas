@@ -40,8 +40,13 @@
 # stop-vm       az vm stop (powered off, still allocated) on a hub node, then
 #               waits until Azure reports it stopped, up to
 #               VMCTL_POWER_WAIT_SECONDS: the ha tier's node stop (uat/tests,
-#               HA2); refused for sprouts.
-# start-vm      az vm start on a hub node, then waits as restart does.
+#               HA2); refused for sprouts. First it marks the node stopped
+#               (<access dir>/stopped/<vm>) and moves every kubeconfig in
+#               UAT_SESSION_KUBECONFIGS that points at its kube tunnel to
+#               another node of the hub that answers (W12, channel.sh
+#               ch_kube_select).
+# start-vm      az vm start on a hub node, clears its stopped mark, then
+#               waits as restart does.
 # run           runs <command...> (joined with spaces): bash as root (sudo)
 #               on Linux, PowerShell on Windows (the admin user over WinRM,
 #               SYSTEM through run-command). Prints the command's stdout on
@@ -873,6 +878,16 @@ case "$action" in
       exit 2
     fi
     verb=${action%-vm}
+    # W12: an HA hub's kubeconfigs point at one node's kube tunnel (no
+    # tunnel goes to the internal load balancer: Azure Bastion tunnels by IP
+    # to 22 and 3389 only). Before a node stops it is marked stopped, so the
+    # supervisor and kube-select leave it alone, and every kubeconfig on it
+    # moves to another node that answers (channel.sh ch_kube_select). The
+    # mark goes once start-vm has started it.
+    if [ "$verb" = stop ] && [ -r "$access" ]; then
+      ch_mark_stopped "$vm"
+      ch_kube_select_all || log "warning: a hub's kubeconfig found no other node that answers (uat/RUNBOOK.md, \"HA access\")"
+    fi
     log "${verb/stop/stopp}ing $vm"
     close_sessions
     since=$(date +%s)
@@ -882,6 +897,7 @@ case "$action" in
     fi
     close_sessions
     if [ "$verb" = start ]; then
+      [ -r "$access" ] && ch_clear_stopped "$vm"
       wait_back "$since"
     fi
     deadline=$((SECONDS + power_wait))

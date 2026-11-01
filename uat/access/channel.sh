@@ -373,6 +373,165 @@ ch_port_connections() {
   cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p=":$hex" '$2 ~ p"$" && $4 == "01"' | wc -l
 }
 
+# --- the HA hubs' API: per-node kube tunnels with failover (W12)
+
+# An HA hub (several nodes) has no tunnel to its internal load balancer:
+# Azure Bastion tunnels by IP to ports 22 and 3389 only (Azure UAT Run 3).
+# Its kubeconfig's server is one node's kube tunnel (127.0.0.1:<that node's
+# kube_port>; every node's k0s API certificate names 127.0.0.1, uat/k0s), and
+# ch_kube_select moves it to another node's tunnel when that node stops
+# answering or the ha tier stops it (vmctl.sh stop-vm marks it,
+# <access dir>/stopped/<vm>). A single-node hub's kubeconfig is never
+# touched.
+
+# ch_stopped <vm>: did vmctl.sh stop-vm stop that VM (and no start-vm start
+# it since)?
+ch_stopped() { [ -n "${CH_ACCESS_DIR:-}" ] && [ -e "$CH_ACCESS_DIR/stopped/$1" ]; }
+ch_mark_stopped() { mkdir -p "$CH_ACCESS_DIR/stopped" && date +%s >"$CH_ACCESS_DIR/stopped/$1"; }
+ch_clear_stopped() { rm -f "${CH_ACCESS_DIR:?}/stopped/$1"; }
+
+# ch_kube_server_port <kubeconfig>: the 127.0.0.1 port its server points at,
+# or empty.
+ch_kube_server_port() {
+  sed -nE 's#^[[:space:]]*server:[[:space:]]*https://127\.0\.0\.1:([0-9]{1,5})[[:space:]]*$#\1#p' "$1" 2>/dev/null | head -n 1
+}
+
+# ch_kube_hub <kubeconfig> <port>: the hub ("dmz" or "core") the kubeconfig
+# is for: the hub of the node whose kube_port it points at, else its
+# cluster's name (imas-uat-<run>-<hub>, uat/k0s), else its file name
+# (<hub>.kubeconfig).
+ch_kube_hub() {
+  local kc=$1 port=$2 vm hub=""
+  if [ -n "$port" ]; then
+    vm=$(jq -r --argjson p "$port" 'to_entries[] | select(.value.kube_port == $p) | .key' \
+      "$CH_ACCESS_DIR/access.json" 2>/dev/null | head -n 1)
+    if [ -n "$vm" ]; then
+      hub=$(jq -r --arg vm "$vm" '["dmz", "core"][] as $h | select(.[$h] | ((.node_names // [.name]) | index($vm))) | $h' \
+        "${UAT_UAT_JSON:?}" 2>/dev/null | head -n 1)
+    fi
+  fi
+  if [ -z "$hub" ]; then
+    hub=$(sed -nE 's#^[[:space:]]*-?[[:space:]]*name:[[:space:]]*imas-uat-[a-z0-9]+-(dmz|core)[[:space:]]*$#\1#p' "$kc" 2>/dev/null | head -n 1)
+  fi
+  if [ -z "$hub" ]; then
+    case $(basename "$kc") in
+      dmz.kubeconfig) hub=dmz ;;
+      core.kubeconfig) hub=core ;;
+    esac
+  fi
+  echo "$hub"
+}
+
+# ch_hub_nodes <hub>: the hub's nodes in order (uat.json node_names, else its
+# name), one per line.
+ch_hub_nodes() {
+  jq -r --arg h "$1" '.[$h] | (.node_names // [.name])[]' "${UAT_UAT_JSON:?}" 2>/dev/null || true
+}
+
+# ch_kube_point <kubeconfig> <old port> <new port>: rewrites the server line
+# from the old tunnel port to the new one, atomically (a kubectl call reads
+# the old file or the new one, never half of it).
+ch_kube_point() {
+  local kc=$1 old=$2 new=$3 tmp
+  tmp=$(mktemp "$kc.XXXXXX") || return 1
+  sed -E "s#^([[:space:]]*server:[[:space:]]*https://127\.0\.0\.1:)$old([[:space:]]*)\$#\1$new\2#" "$kc" >"$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$kc"
+}
+
+# ch_kube_select <kubeconfig>: points an HA hub's kubeconfig at a node whose
+# kube tunnel answers (ch_probe kube: an HTTP answer to /version, 401 from
+# k0s) and that the ha tier has not stopped: the node it points at when that
+# one does, else the hub's nodes in order (uat.json node_names), each probed.
+# Prints one line saying what it did. 0 when the kubeconfig now points at an
+# answering node, or is a single-node hub's (left as it is, unprobed), or is
+# missing (not made yet); 1 when no node of the hub answers (the kubeconfig
+# is left as it was). Serialised by <access dir>/locks/kube-select.lock.
+ch_kube_select() {
+  local kc=$1 port hub cur="" verdict n nodes=() tried="" fd p
+  if [ ! -f "$kc" ]; then
+    echo "$kc: no such kubeconfig yet; nothing to select"
+    return 0
+  fi
+  [ -s "${CH_ACCESS_DIR:-}/access.json" ] || { echo "$kc: no tunnels are open; nothing to select"; return 0; }
+  [ -r "${UAT_UAT_JSON:-}" ] || { echo "$kc: no uat.json (UAT_SESSION_UAT); left as it is"; return 0; }
+  port=$(ch_kube_server_port "$kc")
+  hub=$(ch_kube_hub "$kc" "$port")
+  if [ -z "$hub" ]; then
+    echo "$kc: not a hub's kubeconfig (server port ${port:-none}); left as it is"
+    return 0
+  fi
+  mapfile -t nodes < <(ch_hub_nodes "$hub")
+  if [ "${#nodes[@]}" -le 1 ]; then
+    echo "$kc: $hub has one node; left as it is"
+    return 0
+  fi
+  mkdir -p "$CH_ACCESS_DIR/locks"
+  exec {fd}>>"$CH_ACCESS_DIR/locks/kube-select.lock"
+  flock -x -w "${CH_KUBE_SELECT_WAIT:-120}" "$fd" || true
+  # Read again under the lock: another select may have moved it.
+  port=$(ch_kube_server_port "$kc")
+  if [ -n "$port" ]; then
+    cur=$(jq -r --argjson p "$port" 'to_entries[] | select(.value.kube_port == $p) | .key' "$CH_ACCESS_DIR/access.json" 2>/dev/null | head -n 1)
+  fi
+  if [ -n "$cur" ]; then
+    if ch_stopped "$cur"; then
+      tried="$cur: stopped by the ha tier"
+    else
+      verdict=$(ch_probe kube "$port")
+      if [ "${verdict%% *}" = ok ]; then
+        exec {fd}>&-
+        echo "$kc: $hub API through $cur (127.0.0.1:$port): ${verdict#ok }; kept"
+        return 0
+      fi
+      tried="$cur (127.0.0.1:$port): ${verdict#fail }"
+    fi
+  fi
+  for n in "${nodes[@]}"; do
+    [ "$n" != "$cur" ] || continue
+    if ch_stopped "$n"; then
+      tried+="${tried:+; }$n: stopped by the ha tier"
+      continue
+    fi
+    p=$(ch_port "$n" kube)
+    if [ -z "$p" ]; then
+      tried+="${tried:+; }$n: no kube tunnel in access.json"
+      continue
+    fi
+    verdict=$(ch_probe kube "$p")
+    if [ "${verdict%% *}" != ok ]; then
+      tried+="${tried:+; }$n (127.0.0.1:$p): ${verdict#fail }"
+      continue
+    fi
+    if [ -z "$port" ] || ! ch_kube_point "$kc" "$port" "$p"; then
+      tried+="${tried:+; }$n (127.0.0.1:$p): answers, but $kc has no 127.0.0.1 server line to point at it"
+      continue
+    fi
+    exec {fd}>&-
+    echo "$kc: $hub API moved from ${cur:-port ${port:-none}} to $n (127.0.0.1:$p, ${verdict#ok }); before: ${tried:-none}"
+    return 0
+  done
+  exec {fd}>&-
+  echo "$kc: no node of $hub answers on its kube tunnel (${tried:-no node}); left on 127.0.0.1:${port:-none}"
+  return 1
+}
+
+# ch_kube_select_all: ch_kube_select for every kubeconfig in
+# UAT_SESSION_KUBECONFIGS (colon separated; missing files skipped), each
+# result on stderr except a single-node hub's "left as it is" (the
+# single-node run's logs stay as they were); 1 when one has no answering
+# node.
+ch_kube_select_all() {
+  local kc rc=0 kcs=() line
+  IFS=: read -r -a kcs <<<"${UAT_SESSION_KUBECONFIGS:-}"
+  for kc in "${kcs[@]}"; do
+    [ -f "$kc" ] || continue
+    line=$(ch_kube_select "$kc") || rc=1
+    case $line in *"left as it is") ;; *) printf '%s\n' "$line" >&2 ;; esac
+  done
+  return "$rc"
+}
+
 # --- the record
 
 # ch_vm_field <vm> <id|os>: the VM's resource id or OS, from uat.json.

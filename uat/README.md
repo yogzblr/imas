@@ -201,7 +201,13 @@ names the piece):
 5. **Bastion tunnels** (`uat/access/tunnels.sh open`, after `az extension add`
    for `bastion` and `ssh`, on a login made just before, not the one from
    before the 20-minute apply): SSH and the Kubernetes API on every hub node,
-   and on an HA run also each hub's API address (`dmz-api`, `core-api`).
+   each by the VM's resource id. On an HA run there is no tunnel to a hub's
+   internal load balancer: Azure Bastion tunnels by IP to ports 22 and 3389
+   only (Run 3 failed so, W12). Each hub's kubeconfig points at one node's
+   kube tunnel and `uat/access/session.sh kube-select` moves it to another
+   node when that one stops answering or the ha tier stops it
+   (`uat/access/README.md`, "HA hubs: the API through the nodes";
+   `RUNBOOK.md`, "HA access").
 
    **From here on every phase starts with `uat/access/session.sh phase`**
    (W6). The run's az session is an OIDC login, which stops renewing about
@@ -337,7 +343,9 @@ address, port 9000, where the core edge proxy passes it to the gateway.
 
 **The `ha` tier** (`tier=ha`, or `all`; `uat/tests/README.md`, "The ha
 tier") runs HA1 to HA6 against these hubs, from the runner, with kubectl on
-both clusters (through the API tunnels), `vmctl.sh stop-vm` and `start-vm`
+both clusters (through one node's kube tunnel per hub, moved off a node
+before `stop-vm` stops it and whenever it stops answering), `vmctl.sh
+stop-vm` and `start-vm`
 for the node stop, and helm on the charts the hubs were installed from: pod
 kills, a core node and a DMZ node stopped, a rolling restart, an empty bus
 node, a lost account event and parallel enrolment, each checked against the
@@ -393,11 +401,13 @@ ssh -i /tmp/uat-$RUN.key -p <ssh_port of uat-core> imasuat@127.0.0.1 sudo k0s ku
 ```
 
 On an HA run the VMs are `uat-core-1` to `uat-core-3` and `uat-dmz-1` to
-`uat-dmz-3`. The Kubernetes API is on each hub node's `kube_port`, and on an
-HA run on the `core-api` and `dmz-api` entries' `kube_port` too (the hub's
-internal load balancer, which keeps answering while a node is stopped);
+`uat-dmz-3`. The Kubernetes API is on each hub node's `kube_port` (on an HA
+run any node's: there is no tunnel to the internal load balancer, as Azure
+Bastion tunnels by IP to ports 22 and 3389 only);
 `sudo k0s kubeconfig admin` on a hub node prints an admin kubeconfig (point
-its server at `https://127.0.0.1:<kube_port>`). The generated passwords (Keycloak users,
+its server at `https://127.0.0.1:<kube_port>` of a node that is up, or run
+`UAT_SESSION_UAT=/tmp/uat-$RUN.json UAT_SESSION_ACCESS=/tmp/uat-$RUN-access
+uat/access/session.sh kube-select <kubeconfig>` to pick one). The generated passwords (Keycloak users,
 RustFS, the BFF secret) are in Kubernetes Secrets on core (`uat/hub/core/README.md`);
 OpenBao's unseal keys and root token are in `imas-uat-openbao-unseal` and
 `imas-uat-openbao-root`. `uat/access/vmctl.sh` works from your machine with an

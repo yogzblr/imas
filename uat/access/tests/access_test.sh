@@ -200,43 +200,71 @@ if [ "$rc" -eq 0 ] && [ "$(jq -r 'keys | join(",")' "$state/access.json")" = "ua
 else nok "tunnels: docker sprouts (rc=$rc)" "$out"; fi
 t close "$state"
 
-# An HA hub (P24, brief H2): SSH and kube tunnels to every node by its own
-# id, and one kube tunnel per hub to its API address by IP.
+# An HA hub (P24, brief H2; W12): SSH and kube tunnels to every node by its
+# own id, and no tunnel by IP: Azure refuses one to the internal load
+# balancer's 6443 (Azure UAT Run 3).
 new_case ha
 jq '.sprouts |= with_entries(.value.connection = "docker")' "$uat_ha" >"$work/ha.json"
 t open "$work/ha.json" "$state"
 a="$state/access.json"
-if [ "$rc" -eq 0 ] && [ "$(jq -r 'keys | join(",")' "$a")" = "core-api,dmz-api,uat-core-1,uat-core-2,uat-core-3,uat-dmz-1,uat-dmz-2,uat-dmz-3" ]; then
-  ok "tunnels: an HA hub gets every node and its API address"
+if [ "$rc" -eq 0 ] && [ "$(jq -r 'keys | join(",")' "$a")" = "uat-core-1,uat-core-2,uat-core-3,uat-dmz-1,uat-dmz-2,uat-dmz-3" ]; then
+  ok "tunnels: an HA hub gets every node, and no entry for its load balancer"
 else nok "tunnels: HA keys (rc=$rc)" "$out $(cat "$a" 2>/dev/null)"; fi
 if jq -e '[to_entries[] | select(.key | startswith("uat-")) | .value] | length == 6 and all(.ssh_port and .kube_port)' "$a" >/dev/null; then
   ok "tunnels: every HA node gets ssh_port and kube_port"
 else nok "tunnels: HA node ports" "$(cat "$a")"; fi
-if jq -e '[.["dmz-api"], .["core-api"]] | all(.kube_port and (.ssh_port | not) and (.pids | length) == 1)' "$a" >/dev/null; then
-  ok "tunnels: the API address entries have kube_port only"
-else nok "tunnels: API entries" "$(cat "$a")"; fi
-if calls | grep -q -- "network bastion tunnel --name uat-bastion --resource-group imas-uat-abc123 --target-ip-address 10.60.1.250 --resource-port 6443 --port $(jq '.["dmz-api"].kube_port' "$a")" &&
-  calls | grep -q -- "--target-ip-address 10.60.2.250 --resource-port 6443 --port $(jq '.["core-api"].kube_port' "$a")"; then
-  ok "tunnels: the API tunnel targets the hub's api_address by IP"
-else nok "tunnels: API tunnel arguments" "$(calls)"; fi
+if ! calls | grep -q -- "--target-ip-address"; then
+  ok "tunnels: no HA tunnel goes by IP"
+else nok "tunnels: a tunnel by IP" "$(calls)"; fi
 core3_id=$(jq -r '.core.node_ids[2]' "$uat_ha")
 if calls | grep -q -- "--target-resource-id $core3_id --resource-port 22 --port $(jq '.["uat-core-3"].ssh_port' "$a")" &&
   calls | grep -q -- "--target-resource-id $core3_id --resource-port 6443 --port $(jq '.["uat-core-3"].kube_port' "$a")"; then
   ok "tunnels: each HA node's tunnels target that node's id"
 else nok "tunnels: HA node ids" "$(calls)"; fi
-if [ "$(calls | grep -c -- 'network bastion tunnel')" -eq 14 ]; then ok "tunnels: fourteen tunnels for 3 + 3 nodes"; else nok "tunnels: HA tunnel count" "$(calls)"; fi
+if [ "$(calls | grep -c -- 'network bastion tunnel')" -eq 12 ]; then ok "tunnels: twelve tunnels for 3 + 3 nodes"; else nok "tunnels: HA tunnel count" "$(calls)"; fi
 t close "$state"
 
 new_case ha_bad
-jq '.dmz.api_address = "10.60.1.250; id"' "$uat_ha" >"$work/ha-bad.json"
-t open "$work/ha-bad.json" "$state"
-if [ "$rc" -ne 0 ] && ! calls | grep -q "bastion tunnel"; then ok "tunnels: a bad api_address fails before any tunnel"; else nok "tunnels: bad api_address (rc=$rc)" "$out"; fi
-jq 'del(.core.api_address)' "$uat_ha" >"$work/ha-noapi.json"
+# The load balancer's address is no tunnel target: a bad or missing one is
+# uat/k0s's to refuse, not the tunnels'.
+jq '.dmz.api_address = "10.60.1.250; id" | del(.core.api_address) | .sprouts |= with_entries(.value.connection = "docker")' "$uat_ha" >"$work/ha-noapi.json"
 t open "$work/ha-noapi.json" "$state"
-if [ "$rc" -ne 0 ] && ! calls | grep -q "bastion tunnel"; then ok "tunnels: an HA hub without api_address fails before any tunnel"; else nok "tunnels: no api_address (rc=$rc)" "$out"; fi
+if [ "$rc" -eq 0 ] && ! calls | grep -q -- "10.60.1.250"; then ok "tunnels: an HA hub's api_address is never a tunnel target"; else nok "tunnels: api_address ignored (rc=$rc)" "$out"; fi
+t close "$state"
 jq '.dmz.node_ids |= .[:2]' "$uat_ha" >"$work/ha-ids.json"
+: >"$STUB_STATE/calls.log"
 t open "$work/ha-ids.json" "$state"
 if [ "$rc" -ne 0 ] && ! calls | grep -q "bastion tunnel"; then ok "tunnels: node_names and node_ids of different lengths fail"; else nok "tunnels: node list lengths (rc=$rc)" "$out"; fi
+
+# The Bastion port limit (W12): Azure tunnels by IP to 22 and 3389 only.
+new_case ipports
+t plan "$uat_ha"
+if [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | grep -c $'\t')" -eq 18 ] && ! printf '%s\n' "$out" | grep -q $'\tip:'; then
+  ok "tunnels: plan lists the HA run's 18 tunnels, all by resource id"
+else nok "tunnels: plan (rc=$rc)" "$out"; fi
+# start_tunnel refuses a tunnel by IP to 6443 before az runs; the az stub
+# refuses it as Azure does, word for word.
+# shellcheck disable=SC2016 # $1 is expanded by the inner bash
+out=$(PATH="$stubs:$PATH" bash -c 'source <(sed -n "/^bastion_ip_ports=/,/^}/p" "$1"); log() { echo "$*" >&2; }; check_target ip:10.60.1.250 6443' _ "$tunnels" 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "allows ports 22 and 3389 only"; then ok "tunnels: a tunnel by IP to 6443 is refused before Azure sees it"; else nok "tunnels: check_target 6443 (rc=$rc)" "$out"; fi
+# shellcheck disable=SC2016 # $1 is expanded by the inner bash
+out=$(PATH="$stubs:$PATH" bash -c 'source <(sed -n "/^bastion_ip_ports=/,/^}/p" "$1"); log() { echo "$*" >&2; }; check_target ip:10.60.1.250 22 && check_target id:/x 6443' _ "$tunnels" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "tunnels: by IP to 22, and by id to 6443, are allowed"; else nok "tunnels: check_target allowed (rc=$rc)" "$out"; fi
+out=$(PATH="$stubs:$PATH" STUB_STATE="$STUB_STATE" timeout 5 az network bastion tunnel --name b --resource-group rg --target-ip-address 10.60.1.250 --resource-port 6443 --port "$base" 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Custom ports are not allowed. Allowed ports for Tunnel with IP connect is 22, 3389."; then
+  ok "stub az: refuses an IP tunnel to 6443 as Azure does"
+else nok "stub az: IP tunnel to 6443 (rc=$rc)" "$out"; fi
+out=$(bash "$here/../check-bastion-ports.sh" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "only uat/access/tunnels.sh passes --target-ip-address"; then ok "check-bastion-ports.sh: the repository passes"; else nok "check-bastion-ports.sh (rc=$rc)" "$out"; fi
+mkdir -p "$work/badroot/uat/x" "$work/badroot/.github"
+printf '#!/bin/sh\naz network bastion tunnel --target-ip-address 10.0.0.1 --resource-port 6443\n' >"$work/badroot/uat/x/open.sh"
+out=$(bash "$here/../check-bastion-ports.sh" --root "$work/badroot" "$uat_ha" 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "uat/x/open.sh"; then ok "check-bastion-ports.sh: fails on a script passing --target-ip-address"; else nok "check-bastion-ports.sh bad root (rc=$rc)" "$out"; fi
 
 # ------------------------------------------------------------------ vmctl.sh
 
@@ -1034,7 +1062,7 @@ out=$(PATH="$stubs:$PATH" AZ_RELOGIN_DIR="$STUB_STATE/login" UAT_SESSION_RELOGIN
 rc=$?
 if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q "UAT_SESSION_ACCESS is not set"; then ok "session: a tunnel phase needs UAT_SESSION_ACCESS"; else nok "session: missing access (rc=$rc)" "$out"; fi
 
-# An HA uat.json: the API tunnels by IP are probed and reopened too.
+# An HA uat.json: every node's tunnels are probed and reopened.
 new_case sha
 S_UAT=$uat_ha
 t open "$uat_ha" "$state"
@@ -1042,8 +1070,8 @@ before_ports=$(port_map "$state/access.json")
 login_minutes_ago 1
 S_UAT=$uat_ha s phase "tests" --force --probe
 if [ "$rc" -eq 0 ] && [ "$(port_map "$state/access.json")" = "$before_ports" ] &&
-  printf '%s' "$out" | grep -q "tests: probe: core-api kube tunnel"; then
-  ok "session: an HA run's tunnels (API addresses too) reopen on their ports and are probed"
+  printf '%s' "$out" | grep -q "tests: probe: uat-core-3 kube tunnel" && ! jq -e 'has("core-api")' "$state/access.json" >/dev/null; then
+  ok "session: an HA run's node tunnels reopen on their ports and are probed"
 else nok "session: HA (rc=$rc)" "$out"; fi
 t close "$state"
 unset S_UAT
@@ -1226,6 +1254,112 @@ sv supervise stop
 sleep 0.5
 if ! running "$spid" && [ ! -e "$state/supervisor.pid" ]; then ok "supervise: stop stops it"; else nok "supervise: stop" "$out"; fi
 t close "$state"
+
+# ------------------------- an HA hub's API through its nodes' kube tunnels (W12)
+# No tunnel goes to an HA hub's internal load balancer (Azure Bastion tunnels
+# by IP to 22 and 3389 only). Each hub's kubeconfig points at one node's kube
+# tunnel; kube-select moves it to the next node that answers (HTTP 401 on
+# /version) and that the ha tier has not stopped.
+new_case kubesel
+S_UAT=$work/ha.json
+t open "$S_UAT" "$state"
+kport() { jq -r --arg v "$1" '.[$v].kube_port' "$state/access.json"; }
+mkkc() { # mkkc <file> <port> <hub>: a kubeconfig as k0sctl writes it
+  printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: AAAA\n    server: https://127.0.0.1:%s\n  name: imas-uat-abc123-%s\ncontexts: []\n' "$2" "$3" >"$1"
+  chmod 600 "$1"
+}
+kc_port() { sed -nE 's#^ *server: https://127\.0\.0\.1:([0-9]+) *$#\1#p' "$1"; }
+ckc=$STUB_STATE/core.kubeconfig
+dkc=$STUB_STATE/dmz.kubeconfig
+mkkc "$ckc" "$(kport uat-core-1)" core
+mkkc "$dkc" "$(kport uat-dmz-1)" dmz
+KCS="$ckc:$dkc"
+UAT_SESSION_KUBECONFIGS=$KCS sv kube-select
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-1)" ] && [ "$(kc_port "$dkc")" = "$(kport uat-dmz-1)" ] &&
+  printf '%s' "$out" | grep -q "core API through uat-core-1 (127.0.0.1:$(kport uat-core-1)): HTTP 401 on /version; kept"; then
+  ok "kube-select: a kubeconfig on a node that answers (401 on /version) stays"
+else nok "kube-select: healthy (rc=$rc)" "$out"; fi
+kport uat-core-1 >"$STUB_STATE/dead_ports"
+UAT_SESSION_KUBECONFIGS=$KCS sv kube-select
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-2)" ] && [ "$(kc_port "$dkc")" = "$(kport uat-dmz-1)" ] &&
+  [ "$(stat -c %a "$ckc")" = 600 ] && grep -q "certificate-authority-data: AAAA" "$ckc" &&
+  printf '%s' "$out" | grep -q "core API moved from uat-core-1 to uat-core-2"; then
+  ok "kube-select: a node that does not answer: the kubeconfig moves to the next node (0600, the rest kept)"
+else nok "kube-select: failover (rc=$rc)" "$out $(cat "$ckc")"; fi
+mkdir -p "$state/stopped"
+date +%s >"$state/stopped/uat-core-2"
+UAT_SESSION_KUBECONFIGS=$KCS sv kube-select
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-3)" ] &&
+  printf '%s' "$out" | grep -q "uat-core-2: stopped by the ha tier"; then
+  ok "kube-select: a node the ha tier stopped is skipped, though its tunnel answers"
+else nok "kube-select: stopped node (rc=$rc)" "$out"; fi
+rm -f "$state/stopped/uat-core-2"
+{ kport uat-core-1; kport uat-core-2; kport uat-core-3; } >"$STUB_STATE/dead_ports"
+UAT_SESSION_KUBECONFIGS=$KCS sv kube-select
+if [ "$rc" -eq 1 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-3)" ] &&
+  printf '%s' "$out" | grep -q "no node of core answers on its kube tunnel"; then
+  ok "kube-select: no node answers: 1, and the kubeconfig is left as it was"
+else nok "kube-select: none answers (rc=$rc)" "$out"; fi
+rm -f "$STUB_STATE/dead_ports"
+sv kube-select "$ckc"
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-3)" ] && printf '%s' "$out" | grep -q "through uat-core-3.*kept"; then
+  ok "kube-select: a named kubeconfig; a node that answers again keeps it (no flapping back)"
+else nok "kube-select: by name (rc=$rc)" "$out"; fi
+# A single-node hub: never touched, never probed.
+kport uat-core-1 >"$STUB_STATE/dead_ports"
+mkkc "$STUB_STATE/single.kubeconfig" "$(kport uat-core-1)" core
+: >"$STUB_STATE/probes.log"
+S_UAT=$uat sv kube-select "$STUB_STATE/single.kubeconfig"
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$STUB_STATE/single.kubeconfig")" = "$(kport uat-core-1)" ] && [ ! -s "$STUB_STATE/probes.log" ] &&
+  printf '%s' "$out" | grep -q "core has one node; left as it is"; then
+  ok "kube-select: a single-node hub's kubeconfig is left as it is, unprobed"
+else nok "kube-select: single node (rc=$rc)" "$out"; fi
+S_UAT=$work/ha.json
+rm -f "$STUB_STATE/dead_ports"
+# A phase moves a kubeconfig off a node that stopped answering.
+mkkc "$ckc" "$(kport uat-core-1)" core
+kport uat-core-1 >"$STUB_STATE/dead_ports"
+login_minutes_ago 1
+UAT_SESSION_KUBECONFIGS=$KCS sv phase "tests: TestHA"
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-2)" ]; then
+  ok "session: a phase points each HA kubeconfig at a node that answers"
+else nok "session: phase kube-select (rc=$rc)" "$out"; fi
+rm -f "$STUB_STATE/dead_ports"
+
+# The supervisor: a node the ha tier stopped is left alone (no probe, no
+# reopen), and a kubeconfig on a node that stops answering moves.
+date +%s >"$state/stopped/uat-dmz-2"
+touch "$STUB_STATE/stale.$(kport uat-dmz-2)" "$STUB_STATE/stale.$(jq -r '.["uat-dmz-2"].ssh_port' "$state/access.json")"
+mkkc "$dkc" "$(kport uat-dmz-1)" dmz
+kport uat-dmz-1 >"$STUB_STATE/dead_ports"
+d2k=$(spid_of uat-dmz-2 kube)
+d2s=$(spid_of uat-dmz-2 ssh)
+UAT_SESSION_KUBECONFIGS=$KCS sv supervise tick
+if [ "$(spid_of uat-dmz-2 kube)" = "$d2k" ] && [ "$(spid_of uat-dmz-2 ssh)" = "$d2s" ] && ! printf '%s' "$out" | grep -q "uat-dmz-2 .*reopening" &&
+  [ "$(kc_port "$dkc")" = "$(kport uat-dmz-3)" ] && printf '%s' "$out" | grep -q "kube-select: .*dmz API moved from uat-dmz-1 to uat-dmz-3"; then
+  ok "supervise: a stopped node's tunnels are left alone; the DMZ kubeconfig moves past it to a node that answers"
+else nok "supervise: stopped node and kube-select" "$out"; fi
+rm -f "$STUB_STATE"/stale.* "$STUB_STATE/dead_ports" "$state/stopped/uat-dmz-2"
+UAT_SESSION_KUBECONFIGS=$KCS sv ages "at the failure"
+if printf '%s' "$out" | grep -q "kubeconfig $dkc: server 127.0.0.1:$(kport uat-dmz-3) (uat-dmz-3)"; then
+  ok "session: ages says where each kubeconfig points"
+else nok "session: ages kubeconfigs" "$out"; fi
+
+# vmctl.sh stop-vm: the node is marked stopped and every kubeconfig on it
+# moves first; start-vm clears the mark.
+mkkc "$ckc" "$(kport uat-core-3)" core
+core3_id=$(jq -r '.core.node_ids[2]' "$S_UAT")
+UAT_SESSION_KUBECONFIGS=$KCS UAT_SESSION_UAT=$S_UAT V_ACCESS=$state/access.json v "$S_UAT" stop-vm uat-core-3
+if [ "$rc" -eq 0 ] && [ -e "$state/stopped/uat-core-3" ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-1)" ] &&
+  calls | grep -qx -- "az vm stop --ids $core3_id -o none"; then
+  ok "vmctl: stop-vm marks the node stopped and moves the kubeconfig on it to another node first"
+else nok "vmctl: stop-vm kube-select (rc=$rc)" "$err $(cat "$ckc")"; fi
+UAT_SESSION_KUBECONFIGS=$KCS sv kube-select
+if [ "$rc" -eq 0 ] && [ "$(kc_port "$ckc")" = "$(kport uat-core-1)" ]; then ok "kube-select: stays off the stopped node"; else nok "kube-select: after stop-vm (rc=$rc)" "$out"; fi
+UAT_SESSION_KUBECONFIGS=$KCS V_ACCESS=$state/access.json v "$S_UAT" start-vm uat-core-3
+if [ "$rc" -eq 0 ] && [ ! -e "$state/stopped/uat-core-3" ]; then ok "vmctl: start-vm clears the stopped mark"; else nok "vmctl: start-vm mark (rc=$rc)" "$err"; fi
+t close "$state"
+unset S_UAT
 
 echo
 echo "access_test: $pass passed, $fail failed"

@@ -173,6 +173,11 @@ diagnose() {
 	[ -n "${IMAS_UAT_DIAG_HOOK:-}" ] || return 0
 	local dir="$report/diagnostics/$1" started=$SECONDS
 	say "$1 failed; collecting the hubs' state into $dir"
+	# W12: an HA hub's kubeconfig on a node that answers first (the test may
+	# have left one stopped); best effort, bounded.
+	if [ -n "${UAT_SESSION_HOOK:-}" ]; then
+		timeout -k 10 120 "$UAT_SESSION_HOOK" kube-select 2>&1 | redact >>"$build_log" || true
+	fi
 	timeout -k 10 "${IMAS_UAT_DIAG_SECONDS:-300}" "$IMAS_UAT_DIAG_HOOK" kube "$dir" 2>&1 | redact >>"$build_log" ||
 		say "the diagnostics for $1 exited $? (see build.log)"
 	say "diagnostics for $1 took $((SECONDS - started))s"

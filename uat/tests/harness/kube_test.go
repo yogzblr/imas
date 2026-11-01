@@ -184,3 +184,114 @@ func TestBusServerName(t *testing.T) {
 		t.Error("a pod without the loader's server name must be an error")
 	}
 }
+
+// TestKubeFailover (W12): a kubectl call that cannot reach an HA hub's API
+// through one node's kube tunnel asks kube-select for another node and runs
+// again there; one that reached the API, or with no node to move to, does
+// not.
+func TestKubeFailover(t *testing.T) {
+	needShell(t)
+	dir := t.TempDir()
+	kc := filepath.Join(dir, "core.kubeconfig")
+	write := func(port string) {
+		t.Helper()
+		body := "apiVersion: v1\nclusters:\n- cluster:\n    server: https://127.0.0.1:" + port + "\n  name: imas-uat-abc123-core\n"
+		if err := os.WriteFile(kc, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// kubectl: node 1's tunnel (20001, and 20004) drops the TLS handshake,
+	// as a stopped node's Bastion tunnel does; 20003 answers, but with an
+	// error from the API server itself.
+	script := filepath.Join(dir, "kubectl")
+	body := "#!/bin/sh\necho \"$@\" >> " + filepath.Join(dir, "calls") + "\n" +
+		"case $(cat \"$2\") in\n" +
+		"  *:20001* | *:20004*) echo 'Unable to connect to the server: EOF' >&2; exit 1 ;;\n" +
+		"  *:20003*) echo 'Error from server (NotFound): pods \"x\" not found' >&2; exit 1 ;;\n" +
+		"esac\necho ok\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvSessionHook, "/session.sh")
+	t.Setenv(EnvSessionAccess, dir)
+	var selects []string
+	next := ""
+	old := kubeSelectHook
+	t.Cleanup(func() { kubeSelectHook = old })
+	kubeSelectHook = func(_ context.Context, hook, kubeconfig string) error {
+		selects = append(selects, hook+" kube-select "+kubeconfig)
+		if next == "" {
+			return errors.New("no node of core answers")
+		}
+		write(next)
+		return nil
+	}
+	k := &Kube{Hub: "core", Kubeconfig: kc, Kubectl: script}
+	c := context.Background()
+
+	write("20001")
+	next = "20002"
+	out, err := k.Run(c, nil, "get", "nodes")
+	if err != nil || strings.TrimSpace(string(out)) != "ok" || len(selects) != 1 || selects[0] != "/session.sh kube-select "+kc {
+		t.Fatalf("failover: out %q err %v selects %v", out, err, selects)
+	}
+	if kubeTunnelPort(kc) != "20002" {
+		t.Errorf("the kubeconfig must stay on the node that answered: port %s", kubeTunnelPort(kc))
+	}
+
+	// No node to move to: the error comes back, after one select.
+	selects = nil
+	write("20001")
+	next = ""
+	if _, err := k.Run(c, nil, "get", "nodes"); err == nil || !strings.Contains(err.Error(), "Unable to connect to the server") || len(selects) != 1 {
+		t.Errorf("no node answers: err %v selects %v", err, selects)
+	}
+
+	// The API answered with an error: no select, no second call.
+	selects = nil
+	write("20003")
+	next = "20002"
+	if _, err := k.Run(c, nil, "delete", "pod", "x"); err == nil || len(selects) != 0 {
+		t.Errorf("an API error is not a failover: err %v selects %v", err, selects)
+	}
+
+	// At most kubeFailovers selects for one call, even when each moves to a
+	// node that does not answer either.
+	selects = nil
+	write("20001")
+	kubeSelectHook = func(_ context.Context, _, _ string) error {
+		selects = append(selects, "x")
+		// Moves, but to another port that also drops the handshake.
+		if kubeTunnelPort(kc) == "20001" {
+			write("20004")
+		} else {
+			write("20001")
+		}
+		return nil
+	}
+	_, _ = k.Run(c, nil, "get", "nodes")
+	if len(selects) != kubeFailovers {
+		t.Errorf("selects %d, want at most %d", len(selects), kubeFailovers)
+	}
+
+	// No session: nothing to ask.
+	t.Setenv(EnvSessionHook, "")
+	if moved, err := kubeSelect(c, kc); moved || err != nil {
+		t.Errorf("without a session: %v %v", moved, err)
+	}
+}
+
+func TestUnreachableAPI(t *testing.T) {
+	for s, want := range map[string]bool{
+		"Unable to connect to the server: EOF":                                        true,
+		"Unable to connect to the server: net/http: TLS handshake timeout":            true,
+		"dial tcp 127.0.0.1:20100: connect: connection refused":                       true,
+		"Error from server (NotFound): pods \"x\" not found":                          false,
+		"error: unexpected EOF":                                                       false,
+		"The connection to the server 10.0.0.1:6443 was refused - connection refused": false,
+	} {
+		if got := unreachableAPI([]byte(s)); got != want {
+			t.Errorf("%q: %v, want %v", s, got, want)
+		}
+	}
+}

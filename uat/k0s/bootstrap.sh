@@ -10,9 +10,10 @@
 #
 # Every node is reached only through its Azure Bastion tunnels on the runner,
 # as access.json (uat/access/tunnels.sh open) describes: k0sctl over SSH on
-# each node's ssh_port, kubectl over the hub's API tunnel (the node's
-# kube_port on a single node, the <hub>-api entry's on an HA hub). Nothing
-# here calls Azure.
+# each node's ssh_port, kubectl over a node's kube tunnel (its kube_port: the
+# node's on a single node, the first node's on an HA hub, whose kubeconfig
+# uat/access/session.sh kube-select moves to another node when that one stops
+# answering; W12). Nothing here calls Azure.
 set -euo pipefail
 umask 077
 
@@ -247,10 +248,13 @@ read_inputs() {
       NODE_SSH_PORT[$v]=$(access_get "$ACCESS_JSON" "$v" ssh_port)
       is_port "${NODE_SSH_PORT[$v]}" || die "access.json: bad ssh_port for $v: ${NODE_SSH_PORT[$v]}"
     done
-    # The API tunnel: the node's own kube tunnel on a single node, the
-    # tunnel to the hub's API address (access.json "<hub>-api",
-    # uat/access/tunnels.sh) on an HA hub.
-    if ((n == 1)); then api_entry=${NAME[$hub]}; else api_entry="$hub-api"; fi
+    # The API tunnel: the first node's own kube tunnel, on an HA hub too.
+    # There is no tunnel to an HA hub's internal load balancer: Azure
+    # Bastion tunnels by IP to ports 22 and 3389 only (W12, Azure UAT Run
+    # 3). Every node's API certificate names 127.0.0.1 (render_hub), so the
+    # kubeconfig works through any node's tunnel, and uat/access/session.sh
+    # kube-select moves it between them.
+    api_entry=${names[0]}
     HOST[$hub]=$(access_get "$ACCESS_JSON" "$api_entry" host)
     is_tunnel_host "${HOST[$hub]}" || die "access.json: bad host for $api_entry: ${HOST[$hub]}"
     KUBE_PORT[$hub]=$(access_get "$ACCESS_JSON" "$api_entry" kube_port)

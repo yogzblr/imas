@@ -60,6 +60,11 @@ func (f *Fleet) CoreProbe(ctx context.Context, stdin []byte, verb string, args .
 	} else {
 		// Its kubectl calls hold the core kube tunnel's shared lock (W11:
 		// UAT Run 2's D1 lost its connection to a reopen).
+		// An HA core hub: on a node that answers first (W12); acceptance.sh
+		// is not retried, its verbs may have run.
+		if f.Env.UAT.Core.HA() {
+			preSelect(cctx, "core", b.Kubeconfig)
+		}
 		release := holdKubeTunnel(cctx, b.Kubeconfig)
 		defer release()
 		var so, se bytes.Buffer

@@ -382,8 +382,11 @@ jobs:
           uat/access/tunnels.sh open "$STATE/uat.json" "$STATE/access"
 
       # One node per hub: a single-node cluster each (kine). hub_nodes 3: three
-      # controller+worker nodes per hub on etcd, kubectl through the tunnel
-      # to each hub's API address (uat/k0s README.md, "HA hubs"). --nodes
+      # controller+worker nodes per hub on etcd, kubectl through one node's
+      # own kube tunnel, which session.sh kube-select moves to another node
+      # when that one stops answering or the ha tier stops it (W12: Azure
+      # Bastion tunnels by IP to 22 and 3389 only, so there is no tunnel to
+      # the internal load balancer; uat/RUNBOOK.md, "HA access"). --nodes
       # refuses a uat.json whose hubs have another node count.
       - name: k0s on both hubs (uat/k0s)
         env:

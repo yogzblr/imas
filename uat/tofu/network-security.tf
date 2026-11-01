@@ -23,6 +23,16 @@ locals {
   k0s_node_tcp_ports = ["179", "2379-2380", "6443", "8132", "9443", "10250"]
   k0s_node_udp_ports = ["5555"]
 
+  # Node to node inside an HA hub, the hub's own service ports (W12): its
+  # hostPorts (local.hubs[*].private_ports and public_ports). uat/k0s maps a
+  # hub's own FQDN to every one of its nodes (CoreDNS hosts), so a pod on
+  # one node dials another node's hostPort: saasapi fetching Keycloak's JWKS
+  # from the core FQDN on 443, for one. kube-router masquerades that flow to
+  # the node's address, so it is node to node inside the subnet, which
+  # DenyVnetIn drops without this rule. A single-node hub never needs it (the
+  # FQDN is its own node).
+  hub_service_tcp_ports = { for k, h in local.hubs : k => [for p in distinct(concat(h.private_ports, h.public_ports)) : tostring(p)] }
+
   # The rules an HA hub adds to its NSG; none for a single node, whose NSG is
   # unchanged. AzureLoadBalancer is the health probes' source (168.63.129.16):
   # DenyAllIn would otherwise drop them, as it overrides Azure's
@@ -31,9 +41,11 @@ locals {
     for k, h in local.hubs : k => [for r in [
       { name = "AllowHubNodesTcpIn", priority = 150, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_tcp_ports },
       { name = "AllowHubNodesUdpIn", priority = 151, direction = "Inbound", access = "Allow", protocol = "Udp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_udp_ports },
+      { name = "AllowHubNodesServiceIn", priority = 152, direction = "Inbound", access = "Allow", protocol = "Tcp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.hub_service_tcp_ports[k] },
       { name = "AllowLoadBalancerProbeIn", priority = 160, direction = "Inbound", access = "Allow", protocol = "Tcp", src = ["AzureLoadBalancer"], dst = [local.cidr[k]], ports = [for p in distinct(concat([local.kube_api_port], h.private_ports, h.public_ports)) : tostring(p)] },
       { name = "AllowHubNodesTcpOut", priority = 150, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_tcp_ports },
       { name = "AllowHubNodesUdpOut", priority = 151, direction = "Outbound", access = "Allow", protocol = "Udp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.k0s_node_udp_ports },
+      { name = "AllowHubNodesServiceOut", priority = 152, direction = "Outbound", access = "Allow", protocol = "Tcp", src = [local.cidr[k]], dst = [local.cidr[k]], ports = local.hub_service_tcp_ports[k] },
     ] : r if h.count > 1]
   }
 
