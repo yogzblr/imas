@@ -242,9 +242,13 @@ resource "azurerm_public_ip" "bastion" {
   tags                = local.tags
 }
 
-# ip_connect_enabled: IP-based connection, on an HA run only.
-# uat/access/tunnels.sh reaches an HA hub's k0s API on its internal load
-# balancer address (uat <hub>.api_address), which is no VM resource (brief H2).
+# ip_connect_enabled stays off, on the HA run too (W12). Bastion's IP-based
+# connection tunnels to ports 22 and 3389 only ("Custom ports are not
+# allowed. Allowed ports for Tunnel with IP connect is 22, 3389.": Azure UAT
+# Run 3, whose tunnel to each HA hub's internal load balancer on 6443 failed
+# so). uat/access reaches an HA hub's k0s API through its nodes' own kube
+# tunnels, by resource id, failing over between them (uat/RUNBOOK.md, "HA
+# access"); no tunnel goes by IP.
 resource "azurerm_bastion_host" "uat" {
   name                   = "uat-bastion"
   location               = azurerm_resource_group.run.location
@@ -254,7 +258,7 @@ resource "azurerm_bastion_host" "uat" {
   tunneling_enabled      = true
   copy_paste_enabled     = false
   file_copy_enabled      = false
-  ip_connect_enabled     = length(local.ha_hubs) > 0
+  ip_connect_enabled     = false
   shareable_link_enabled = false
   tags                   = local.tags
 

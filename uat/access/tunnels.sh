@@ -6,26 +6,37 @@
 #   tunnels.sh reopen     <uat.json> <state-dir>
 #   tunnels.sh reopen-one <uat.json> <state-dir> <vm> <kind>
 #   tunnels.sh close      <state-dir>
+#   tunnels.sh plan       <uat.json>
 #
 # open starts one `az network bastion tunnel` in the background for
 #   SSH (22)            on every Linux VM (every hub node, and sprouts with
 #                       connection ssh),
 #   WinRM HTTPS (5986)  on every Windows VM (sprouts with connection winrm),
-#   Kubernetes API (6443) on every hub node, and on an HA hub (more than one
-#                       node) also on the hub's API address (uat
-#                       <hub>.api_address, the internal load balancer), by
-#                       IP (the Bastion's IP-based connection),
-# each on its own free local port on 127.0.0.1, waits until each accepts
-# connections (an SSH tunnel must also return the server's SSH banner), and
-# writes <state-dir>/access.json:
+#   Kubernetes API (6443) on every hub node,
+# each by the VM's resource id (--target-resource-id), on its own free local
+# port on 127.0.0.1, waits until each accepts connections (an SSH tunnel must
+# also return the server's SSH banner), and writes <state-dir>/access.json:
 #
 #   { "<vm name>": { "host": "127.0.0.1", "ssh_port": N, "kube_port": N,
-#                    "winrm_port": N, "pids": [ ... ] }, ...,
-#     "<hub>-api": { "host": "127.0.0.1", "kube_port": N, "pids": [ ... ] } }
+#                    "winrm_port": N, "pids": [ ... ] }, ... }
 #
-# with only the ports that VM has; "dmz-api" and "core-api" only for an HA
-# hub. Sprouts with connection docker (the local rig) are skipped. If any tunnel fails, open stops every tunnel it started,
+# with only the ports that VM has. Sprouts with connection docker (the local
+# rig) are skipped. If any tunnel fails, open stops every tunnel it started,
 # writes no access.json and exits non zero.
+#
+# No tunnel goes to an HA hub's internal load balancer (W12). Azure Bastion's
+# IP-based connection (--target-ip-address) allows ports 22 and 3389 only
+# ("Custom ports are not allowed. Allowed ports for Tunnel with IP connect is
+# 22, 3389.": Azure UAT Run 3 failed so, opening a 6443 tunnel to each hub's
+# api_address). An HA hub's API is reached through its nodes' own kube
+# tunnels, with failover between them (uat/access/channel.sh ch_kube_select,
+# session.sh kube-select; uat/RUNBOOK.md, "HA access"). start_tunnel refuses
+# a tunnel by IP to any other port, and `plan` (below) lets
+# uat/access/check-bastion-ports.sh prove no uat.json makes one.
+#
+# plan <uat.json> prints the tunnels open would start, one per line: name,
+# kind, remote port, target ("id:<resource id>" or "ip:<address>"), tab
+# separated. It starts nothing.
 #
 # open also writes <state-dir>/opened_at, the time (seconds since the epoch)
 # the tunnels were ready: the tunnels' age that uat/access/session.sh reports
@@ -79,6 +90,7 @@ usage: $prog open       <uat.json> <state-dir>
        $prog reopen     <uat.json> <state-dir>
        $prog reopen-one <uat.json> <state-dir> <vm> <kind>
        $prog close      <state-dir>
+       $prog plan       <uat.json>
 EOF
   exit 2
 }
@@ -184,16 +196,37 @@ write_opened_at() {
   mv "$dir/opened_at.tmp" "$dir/opened_at"
 }
 
+# bastion_ip_ports: the only remote ports Azure Bastion's IP-based
+# connection tunnels to (Azure UAT Run 3: "Custom ports are not allowed.
+# Allowed ports for Tunnel with IP connect is 22, 3389."). A tunnel by
+# resource id may use any port the NSGs allow.
+bastion_ip_ports=" 22 3389 "
+
+# check_target <target> <remote port>: fails for a tunnel Azure would refuse:
+# by IP to a port other than 22 or 3389, or a target that is neither.
+check_target() {
+  case $1 in
+    id:?*) return 0 ;;
+    ip:?*)
+      [[ "$bastion_ip_ports" == *" $2 "* ]] && return 0
+      log "refusing a Bastion tunnel to ${1#ip:}:$2 by IP: Azure Bastion's IP-based connection allows ports 22 and 3389 only (uat/RUNBOOK.md, \"HA access\")"
+      return 1
+      ;;
+  esac
+  log "internal error: bad tunnel target $1"
+  return 1
+}
+
 # start_tunnel <bastion> <rg> <target> <remote port> <local port> <log>:
 # starts one az bastion tunnel in the background, in its own process group
 # where setsid exists, and prints its pid.
 start_tunnel() {
   local bastion=$1 rg=$2 id=$3 rport=$4 port=$5 log=$6
   local -a target
+  check_target "$id" "$rport" || exit 1
   case $id in
     id:*) target=(--target-resource-id "${id#id:}") ;;
     ip:*) target=(--target-ip-address "${id#ip:}") ;;
-    *) die "internal error: bad tunnel target $id" ;;
   esac
   # setsid gives the tunnel its own process group, so close can stop az and
   # its python child together. The tunnel outlives this script on purpose,
@@ -232,26 +265,22 @@ wait_ready() {
 }
 
 # targets <uat.json>: one line per tunnel: target name, kind, remote port,
-# target. The target is "id:<VM resource id>" or, for an HA hub's API
-# address, "ip:<address>". A hub's nodes are node_names and node_ids
-# (uat/tofu, P24), or its name and id where the file has no node lists.
+# target. The target is "id:<VM resource id>"; every tunnel goes to a VM by
+# its id (no tunnel by IP: see the header). A hub's nodes are node_names and
+# node_ids (uat/tofu, P24), or its name and id where the file has no node
+# lists; an HA hub's api_address is not a tunnel target.
 targets() {
   local uat=$1
   jq -er '
     def need(f): if (f // "") == "" then error("missing field") else f end;
-    def ipv4: if test("^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$")
-      then . else error("not an IPv4 address: \(.)") end;
     ( ["dmz", "core"][] as $h | .[$h]
       | (if (.node_names // null) == null then [need(.name)] else .node_names end) as $names
       | (if (.node_ids // null) == null then [need(.id)] else .node_ids end) as $ids
       | if ($names | length) == 0 or ($names | length) != ($ids | length)
         then error("\($h): node_names and node_ids differ") else . end
-      | ( range($names | length) as $i
-          | ($names[$i] | need(.)) as $n | ("id:" + ($ids[$i] | need(.))) as $id
-          | ([$n, "ssh", 22, $id], [$n, "kube", 6443, $id]) ),
-        ( if ($names | length) > 1
-          then ["\($h)-api", "kube", 6443, ("ip:" + (need(.api_address) | ipv4))]
-          else empty end ) ),
+      | range($names | length) as $i
+      | ($names[$i] | need(.)) as $n | ("id:" + ($ids[$i] | need(.))) as $id
+      | ([$n, "ssh", 22, $id], [$n, "kube", 6443, $id]) ),
     ( .sprouts // {} | to_entries[]
       | .key as $n | .value as $s
       | if $s.connection == "ssh" then [$n, "ssh", 22, "id:" + need($s.id)]
@@ -259,6 +288,21 @@ targets() {
         elif $s.connection == "docker" then empty
         else error("sprout \($n): unknown connection \($s.connection)") end )
     | @tsv' "$uat"
+}
+
+# plan <uat.json>: the tunnels open would start (see the header), each
+# checked as start_tunnel checks it.
+cmd_plan() {
+  [ $# -eq 1 ] || usage
+  local uat=$1 all rport id bad=0
+  [ -r "$uat" ] || die "cannot read $uat"
+  command -v jq >/dev/null 2>&1 || die "jq is not on PATH"
+  all=$(targets "$uat") || die "$uat does not have the uat shape (dmz, core with nodes and ids, sprouts with connection and id)"
+  while IFS=$'\t' read -r _ _ rport id; do
+    check_target "$id" "$rport" || bad=1
+  done <<<"$all"
+  printf '%s\n' "$all"
+  [ "$bad" = 0 ] || exit 1
 }
 
 cmd_close() {
@@ -308,7 +352,12 @@ cmd_open() {
 
   # One line per tunnel: target name, kind, remote port, target (targets).
   local targets
-  targets=$(targets "$uat") || die "$uat does not have the uat shape (dmz, core with nodes, ids and an HA hub's api_address, sprouts with connection and id)"
+  targets=$(targets "$uat") || die "$uat does not have the uat shape (dmz, core with nodes and ids, sprouts with connection and id)"
+  # Every target is one Azure accepts, before any tunnel starts.
+  local tvm tkind trport tid
+  while IFS=$'\t' read -r tvm tkind trport tid; do
+    check_target "$tid" "$trport" || die "$tvm $tkind: no tunnel opened"
+  done <<<"$targets"
 
   mkdir -p "$dir/logs"
   if [ -f "$dir/tunnels.pids" ]; then
@@ -370,8 +419,7 @@ cmd_open() {
       next_port=$((next_port + 1))
     fi
     log="$dir/logs/${vms[$i]}-${kinds[$i]}.log"
-    # A VM by its resource id; an HA hub's API address by IP (the Bastion's
-    # IP-based connection, uat/tofu ip_connect_enabled).
+    # Every tunnel by the VM's resource id (targets).
     pids[i]=$(start_tunnel "$bastion" "$rg" "${ids[$i]}" "${rports[$i]}" "${ports[$i]}" "$log")
     write_pids
   }
@@ -511,6 +559,7 @@ case "$action" in
   reopen-one) cmd_reopen_one "$@" ;;
 
   close) cmd_close "$@" ;;
+  plan) cmd_plan "$@" ;;
   -h | --help | help) usage ;;
   *) log "unknown command '$action'"; usage ;;
 esac

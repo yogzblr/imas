@@ -62,8 +62,8 @@ spec:
           address: 10.60.2.4
           port: 6443
           # kubectl and helm reach the API through a kube tunnel on
-          # 127.0.0.1 (on an HA hub, the tunnel to the hub's internal load
-          # balancer, whose address and private name are listed too), so the
+          # 127.0.0.1 (on an HA hub, any node's own kube tunnel: the runner
+          # fails over between them; the load balancer's names stay), so the
           # serving certificate must name it.
           sans:
             - 127.0.0.1

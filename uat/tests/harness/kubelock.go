@@ -96,3 +96,51 @@ func refusedOnTunnel(stderr []byte) bool {
 	s := string(stderr)
 	return strings.Contains(s, "connection refused") && strings.Contains(s, "127.0.0.1:")
 }
+
+// --- an HA hub's API through its nodes' kube tunnels (W12) -----------------------
+
+// An HA hub has no Bastion tunnel to its internal load balancer: Azure
+// Bastion tunnels by IP to ports 22 and 3389 only (Azure UAT Run 3: "Custom
+// ports are not allowed"). Its kubeconfig points at one node's kube tunnel
+// and uat/access/session.sh kube-select moves it to another node of the hub
+// whose tunnel answers (uat/access/channel.sh ch_kube_select). vmctl.sh
+// stop-vm moves it before the ha tier stops a node; the harness asks again
+// when a kubectl call cannot reach the API, and before a helm upgrade, the
+// core check and acceptance.sh on an HA hub.
+
+// kubeFailovers bounds the kube-selects one kubectl call may ask for.
+const kubeFailovers = 2
+
+// kubeSelectHook runs "session.sh kube-select <kubeconfig>". A variable,
+// for tests.
+var kubeSelectHook = func(ctx context.Context, hook, kubeconfig string) error {
+	return runHook(ctx, hook, "kube-select", kubeconfig)
+}
+
+// kubeSelect points kubeconfig at a node whose kube tunnel answers, through
+// the session hook, and says whether its server moved. Without a session
+// ($UAT_SESSION_HOOK and $UAT_SESSION_ACCESS) or a kubeconfig on a tunnel it
+// does nothing.
+func kubeSelect(ctx context.Context, kubeconfig string) (moved bool, err error) {
+	hook := os.Getenv(EnvSessionHook)
+	if hook == "" || os.Getenv(EnvSessionAccess) == "" || kubeconfig == "" {
+		return false, nil
+	}
+	before := kubeTunnelPort(kubeconfig)
+	if before == "" {
+		return false, nil
+	}
+	err = kubeSelectHook(ctx, hook, kubeconfig)
+	return kubeTunnelPort(kubeconfig) != before, err
+}
+
+// unreachableAPI says a kubectl failure is one where the request never
+// reached the API server: kubectl could not connect ("Unable to connect to
+// the server", which covers a stopped node's Bastion tunnel closing the
+// TLS handshake), or the local tunnel refused. A call that failed so can be
+// run again on another node; one that failed after the server had it is
+// never retried here.
+func unreachableAPI(stderr []byte) bool {
+	s := string(stderr)
+	return strings.Contains(s, "Unable to connect to the server") || refusedOnTunnel(stderr)
+}

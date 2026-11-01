@@ -694,6 +694,9 @@ func (h *HA) HelmUpgrade(ctx context.Context, hub string, sets ...string) error 
 	if h.Helm != nil {
 		out, err = h.Helm(ctx, args)
 	} else {
+		// A 20-minute call on one node's kube tunnel: on one that answers
+		// (W12).
+		preSelect(ctx, hub, kubeconfig)
 		cmd := exec.CommandContext(ctx, "helm", args...)
 		cmd.WaitDelay = time.Second
 		out, err = cmd.CombinedOutput()
@@ -716,6 +719,7 @@ func (h *HA) RunCoreCheck(ctx context.Context) ([]byte, error) {
 	if h.Script != nil {
 		return h.Script(ctx, h.Cfg.CoreCheck, args)
 	}
+	preSelect(ctx, "core", h.Cfg.CoreKubeconfig)
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, h.Cfg.CoreCheck, args...)
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -871,4 +875,17 @@ func ReconcileInterval(p Pod) (time.Duration, error) {
 		return 0, fmt.Errorf("bus pod %s: IMAS_LOADER_RECONCILE_INTERVAL %q", p.Name, v)
 	}
 	return time.Duration(n) * time.Second, nil
+}
+
+// preSelect points an HA hub's kubeconfig at a node that answers before a
+// script or helm call that is not retried (W12), logging a move or a
+// failure; the call goes ahead either way.
+func preSelect(ctx context.Context, hub, kubeconfig string) {
+	moved, err := kubeSelect(ctx, kubeconfig)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "uat harness: %s: kube-select: %v; going on\n", hub, err)
+	case moved:
+		fmt.Fprintf(os.Stderr, "uat harness: %s: the kubeconfig now points at another node's kube tunnel (port %s)\n", hub, kubeTunnelPort(kubeconfig))
+	}
 }

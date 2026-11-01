@@ -18,8 +18,9 @@ import (
 )
 
 // Kube runs kubectl against one hub's cluster (the ha tier, P24): the
-// runner's kubeconfig for the hub, which reaches its API through the
-// Bastion tunnel to the hub's API address (uat/k0s, "HA hubs"). Nothing
+// runner's kubeconfig for the hub, which reaches its API through one node's
+// Bastion kube tunnel, moved to another node's when that one does not
+// answer (W12, kubeSelect; uat/RUNBOOK.md, "HA access"). Nothing
 // it runs prints a secret: a Secret's value is read into memory
 // (SecretValue) and handed to a pod on stdin (ExecIn), never on a command
 // line.
@@ -73,6 +74,7 @@ func (k *Kube) runKubectl(ctx context.Context, stdin []byte, args []string) ([]b
 		bin = "kubectl"
 	}
 	give := time.Now().Add(kubeReopenRetry)
+	failovers := 0
 	for {
 		release := holdKubeTunnel(ctx, k.Kubeconfig)
 		cmd := exec.CommandContext(ctx, bin, append([]string{"--kubeconfig", k.Kubeconfig}, args...)...)
@@ -84,13 +86,30 @@ func (k *Kube) runKubectl(ctx context.Context, stdin []byte, args []string) ([]b
 		cmd.WaitDelay = time.Second
 		err := cmd.Run()
 		release()
-		if err == nil || !refusedOnTunnel(se.Bytes()) || !kubeReopening() || time.Now().After(give) || ctx.Err() != nil {
+		if err == nil || ctx.Err() != nil {
 			return so.Bytes(), se.Bytes(), err
 		}
-		fmt.Fprintf(os.Stderr, "uat harness: %s: kubectl %s: connection refused while a kube tunnel is reopened; trying again\n", k.Hub, describeArgs(args))
-		if serr := sleep(ctx, 2*time.Second); serr != nil {
-			return so.Bytes(), se.Bytes(), err
+		if refusedOnTunnel(se.Bytes()) && kubeReopening() && !time.Now().After(give) {
+			fmt.Fprintf(os.Stderr, "uat harness: %s: kubectl %s: connection refused while a kube tunnel is reopened; trying again\n", k.Hub, describeArgs(args))
+			if serr := sleep(ctx, 2*time.Second); serr != nil {
+				return so.Bytes(), se.Bytes(), err
+			}
+			continue
 		}
+		// W12: an HA hub's API through another node's kube tunnel.
+		if failovers < kubeFailovers && unreachableAPI(se.Bytes()) {
+			failovers++
+			moved, ferr := kubeSelect(ctx, k.Kubeconfig)
+			if ferr != nil {
+				fmt.Fprintf(os.Stderr, "uat harness: %s: kubectl %s could not reach the API; kube-select: %v\n", k.Hub, describeArgs(args), ferr)
+			}
+			if moved {
+				fmt.Fprintf(os.Stderr, "uat harness: %s: kubectl %s could not reach the API; the kubeconfig now points at another node's kube tunnel (port %s); trying again\n",
+					k.Hub, describeArgs(args), kubeTunnelPort(k.Kubeconfig))
+				continue
+			}
+		}
+		return so.Bytes(), se.Bytes(), err
 	}
 }
 

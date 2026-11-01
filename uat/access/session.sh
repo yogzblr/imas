@@ -10,6 +10,7 @@
 #   session.sh ages <name>
 #   session.sh supervise start|stop|run|tick
 #   session.sh ensure kube
+#   session.sh kube-select [<kubeconfig>...]
 #
 # Why. The runner's az session comes from a GitHub OIDC login, which cannot
 # renew itself once its access token expires (about an hour). UAT Run 2 hung
@@ -79,6 +80,22 @@
 #             when it is REFRESH_AFTER old; the Go harness runs it before a
 #             kubectl call that would otherwise go out on an old one.
 #
+# kube-select (W12) points each HA hub's kubeconfig (the arguments, else
+#             UAT_SESSION_KUBECONFIGS) at a node of the hub whose kube tunnel
+#             answers and that the ha tier has not stopped (channel.sh
+#             ch_kube_select): the node it points at when that one answers,
+#             else the hub's nodes in order. An HA hub has no tunnel to its
+#             internal load balancer: Azure Bastion tunnels by IP to ports
+#             22 and 3389 only (Azure UAT Run 3). A single-node hub's
+#             kubeconfig is left as it is. 1 when a hub has no answering
+#             node. A phase runs it after its refresh, the supervisor every
+#             round, vmctl.sh stop-vm before it stops a node, and the
+#             harness when a kubectl call cannot reach the API.
+#
+# A node the ha tier stopped (vmctl.sh stop-vm; <access dir>/stopped/<vm>
+# until start-vm) is left alone: the supervisor, ensure and probe skip its
+# tunnels, saying so, rather than reopening them every round.
+#
 # Every refresh that reopens the tunnels clears vmctl.sh's dead marks.
 #
 # The login time is the modification time of az-relogin.sh's stamp,
@@ -142,6 +159,7 @@ usage: $prog mark-login
        $prog ages <name>
        $prog supervise start|stop|run|tick
        $prog ensure kube
+       $prog kube-select [<kubeconfig>...]
 EOF
   exit 2
 }
@@ -296,8 +314,13 @@ cmd_probe() {
   age=$(fmt_age "$(tunnel_age_s)" "not open")
   local results vm kind port i=0 failed=0
   results=$(mktemp -d)
+  CH_ACCESS_DIR=$dir
   # Every tunnel at once: a dead one costs its timeout, not the sum.
   while IFS=$'\t' read -r vm kind port; do
+    if ch_stopped "$vm"; then
+      log "$name: probe: $vm $kind tunnel (127.0.0.1:$port): skipped, the ha tier stopped $vm (vmctl.sh stop-vm)"
+      continue
+    fi
     i=$((i + 1))
     { printf '%s\t%s\t%s\t%s\n' "$vm" "$kind" "$port" "$(probe_one "$kind" "$port")" >"$results/$i"; } &
   done < <(jq -r 'to_entries[] | .key as $vm | .value | to_entries[]
@@ -316,7 +339,7 @@ cmd_probe() {
     fi
   done
   rm -rf "$results"
-  [ "$i" -gt 0 ] || die "$name: probe: access.json lists no tunnel"
+  [ "$i" -gt 0 ] || die "$name: probe: access.json lists no tunnel (of a running VM)"
   [ "$failed" -eq 0 ] || die "$name: $failed of $i tunnels did not answer; $(ages_line) (uat/RUNBOOK.md, 'All tunnels hang')"
   log "$name: probe: all $i tunnels answer"
 }
@@ -359,6 +382,15 @@ cmd_phase() {
   fi
   log "$name: $(ages_line)"
   if [ "$probe" = 1 ]; then cmd_probe "$name"; fi
+  # An HA hub's kubeconfig on a node that answers (W12). A phase without
+  # --probe goes on when none does; the step's own kubectl then says so.
+  if [ "$tunnels_too" = 1 ]; then
+    CH_ACCESS_DIR=$(access_dir)
+    if ! ch_kube_select_all; then
+      [ "$probe" = 1 ] && die "$name: a hub has no node whose kube tunnel answers; $(ages_line) (uat/RUNBOOK.md, \"HA access\")"
+      log "$name: warning: a hub has no node whose kube tunnel answers (uat/RUNBOOK.md, \"HA access\")"
+    fi
+  fi
 }
 
 cmd_ages() {
@@ -374,10 +406,19 @@ cmd_ages() {
     else
       state=exited
     fi
+    [ -e "$dir/stopped/$vm" ] && state="$state, VM stopped by the ha tier"
     log "$name: tunnel $vm $kind on 127.0.0.1:$port: process $pid $state"
     f="$dir/logs/$vm-$kind.log"
     [ -s "$f" ] && tail -n 5 "$f" | sed "s/^/    /" >&2
   done <"$dir/tunnels.pids"
+  # Where each kubeconfig points (W12: an HA hub's moves between nodes).
+  local kc kcs=() p
+  IFS=: read -r -a kcs <<<"${UAT_SESSION_KUBECONFIGS:-}"
+  for kc in "${kcs[@]}"; do
+    [ -f "$kc" ] || continue
+    p=$(CH_ACCESS_DIR=$dir ch_kube_server_port "$kc")
+    log "$name: kubeconfig $kc: server 127.0.0.1:${p:-?} ($(jq -r --argjson p "${p:-0}" '[to_entries[] | select(.value.kube_port == $p) | .key][0] // "no tunnel"' "$dir/access.json" 2>/dev/null || echo "no access.json"))"
+  done
   return 0
 }
 
@@ -456,6 +497,8 @@ supervise_tunnels() {
   [ -s "$dir/tunnels.pids" ] || return 0
   while IFS=$'\t' read -r age vm kind port; do
     [ -n "${vm:-}" ] || continue
+    # A node the ha tier stopped answers nothing until start-vm (W12).
+    ch_stopped "$vm" && continue
     reason=""
     if ch_tunnel_due "$vm" "$kind" "$age"; then
       reason="age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m, this tunnel's staggered limit $(ch_fmt_age "$(ch_tunnel_limit "$vm" "$kind")"))"
@@ -527,8 +570,24 @@ supervise_tick() {
   if [ -s "$dir/access.json" ]; then
     supervise_tunnels
     supervise_dead
+    supervise_kube_select
   fi
   flock -u 7
+}
+
+# supervise_kube_select: each HA hub's kubeconfig on an answering node
+# (W12); logs a move or a hub with none, not a kubeconfig that stays.
+supervise_kube_select() {
+  local kc kcs=() line
+  IFS=: read -r -a kcs <<<"${UAT_SESSION_KUBECONFIGS:-}"
+  for kc in "${kcs[@]}"; do
+    [ -f "$kc" ] || continue
+    if line=$(ch_kube_select "$kc"); then
+      case $line in *"; kept" | *"left as it is") ;; *) slog "kube-select: $line" ;; esac
+    else
+      slog "kube-select: $line"
+    fi
+  done
 }
 
 cmd_supervise() {
@@ -588,11 +647,28 @@ cmd_ensure() {
   relogin_if_due
   [ -s "$dir/access.json" ] || return 0
   for vm in $(jq -r 'to_entries[] | select(.value.kube_port) | .key' "$dir/access.json"); do
+    ch_stopped "$vm" && continue
     age=$(ch_tunnel_age "$vm" kube)
     ch_tunnel_due "$vm" kube "$age" || continue
     slog "$vm kube tunnel: age $(ch_fmt_age "$age") (REFRESH_AFTER ${ch_refresh_after}m); reopening it"
     reopen_held "$vm" kube || true
   done
+}
+
+# kube-select [<kubeconfig>...]: see the header.
+cmd_kube_select() {
+  local dir kc rc=0
+  dir=$(access_dir)
+  CH_ACCESS_DIR=$dir
+  [ -n "${UAT_SESSION_UAT:-}" ] || { log "UAT_SESSION_UAT is not set"; exit 2; }
+  if [ $# -eq 0 ]; then
+    ch_kube_select_all || rc=1
+  else
+    for kc in "$@"; do
+      ch_kube_select "$kc" >&2 || rc=1
+    done
+  fi
+  return "$rc"
 }
 
 [ $# -ge 1 ] || usage
@@ -606,6 +682,7 @@ case $action in
   ages) cmd_ages "$@" || true ;;
   supervise) cmd_supervise "$@" ;;
   ensure) cmd_ensure "$@" ;;
+  kube-select) cmd_kube_select "$@" ;;
   -h | --help | help) usage ;;
   *) log "unknown command '$action'"; usage ;;
 esac

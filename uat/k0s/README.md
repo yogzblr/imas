@@ -35,7 +35,7 @@ uat/k0s/check.sh --out "$STATE/k0s"     # again at any time; read only
 | Input | From |
 |---|---|
 | `--uat` | `tofu output -json uat`. Reads `run_id` and, for `dmz` and `core`: `name`, `private_ip`, `public_ip`, `fqdn`, `admin_user`, `node_names` and `node_private_ips` (the hub's nodes, in order; without them the hub is its `name` and `private_ip`), `api_address` and `api_fqdn` (the hub's stable API address and its private name; required on an HA hub). A hub has 1, 3 or 5 nodes (`UAT_HUB_NODE_COUNTS`), and its `name` and `private_ip` are its first node's. |
-| `--access` | `access.json` from `uat/access/tunnels.sh open`. Reads, for each node, `host` and `ssh_port`; for the hub's API tunnel, `host` and `kube_port` of the node's entry on a single node or of the `dmz-api` or `core-api` entry on an HA hub. The entries may sit at the top level or under a `vms` or `hosts` object. |
+| `--access` | `access.json` from `uat/access/tunnels.sh open`. Reads, for each node, `host` and `ssh_port`; for the hub's API tunnel, `host` and `kube_port` of the first node's entry (the only node's on a single node; on an HA hub the first node's, which `uat/access/session.sh kube-select` later moves between the nodes, W12: there is no `dmz-api` or `core-api` entry, as Azure Bastion tunnels by IP to ports 22 and 3389 only). The entries may sit at the top level or under a `vms` or `hosts` object. |
 | `--nodes` | Optional. Every hub must have this many nodes (the workflow passes `hub_nodes`), so a stale `uat.json` is refused. |
 | `--ssh-key` | The per-run SSH private key for `admin_user`. A sensitive tofu value, so it is passed as a file and never written into the uat JSON. |
 
@@ -49,7 +49,7 @@ Everything bootstrap.sh writes goes to `--out`:
 
 | File | What | Sensitive |
 |---|---|---|
-| `dmz.kubeconfig`, `core.kubeconfig` | Admin kubeconfigs. Server `https://127.0.0.1:<kube_port>`, through the hub's API tunnel (on an HA hub the one to its internal load balancer, so it keeps working while a node is stopped). | **Yes** (mode 600). Never upload them as workflow artifacts. |
+| `dmz.kubeconfig`, `core.kubeconfig` | Admin kubeconfigs. Server `https://127.0.0.1:<kube_port>`, through the first node's kube tunnel (on an HA hub `uat/access/session.sh kube-select` moves it to another node's when that one stops answering or the ha tier stops it; W12). | **Yes** (mode 600). Never upload them as workflow artifacts. |
 | `uat-ca.crt` | The UAT CA certificate. Sprouts pin it (`sproutrootca`, `sproutrootcatofu: false`) and the tests trust it. | No |
 | `endpoints.json` | The hubs' names, addresses, FQDNs and exposed ports, how each hub exposes them, each hub's node port range, nodes (`nodes`, `node_private_ips`), API address (`api_address`, `api_fqdn`) and datastore (`kine` or `etcd`), and the ClusterIssuer name. | No |
 | `k0sctl-dmz.yaml`, `k0sctl-core.yaml` | The rendered k0sctl files. They hold the key's path, not the key. | No |
@@ -97,8 +97,9 @@ the same configuration as before P24 (only the comments changed).
 - **The API address.** `spec.api` sets neither `address` (each controller
   binds its own private IP) nor `externalAddress`. The internal load
   balancer's address (`api_address`) and private name (`api_fqdn`) are in
-  `spec.api.sans` with every node's IP, so the runner verifies the server
-  through the tunnel to the load balancer. k0s rejects `externalAddress`
+  `spec.api.sans` with every node's IP and 127.0.0.1, so the runner
+  verifies the server through any node's kube tunnel (W12; there is no
+  tunnel to the load balancer). k0s rejects `externalAddress`
   with node-local load balancing (`k0s config validate`: "node-local load
   balancing cannot be used in conjunction with an external Kubernetes API
   server address"), and with `externalAddress` set k0s points kube-proxy,
@@ -126,9 +127,14 @@ the same configuration as before P24 (only the comments changed).
   (`etcdmembers.etcd.k0sproject.io`) show that many members joined. check.sh
   fails on fewer of either.
 - **Access.** k0sctl dials every node through its own SSH tunnel
-  (`HostKeyAlias` the node's name). The kubeconfig's server is the tunnel to
-  the hub's API address (`dmz-api`, `core-api` in access.json,
-  `uat/access/README.md`).
+  (`HostKeyAlias` the node's name). The kubeconfig's server is the first
+  node's own kube tunnel; `uat/access/session.sh kube-select` moves it to
+  another node's when that one stops answering or the ha tier stops it
+  (W12, `uat/access/README.md`, "HA hubs: the API through the nodes"). No
+  tunnel goes to the internal load balancer: Azure Bastion's IP-based
+  connection allows ports 22 and 3389 only. 127.0.0.1 is in every node's
+  API certificate (`spec.api.sans`, which k0sctl gives every controller),
+  so the kubeconfig verifies through any node's tunnel.
 
 NodePorts and hostPorts work the same on every node: kube-proxy serves a
 node port on each node, and a hostPort pod takes its port on the node it runs
@@ -336,7 +342,7 @@ given.
     CoreDNS lines per cluster, `endpoints.json`'s nodes and datastore, a mix
     of one HA hub and one single node, and refusal of an even node count,
     node lists of different lengths, a missing or node-owned `api_address`,
-    a bad `api_fqdn`, a missing API tunnel or node tunnel, and `--nodes`
+    a bad `api_fqdn`, a missing kube or SSH tunnel on a node, and `--nodes`
     that differs from the uat JSON;
   - the SANs, the node port range, the CoreDNS lines and the single place
     the k0s version is set;
@@ -344,7 +350,7 @@ given.
     bad users, run ids, missing tunnels, and settings that would expose a
     port k0s uses; the warning when a range contains one;
   - the install order and kubeconfig addresses against stubs, and on an HA
-    hub the kubeconfig through the API tunnel, the wait for every node and
+    hub the kubeconfig through the first node's kube tunnel, the wait for every node and
     every etcd member, and its failures (a node short, a member not
     joined);
   - checksum refusal and the helper image pin;

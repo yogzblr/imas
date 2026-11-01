@@ -34,6 +34,12 @@ case "$1 $2 $3" in
     [ -n "$id" ] || id=$(arg --target-ip-address "$@")
     port=$(arg --port "$@")
     rport=$(arg --resource-port "$@")
+    # Azure refuses an IP-based tunnel to any port but 22 and 3389 (Azure
+    # UAT Run 3, W12), with this message.
+    if [ -n "$(arg --target-ip-address "$@")" ] && [ "$rport" != 22 ] && [ "$rport" != 3389 ]; then
+      echo "ERROR: Custom ports are not allowed. Allowed ports for Tunnel with IP connect is 22, 3389." >&2
+      exit 1
+    fi
     if grep -qxF "$id" "$STUB_STATE/fail_ids" 2>/dev/null; then
       echo "ERROR: stub tunnel failure for $id" >&2
       exit 1
