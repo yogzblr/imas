@@ -435,6 +435,16 @@ cmd_open() {
   # to TUNNEL_START_ATTEMPTS times in all.
   local deadline banner tries
   for i in "${!vms[@]}"; do
+    # A hub node the ha tier stopped (vmctl.sh stop-vm marks it in
+    # <dir>/stopped/) answers nothing until start-vm, which reopens its
+    # tunnels: waiting for it would fail the open and close every tunnel
+    # (a refresh during or after a failed HA2, or the Diagnostics step
+    # before the HA hubs' VMs are started again). Its entry stays in
+    # tunnels.pids and access.json for that reopen.
+    if [ -e "$dir/stopped/${vms[$i]}" ]; then
+      log "${vms[$i]} ${kinds[$i]}: stopped by the ha tier; started on 127.0.0.1:${ports[$i]}, not waited for"
+      continue
+    fi
     deadline=$((SECONDS + wait_seconds))
     tries=1
     while :; do

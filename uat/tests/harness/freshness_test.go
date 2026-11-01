@@ -49,6 +49,18 @@ func TestFreshnessDue(t *testing.T) {
 	if got := f.Due(); !strings.Contains(got, "azure login") {
 		t.Errorf("a login of exactly REFRESH_AFTER is due: Due = %q", got)
 	}
+	// A node the ha tier stopped: its kube tunnel's stamp only ages until
+	// start-vm, and is not due.
+	f = freshFixture(t, now, 2*time.Minute, 3*time.Minute, 30*time.Minute)
+	if err := os.MkdirAll(filepath.Join(f.AccessDir, "stopped"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.AccessDir, "stopped", "uat-dmz"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Due(); got != "" {
+		t.Errorf("a stopped node's old kube tunnel: Due = %q, want nothing", got)
+	}
 	f.LoginStamp = filepath.Join(t.TempDir(), "none")
 	f.AccessDir = t.TempDir()
 	if got := f.Due(); got != "" {

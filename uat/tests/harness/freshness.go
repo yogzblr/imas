@@ -89,6 +89,14 @@ func (f *Freshness) Due() string {
 	}
 	kubes, _ := filepath.Glob(filepath.Join(f.AccessDir, "opened", "*-kube"))
 	for _, k := range kubes {
+		// A node the ha tier stopped (vmctl.sh stop-vm, <access
+		// dir>/stopped/<vm>) has no tunnel to renew until start-vm; its
+		// stamp only ages, and counting it would run the hook on every
+		// kubectl call while the node is down.
+		vm := strings.TrimSuffix(filepath.Base(k), "-kube")
+		if _, err := os.Stat(filepath.Join(f.AccessDir, "stopped", vm)); err == nil {
+			continue
+		}
 		b, err := os.ReadFile(k)
 		if err != nil {
 			continue

@@ -48,6 +48,10 @@ DMZ_DEFAULT_ENVOY_PORT=8443
 DMZ_DEFAULT_BUS_PORT=8442
 DMZ_DEFAULT_FARMER_API_PORT=5405
 DMZ_DEFAULT_CLUSTER_ISSUER=imas-uat-ca
+# Envoy's admin port (deploy/helm/nats envoy.adminPort, not set by
+# values-uat.yaml), bound to 127.0.0.1 in the pod: check.sh reads it through
+# kubectl port-forward.
+DMZ_ENVOY_ADMIN_PORT=9901
 # The private DNS zone of the run (UAT.1's private_dns_zone): dmz.<zone> and
 # core.<zone> resolve to the hubs' private addresses inside the VNet. Owner's
 # decision, 2026-10-06: the SANs, farmerinterface and farmerbusurl use them.
