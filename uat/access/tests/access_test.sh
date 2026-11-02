@@ -192,6 +192,23 @@ if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "not ready" && [ ! -e "$state
   ok "tunnels: an SSH tunnel with no SSH banner times out and fails"
 else nok "tunnels: no banner (rc=$rc)" "$out"; fi
 
+# A node the ha tier stopped (vmctl.sh stop-vm's mark) is not waited for:
+# with no SSH banner anywhere, an open that marks every SSH VM stopped still
+# succeeds, and keeps their entries for start-vm's reopen.
+new_case stopped_not_waited
+touch "$STUB_STATE/no_banner"
+mkdir -p "$state/stopped"
+for vm in $(jq -r '.dmz.name, .core.name, (.sprouts // {} | to_entries[] | select(.value.connection == "ssh") | .key)' "$uat"); do
+  date +%s >"$state/stopped/$vm"
+done
+out=$(PATH="$stubs:$PATH" TUNNEL_PORT_BASE="$base" TUNNEL_WAIT_SECONDS=2 bash "$tunnels" open "$uat" "$state" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "stopped by the ha tier; started on 127.0.0.1:[0-9]*, not waited for" &&
+  [ "$(jq -r '."uat-core".ssh_port // empty' "$state/access.json")" != "" ]; then
+  ok "tunnels: a node the ha tier stopped is not waited for, and keeps its entry"
+else nok "tunnels: stopped node waited for (rc=$rc)" "$out"; fi
+t close "$state"
+
 new_case docker
 jq '.sprouts |= with_entries(.value.connection = "docker")' "$uat" >"$work/docker.json"
 t open "$work/docker.json" "$state"

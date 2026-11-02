@@ -451,13 +451,15 @@ jobs:
             uat/hub/core/finish.sh "$STATE/k0s/core.kubeconfig" "$STATE/k0s/endpoints.json" \
             "$STATE/hub" "$RELEASE_TAG"
 
-      # Before enrolment: its rate limit check empties /v1/enroll's bucket and
-      # waits for the refill.
+      # Before enrolment: its rate limit check empties /v1/enroll's buckets and
+      # waits until every Envoy's has refilled. Each Envoy's rate-limit config
+      # and stats go into the report's diagnostics (D16), pass or fail.
       - name: DMZ check
         run: |
           uat/access/session.sh phase "DMZ check"
           uat/hub/dmz/check.sh --endpoints "$STATE/k0s/endpoints.json" \
-            --ca-file "$STATE/k0s/uat-ca.crt" --kubeconfig "$STATE/k0s/dmz.kubeconfig"
+            --ca-file "$STATE/k0s/uat-ca.crt" --kubeconfig "$STATE/k0s/dmz.kubeconfig" \
+            --diagnostics "$STATE/report/diagnostics/dmz-check"
 
       # A fresh login and fresh tunnels, every tunnel probed (W6): UAT Run 2
       # started enrolment on a 50-minute-old login and hung at about 55.

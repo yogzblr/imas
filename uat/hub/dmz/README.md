@@ -307,22 +307,23 @@ what the repo's real-Envoy tests assert (`internal/pki/envoy_e2e_test.go`,
 | D6 | the same with the forged token | 401 with jwt_authn's body |
 | D7 | `GET /v1/sprout/update-manifest`, no token | 401 with jwt_authn's body (route 2b) |
 | D8 | `POST /v1/enroll` with `{}` | farmer's own `401 {"error":"enrollment_failed"}` (`internal/api/handlers/enroll.go`): no JWT gate, and Envoy reaches farmer. 502, 503 or 504 is reported as farmer unreachable |
-| D9 | `POST /v1/enroll` repeatedly, at most `--max-burst` (41 per Envoy, one Envoy per DMZ node) times | Envoy answers `429 local_rate_limited`. Each Envoy's bucket holds 20 and refills 20 every 60 s, so it should come after at most 20 answered requests per Envoy; a refill landing mid-burst can let twice that through, which is reported but passes |
+| D9 | `--max-burst` (41 per Envoy, one Envoy per DMZ node) `POST /v1/enroll` at once, 24 in flight, each on a new connection so the load balancer spreads them | Envoy answers `429 local_rate_limited`. Each Envoy's bucket holds 20 and gets 20 per 60 s (one token every 3 s with Envoy's timer-less bucket, the default since 1.31; or 20 at once on a timer), so inside any window shorter than 60 s one Envoy serves at most 40, and 40 × Envoys + 1 must draw a 429. The burst's duration is in the message; a burst over 30 s with no 429 is reported as too slow to test the limit, not as a missing limit (W13: sent one after the other at 0.6 s each, 121 took 74 s and three Envoys earned about 134 tokens) |
 | D10 | `POST /v1/refresh` with `{}`, while `/v1/enroll`'s bucket is empty | farmer's `401 enrollment_failed`, not 429: no JWT gate, and a bucket of its own |
-| D11 | `POST /v1/enroll` every 5 s for up to `--refill-wait` (75) s | the bucket refills and farmer answers again |
+| D11 | `--refill-wait` (75) s after D9's burst ended, two `POST /v1/enroll` per Envoy at once | every one reaches farmer: after a whole fill interval every Envoy's bucket is full again, not only the one a probe happens to reach, and enrolment goes through any of them |
 | D12 | `openssl s_client` again, sending and verifying `dmz.<zone>` over the same connection | the certificate also verifies for the private name sprouts use (the runner cannot resolve it, so only the name changes) |
 | D13 | `kubectl get pods` of the bus (needs `--kubeconfig`) | design T5: the `farmerbus` container has no `IMAS_NATS_*_SEED` or `*_SEED_FILE` variable except the clustered fence user's |
 | D14 | the same pods | no OpenBao signing settings (`IMAS_NATSSIGN_*`, `IMAS_NATSBOOT_*`), and every pod's `farmerbus` container mounts ConfigMap `imas-nats-trust` at exactly the directory `IMAS_NATS_TRUST_DIR` names |
 | D15 | `kubectl get configmap imas-nats-trust` and the pods' Ready condition | the trust passes install.sh's checks (complete, public, the chain hangs together) and every bus pod is Ready: the bus started from the published operator JWT alone |
+| D16 | per Running Envoy pod, `kubectl port-forward` to its admin port (9901, bound to 127.0.0.1 in the pod), `GET /config_dump` and `/stats?filter=rate_limit` | one pod per DMZ node, and each one's config has the `local_ratelimit` HTTP filter and `/v1/enroll`'s bucket (stat prefix `enroll_rate_limiter`, 20 max, 20 per fill, 60 s, enabled and enforced 100%). The filter, the route and the stats (enabled, enforced, ok, rate_limited) go into `--diagnostics DIR/envoy/<pod>/`, pass or fail; the rest of the dump is not kept. The stats are not asserted: the spread does not promise each Envoy a 429 |
 
 "jwt_authn's body" means a 401 whose body starts with `Jwt ` or `Jwks `
 (Envoy's reasons: `Jwt is missing`, `Jwt verification fails`, `Jwks doesn't
 have key to match kid or alg from Jwt`), so a 401 from farmer cannot pass for
 one from Envoy.
 
-D1 to D7 and D9 need only the DMZ hub. D8, D10 and D11 need farmer up on
-core. D13 to D15 read the cluster and are skipped without `--kubeconfig`. **Run it before enrolment:** D9 empties `/v1/enroll`'s bucket, and
-enrolling through this Envoy is refused with 429 until it refills; D11 waits
+D1 to D7 need only the DMZ hub. D8 to D11 need farmer up on
+core. D13 to D16 read the cluster and are skipped without `--kubeconfig`. **Run it before enrolment:** D9 empties the Envoys' `/v1/enroll` buckets, and
+enrolling through a drained Envoy is refused with 429 until it refills; D11 waits
 for that (skip it with `--refill-wait 0` only if nothing enrols for the next
 minute). Each check prints `PASS`, `FAIL` or `SKIP` with its id; the exit
 code is 1 if any failed. With `--kubeconfig`, a failure also prints the

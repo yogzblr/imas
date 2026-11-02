@@ -222,6 +222,11 @@ func watchLoader(ctx context.Context, h *harness.HA, old harness.Pod) *loaderWat
 			}
 			st, err := fwd.Status(wctx)
 			if err != nil {
+				// The forward may have died (kubectl port-forward exits
+				// after a refused connection, as when it starts before
+				// the loader listens): start a new one next time.
+				fwd.Close()
+				fwd = nil
 				continue
 			}
 			w.mu.Lock()

@@ -699,7 +699,7 @@ func (f *fakeEnvoy) take(path string) bool {
 	// Envoy refills on a timer. The fake refills fill after the bucket ran
 	// dry instead, so a slow machine cannot top it up in the middle of
 	// check.sh's burst and turn the test flaky.
-	if !f.started || (!f.dryAt.IsZero() && time.Since(f.dryAt) >= f.fill) {
+	if !f.started || (!f.dryAt.IsZero() && time.Since(f.dryAt) >= f.fill && !f.faults["never refills"]) {
 		f.enrollTokens, f.refreshTokens, f.dryAt, f.started = 20, 300, time.Time{}, true
 	}
 	tokens := &f.enrollTokens
@@ -799,6 +799,8 @@ func runCheckN(t *testing.T, nodes int, host string, certHosts []string, faults 
 		for _, x := range faults {
 			f.faults[x] = true
 		}
+		// "envoy 2 never refills": only the second Envoy's bucket stays dry.
+		f.faults["never refills"] = f.faults["envoy 2 never refills"] && i == 1
 		lb.envoys = append(lb.envoys, f)
 	}
 	srv := httptest.NewUnstartedServer(lb)
@@ -1497,11 +1499,22 @@ func TestInstallRefusesBadTrust(t *testing.T) {
 }
 
 // stubCheckKubectl answers check.sh's reads (D13 to D15) from STUB_PODS and
-// STUB_TRUST.
+// STUB_TRUST, and D16's: the Running Envoy pods are STUB_ENVOY_PODS (one by
+// default), and port-forward "forwards" to STUB_ADMIN_PORT, a fake Envoy
+// admin interface (fakeAdmin), or fails without it.
 const stubCheckKubectl = `#!/usr/bin/env bash
 case "$*" in
 *"get pods -l app.kubernetes.io/instance=imas-dmz,app.kubernetes.io/component=bus -o json"*) cat "${STUB_PODS:?}" ;;
 *"get configmap imas-nats-trust -o json"*) cat "${STUB_TRUST:?}" ;;
+*"get pods -l app.kubernetes.io/instance=imas-dmz,app.kubernetes.io/component=envoy "*)
+	for p in ${STUB_ENVOY_PODS-imas-dmz-nats-envoy-0}; do printf '%s\n' "$p"; done ;;
+*" port-forward "*" :9901"*)
+	if [[ -n ${STUB_ADMIN_PORT:-} ]]; then
+		printf 'Forwarding from 127.0.0.1:%s -> 9901\n' "$STUB_ADMIN_PORT"
+		exec sleep 60
+	fi
+	echo 'error: unable to forward port 9901: connection refused' >&2
+	exit 1 ;;
 esac
 exit 0
 `
@@ -1550,6 +1563,7 @@ func TestCheckBusFromTrustOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("STUB_ADMIN_PORT", fakeAdmin(t, nil))
 	seed, err := nkeys.CreateUser()
 	if err != nil {
 		t.Fatal(err)
