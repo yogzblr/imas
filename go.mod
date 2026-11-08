@@ -25,7 +25,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hectane/go-acl v1.0.0
-	github.com/klauspost/compress v1.19.2
+	github.com/klauspost/compress v1.20.2
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/m-mizutani/masq v0.2.3
 	github.com/minio/minio-go/v7 v7.3.0

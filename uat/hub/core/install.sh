@@ -271,8 +271,8 @@ if ! wait "$helm_pid"; then
 	cat "$helm_log" >&2
 	kc -n "$CORE_NS" get jobs,pods >&2 || true
 	for j in $(kc -n "$CORE_NS" get jobs -o name 2>/dev/null); do
-		log "logs of $j"
-		kc -n "$CORE_NS" logs "$j" --all-containers --tail=50 >&2 || true
+		log "logs of $j, every pod and container"
+		hook_job_logs "$CORE_NS" "${j#*/}"
 	done
 	die "helm install of $CORE_RELEASE failed (its hooks include the migration, the OpenBao bootstrap, the box keygen and the credential publisher)"
 fi

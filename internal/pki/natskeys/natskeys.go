@@ -200,7 +200,17 @@ func (s *TransitKeyStore) EnsureKeyPair(ctx context.Context, name string, prefix
 		})
 		return err
 	})
-	kp, err = s.KeyPair(ctx, name, prefix)
+	// Behind a Service spread over HA nodes, the read can reach a standby
+	// that has not applied the create yet and answers 404 (UAT HA run
+	// 42448281672: each bootstrap retry created one platform key, then
+	// failed here). AwaitReadBack reads again for a few seconds.
+	_, _ = openbao.AwaitReadBack(ctx, func(ctx context.Context) (bool, error) {
+		kp, err = s.KeyPair(ctx, name, prefix)
+		if errors.Is(err, ErrKeyNotFound) {
+			return false, nil
+		}
+		return true, nil // found, or an error that is not a miss: stop
+	})
 	if err != nil && createErr != nil {
 		return nil, fmt.Errorf("natskeys: creating key %s: %w (then reading it: %w)", name, createErr, err)
 	}

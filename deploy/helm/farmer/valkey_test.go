@@ -234,17 +234,25 @@ func TestValkeyTLS(t *testing.T) {
 
 // The bootstrap Job generates Valkey's password once, in the seed path,
 // and never overwrites it: the script text, and the script run against a
-// fake bao.
+// fake bao. It waits out HA OpenBao's windows (UAT HA run 42448281672): a
+// mount still upgrading, and a check-and-set refusal it re-reads.
 func TestValkeyPasswordBootstrap(t *testing.T) {
-	script := valkeyBootstrapSnippet(t, mustRender(t))
+	docs := mustRender(t)
+	script := valkeyBootstrapSnippet(t, docs)
+	helpers := kvHelpersSnippet(t, docs)
+	if !strings.Contains(helpers, "kv_wait=120") {
+		t.Errorf("kv helpers lack kv_wait=120:\n%s", helpers)
+	}
 	for _, want := range []string{
 		`vkv="secret/platform/imas/nats-seeds"`,
 		`vmeta="secret/metadata/platform/imas/nats-seeds"`,
-		`vver="$(bao read -field=current_version "$vmeta" 2>/dev/null)"`,
+		`vver="$(bao read -field=current_version "$vmeta" 2>"$err")"`,
 		`bao kv get -field=valkey_password "$vkv"`,
 		`vop="patch -cas=$vver"`,
 		`vop="put -cas=0"`,
 		`head -c 32 /dev/urandom | base64 | tr -d '=\n' | bao kv $vop "$vkv" valkey_password=-`,
+		"check-and-set parameter did not match",
+		"kv_upgrading",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q:\n%s", want, script)
@@ -258,7 +266,7 @@ func TestValkeyPasswordBootstrap(t *testing.T) {
 	}
 	// The seed mount is enabled as KV v2 like the others.
 	prep := initContainer(t, find(t, mustRender(t, "--set", "externalSecrets.seedMount=kv"), "Job", "t-farmer-openbao-bootstrap"), "prepare")
-	if !strings.Contains(get(prep, "args", 0).(string), "has_mount kv || bao secrets enable -path=kv -version=2 kv") {
+	if !strings.Contains(get(prep, "args", 0).(string), "\nenable_kv kv\n") {
 		t.Error("the seed mount is not enabled")
 	}
 	// Auth off: no password is generated.
@@ -270,20 +278,35 @@ func TestValkeyPasswordBootstrap(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		skipUnlessRequired(t, "no sh: can't run the bootstrap script")
 	}
-	run := func(t *testing.T, store string) string {
+	// try runs the kv helpers and the snippet, as the prepare script
+	// does, against the fake; set writes the fake's state files first.
+	try := func(t *testing.T, store string) (string, error) {
 		t.Helper()
 		bin := t.TempDir()
 		if err := os.WriteFile(filepath.Join(bin, "bao"), []byte(fakeBao), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command("sh", "-ec", script)
+		cmd := exec.Command("sh", "-ec", helpers+script)
 		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FAKE_KV="+store, "FAKE_PATH=secret/platform/imas/nats-seeds",
 			"FAKE_META=secret/metadata/platform/imas/nats-seeds")
 		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	run := func(t *testing.T, store string) string {
+		t.Helper()
+		out, err := try(t, store)
 		if err != nil {
 			t.Fatalf("script failed: %v\n%s", err, out)
 		}
-		return string(out)
+		return out
+	}
+	set := func(t *testing.T, store string, files map[string]string) {
+		t.Helper()
+		for f, v := range files {
+			if err := os.WriteFile(filepath.Join(store, f), []byte(v), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	read := func(t *testing.T, store, f string) string {
 		t.Helper()
@@ -325,6 +348,59 @@ func TestValkeyPasswordBootstrap(t *testing.T) {
 			t.Errorf("version %s, calls:\n%s", read(t, store, "version"), read(t, store, "calls"))
 		}
 	})
+	t.Run("mount still upgrading", func(t *testing.T) {
+		store := t.TempDir()
+		set(t, store, map[string]string{"upgrading": "3"})
+		out := run(t, store)
+		if !b64.MatchString(read(t, store, "prop_valkey_password")) || read(t, store, "version") != "1" ||
+			!strings.Contains(out, "still upgrading; trying again") || !strings.Contains(out, "generated") {
+			t.Errorf("version %s, output:\n%s", read(t, store, "version"), out)
+		}
+	})
+	t.Run("another writer first", func(t *testing.T) {
+		store := t.TempDir()
+		set(t, store, map[string]string{"race": ""})
+		out := run(t, store)
+		if read(t, store, "prop_valkey_password") != "theirs" || read(t, store, "version") != "1" ||
+			!strings.Contains(out, "check-and-set refused") || !strings.Contains(out, "kept") {
+			t.Errorf("version %s, output:\n%s", read(t, store, "version"), out)
+		}
+	})
+	t.Run("write refused", func(t *testing.T) {
+		store := t.TempDir()
+		set(t, store, map[string]string{"deny": ""})
+		out, err := try(t, store)
+		if err == nil || !strings.Contains(out, "permission denied") || !strings.Contains(out, "could not write valkey_password") ||
+			strings.Contains(out, "another writer") {
+			t.Errorf("err %v, output:\n%s", err, out)
+		}
+	})
+	t.Run("latest version deleted", func(t *testing.T) {
+		store := t.TempDir()
+		set(t, store, map[string]string{"exists": "", "version": "2", "deleted": "", "prop_sys_user": "SUSEED"})
+		out, err := try(t, store)
+		if err == nil || !strings.Contains(out, "latest version of secret/platform/imas/nats-seeds is deleted") ||
+			!strings.Contains(out, "nothing was overwritten") || strings.Contains(read(t, store, "calls"), "patch") ||
+			strings.Contains(read(t, store, "calls"), "put") {
+			t.Errorf("err %v, output:\n%s\ncalls:\n%s", err, out, read(t, store, "calls"))
+		}
+	})
+	t.Run("still upgrading at the deadline", func(t *testing.T) {
+		store := t.TempDir()
+		set(t, store, map[string]string{"upgrading": "1000"})
+		bin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bin, "bao"), []byte(fakeBao), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-ec", strings.Replace(helpers, "kv_wait=120", "kv_wait=2", 1)+script)
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FAKE_KV="+store, "FAKE_PATH=secret/platform/imas/nats-seeds",
+			"FAKE_META=secret/metadata/platform/imas/nats-seeds")
+		b, err := cmd.CombinedOutput()
+		out := string(b)
+		if err == nil || !strings.Contains(out, "not added to secret/platform/imas/nats-seeds after 2s") || !strings.Contains(out, "still upgrading") {
+			t.Errorf("err %v, output:\n%s", err, out)
+		}
+	})
 	t.Run("password there", func(t *testing.T) {
 		store := t.TempDir()
 		for f, v := range map[string]string{"exists": "", "version": "7", "prop_valkey_password": "ops-chose-this"} {
@@ -352,19 +428,45 @@ func valkeyBootstrapSnippet(t *testing.T, docs []obj) string {
 	return s[i:j]
 }
 
+// kvHelpersSnippet is the kv-helpers block of the bootstrap Job's
+// prepare script, which the valkey-password block uses.
+func kvHelpersSnippet(t *testing.T, docs []obj) string {
+	t.Helper()
+	s := get(initContainer(t, find(t, docs, "Job", "t-farmer-openbao-bootstrap"), "prepare"), "args", 0).(string)
+	i, j := strings.Index(s, "# kv-helpers: begin"), strings.Index(s, "# kv-helpers: end")
+	if i < 0 || j < i {
+		t.Fatalf("no kv-helpers block in the prepare script:\n%s", s)
+	}
+	return s[i:j]
+}
+
 // fakeBao is a KV v2 path in a directory ($FAKE_KV): "exists", "version"
 // and one prop_<name> file per property. It implements the calls the
-// bootstrap makes, as OpenBao 2.x's CLI does (kv get, kv put and kv patch
-// with check-and-set on $FAKE_PATH, read of its metadata at $FAKE_META),
-// and logs every call to "calls".
+// bootstrap makes (kv get, kv put and kv patch with check-and-set on
+// $FAKE_PATH, read of its metadata at $FAKE_META) with the messages and exit
+// codes of the OpenBao 2.7.1 CLI, the Job's image (2.6.3's CLI says "not
+// present in secret" for a missing field), and logs every call to "calls". Its modes,
+// each a file in $FAKE_KV:
+//   - "upgrading" holds N: the next N calls answer what a KV v2 mount
+//     enabled moments ago answers on an HA standby;
+//   - "race": just before the first write, another writer adds
+//     valkey_password=theirs, so that write's check-and-set is refused;
+//   - "deny": every write is refused (403);
+//   - "deleted": the latest version is soft-deleted (kv get answers "No
+//     data found at").
 const fakeBao = `#!/bin/sh
 set -eu
 kv=$FAKE_KV
 echo "$*" >>"$kv/calls"
+if [ -s "$kv/upgrading" ] && [ "$(cat "$kv/upgrading")" -gt 0 ]; then
+	printf '%s' $(($(cat "$kv/upgrading") - 1)) >"$kv/upgrading"
+	printf 'Error making API request.\n\nCode: 400. Errors:\n\n* Waiting for the primary to upgrade from non-versioned to versioned data. This backend will be unavailable for a brief period and will resume service when the primary is finished.\n' >&2
+	exit 2
+fi
 if [ "$1" = read ]; then
 	# bao read -field=current_version <mount>/metadata/<path>
 	[ "$2" = -field=current_version ] && [ "$3" = "$FAKE_META" ] || exit 64
-	[ -f "$kv/exists" ] || exit 2
+	[ -f "$kv/exists" ] || { echo "No value found at $FAKE_META" >&2; exit 2; }
 	cat "$kv/version"
 	exit 0
 fi
@@ -374,7 +476,9 @@ case "$1" in
 get)
 	field=${2#-field=}
 	[ "$3" = "$FAKE_PATH" ] || exit 65
-	[ -f "$kv/prop_$field" ] || exit 2
+	[ -f "$kv/exists" ] || { echo "No value found at ${FAKE_PATH%%/*}/data/${FAKE_PATH#*/}" >&2; exit 2; }
+	[ ! -f "$kv/deleted" ] || { echo "No data found at ${FAKE_PATH%%/*}/data/${FAKE_PATH#*/}" >&2; exit 2; }
+	[ -f "$kv/prop_$field" ] || { echo "Field \"$field\" not present in map" >&2; exit 1; }
 	cat "$kv/prop_$field"
 	;;
 metadata)
@@ -389,12 +493,27 @@ patch|put)
 	[ "$3" = "$FAKE_PATH" ] || exit 65
 	k=${4%%=*}
 	[ "${4#*=}" = - ] || exit 66
+	if [ -f "$kv/deny" ]; then
+		printf 'Error writing data to %s: Error making API request.\n\nCode: 403. Errors:\n\n* permission denied\n' "$FAKE_PATH" >&2
+		exit 2
+	fi
+	if [ -f "$kv/race" ]; then
+		rm "$kv/race"
+		[ -f "$kv/exists" ] || printf 0 >"$kv/version"
+		touch "$kv/exists"
+		printf theirs >"$kv/prop_valkey_password"
+		printf '%s' $(($(cat "$kv/version") + 1)) >"$kv/version"
+	fi
+	refuse() {
+		printf 'Error writing data to %s: Error making API request.\n\nCode: 400. Errors:\n\n* check-and-set parameter did not match the current version\n' "$FAKE_PATH" >&2
+		exit 2
+	}
 	if [ "$op" = put ]; then
-		[ "$cas" = 0 ] && [ ! -f "$kv/exists" ] || { echo "check-and-set failed" >&2; exit 2; }
+		[ "$cas" = 0 ] && [ ! -f "$kv/exists" ] || refuse
 		touch "$kv/exists"
 		printf 0 >"$kv/version"
 	else
-		[ -f "$kv/exists" ] && [ "$(cat "$kv/version")" = "$cas" ] || { echo "check-and-set failed" >&2; exit 2; }
+		[ -f "$kv/exists" ] && [ "$(cat "$kv/version")" = "$cas" ] || refuse
 	fi
 	cat >"$kv/prop_$k"
 	printf '%s' $(($(cat "$kv/version") + 1)) >"$kv/version"
@@ -482,7 +601,10 @@ func TestOpenBaoValkeyPassword(t *testing.T) {
 	admin.Must(http.MethodPost, "sys/mounts/"+mount, map[string]any{"type": "kv", "options": map[string]any{"version": "2"}})
 	t.Cleanup(func() { admin.Delete("sys/mounts/" + mount) })
 
-	script := valkeyBootstrapSnippet(t, mustRender(t, "--set", "externalSecrets.seedMount="+mount))
+	// The kv helpers the block uses, then the block, as in the prepare
+	// script.
+	docs := mustRender(t, "--set", "externalSecrets.seedMount="+mount)
+	script := kvHelpersSnippet(t, docs) + valkeyBootstrapSnippet(t, docs)
 	run := func() string {
 		t.Helper()
 		cmd := exec.Command("sh", "-ec", script)

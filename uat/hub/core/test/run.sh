@@ -514,6 +514,36 @@ rm -f "$(dep_file imas-core-farmer-saasapi)"
 refuse "progress deadlines: a Deployment that never appears fails, naming it" \
 	'imas-core-farmer-saasapi not created within 3s' deadlines 3
 
+# --- 7e. a failed hook Job's logs: every pod, every container ------------------------
+# hook_job_logs reads each try's pod and each container, init containers
+# included, and goes on past one that never started (UAT HA run
+# 42448281672 kept only the first try's first container).
+mkdir -p "$tmp/jlbin"
+cat >"$tmp/jlbin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+args=()
+while (($#)); do case "$1" in --kubeconfig | -n) shift 2 ;; *) args+=("$1"); shift ;; esac; done
+case "${args[*]}" in
+"get pods -l job-name=boot -o name") printf 'pod/boot-a\npod/boot-b\n' ;;
+"get pod/boot-"?" -o jsonpath={.status.phase}, started {.status.startTime}") echo "Failed, started 05:35" ;;
+"get pod/boot-"?" -o jsonpath={.spec.initContainers[*].name} {.spec.containers[*].name}") echo "prepare nats-trust bootstrap" ;;
+"logs pod/boot-a -c nats-trust --tail=50") echo 'container "nats-trust" is waiting to start: PodInitializing' >&2; exit 1 ;;
+"logs pod/"*) echo "log of ${args[1]} ${args[3]}" ;;
+*) echo "jl stub: ${args[*]}" >&2; exit 2 ;;
+esac
+STUB
+chmod +x "$tmp/jlbin/kubectl"
+jl=$( (
+	# shellcheck source=../lib/common.sh
+	. "$core/lib/common.sh"
+	KUBECONFIG_PATH="$kubeconfig"
+	PATH="$tmp/jlbin:$PATH" hook_job_logs imas-core boot
+) 2>&1)
+grep -qF "log of pod/boot-a prepare" <<<"$jl" && grep -qF "log of pod/boot-a bootstrap" <<<"$jl" &&
+	grep -qF "log of pod/boot-b prepare" <<<"$jl" && grep -qF "log of pod/boot-b nats-trust" <<<"$jl" &&
+	grep -qF "PodInitializing" <<<"$jl" && grep -qF "pod pod/boot-b: Failed, started 05:35" <<<"$jl" &&
+	ok "hook_job_logs: every pod, every container, past one that never started" || bad "hook_job_logs: $jl"
+
 # --- 8. OpenBao ------------------------------------------------------------------------
 bao_bin="${BAO_BIN:-$(command -v bao || true)}"
 if [[ -n "$bao_bin" && -x "$bao_bin" ]] && ! (exec 3<>/dev/tcp/127.0.0.1/8200) 2>/dev/null; then

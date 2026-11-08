@@ -65,6 +65,15 @@ type Server struct {
 	// MetadataWrites counts POST <mount>/metadata/<path> requests;
 	// FailMetadataWrites makes that many of the next ones answer 500.
 	MetadataWrites, FailMetadataWrites int
+	// StaleReadsAfterWrite makes the next that many reads of a path after
+	// each write to it answer 404, as an HA standby does before it has
+	// applied a write it forwarded (UAT HA run 42448281672).
+	StaleReadsAfterWrite int
+	// Upgrading makes that many of the next data requests answer what a
+	// KV v2 mount enabled moments ago answers on a standby.
+	Upgrading int
+
+	stale map[string]int // path -> stale reads left
 }
 
 // Start starts a mock and points the IMAS_TENANTBOX_OPENBAO_* variables
@@ -228,6 +237,17 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	s.mu.Lock()
+	upgrading := s.Upgrading > 0
+	if upgrading {
+		s.Upgrading--
+	}
+	s.mu.Unlock()
+	if upgrading {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"errors": []string{"Waiting for the primary to upgrade from non-versioned to versioned data. This backend will be unavailable for a brief period and will resume service when the primary is finished."}})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.get(w, r, path)
@@ -242,6 +262,11 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Reads++
+	if s.stale[path] > 0 {
+		s.stale[path]--
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	versions := s.paths[path]
 	n := len(versions)
 	if q := r.URL.Query().Get("version"); q != "" {
@@ -291,5 +316,11 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	s.paths[path] = append(s.paths[path], Version{Data: req.Data, Created: time.Now().UTC()})
+	if s.StaleReadsAfterWrite > 0 {
+		if s.stale == nil {
+			s.stale = map[string]int{}
+		}
+		s.stale[path] = s.StaleReadsAfterWrite
+	}
 	json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": len(s.paths[path])}})
 }

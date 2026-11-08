@@ -122,7 +122,13 @@ func (c *obKVClient) ensureKeypair(ctx context.Context, path string) (key *tenan
 			return nil, false, err
 		}
 	}
-	key, found, err = c.readKeypair(ctx, path, 0)
+	// An HA standby can answer 404 right after the write it forwarded
+	// (openbao.AwaitReadBack): read again for a few seconds first.
+	found, err = openbao.AwaitReadBack(ctx, func(ctx context.Context) (bool, error) {
+		var found bool
+		key, found, err = c.readKeypair(ctx, path, 0)
+		return found, err
+	})
 	if err != nil {
 		return nil, false, err
 	}

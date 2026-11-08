@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/yogzblr/imas/internal/config"
+	"github.com/yogzblr/imas/internal/openbao"
 	"github.com/yogzblr/imas/internal/payloadbox"
 	"github.com/yogzblr/imas/internal/pki/tenantboxtest"
 )
@@ -192,6 +193,49 @@ func TestGetTenantX25519PublicKey_ConcurrentBootstrapAgreesOnOneKey(t *testing.T
 		if results[i] != results[0] {
 			t.Errorf("concurrent bootstraps disagreed: %q and %q", results[0], results[i])
 		}
+	}
+}
+
+// HA OpenBao behind a spread Service (UAT HA run 42448281672): a
+// standby answers 404 right after the create it forwarded, and a mount
+// enabled moments ago answers "Waiting for the primary to upgrade". The
+// first create still succeeds, once, with no second keypair.
+func TestEnsureTenantKeySet_HAStandby(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	srv.StaleReadsAfterWrite = 2
+	srv.Upgrading = 2
+	client, err := newTenantBoxClientFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := client.ensureTenantKeySet(t.Context(), "t_1")
+	if err != nil {
+		t.Fatalf("ensureTenantKeySet: %v", err)
+	}
+	if v := srv.Versions(tenantboxtest.TenantPath("t_1")); len(v) != 1 || v[0].Data["pub"] != b64(set.current.pub) {
+		t.Fatalf("%d versions written; want the one it returned", len(v))
+	}
+}
+
+// A mount that is still upgrading when the client stops retrying is a
+// failed write, never a lost check-and-set race.
+func TestWriteKeypair_UpgradingIsNotACASRefusal(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	client, err := newTenantBoxClientFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Upgrading = 1 << 20
+	old := openbao.KVUpgradeWait
+	openbao.KVUpgradeWait = 50 * time.Millisecond
+	t.Cleanup(func() { openbao.KVUpgradeWait = old })
+	pub, priv, _ := box.GenerateKey(rand.Reader)
+	written, err := client.writeKeypair(t.Context(), tenantboxtest.TenantPath("t_1"), pub, priv, 0, nil)
+	if written || !errors.Is(err, ErrTenantBoxWriteFailed) || !openbao.IsKVUpgrading(err) {
+		t.Fatalf("writeKeypair: written %v, err %v", written, err)
+	}
+	if written, err := client.writeFields(t.Context(), "x", map[string]string{"a": "b"}, 0); written || !openbao.IsKVUpgrading(err) {
+		t.Fatalf("writeFields: written %v, err %v", written, err)
 	}
 }
 

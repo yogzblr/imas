@@ -386,6 +386,32 @@ func TestControlPlaneKeygenJob(t *testing.T) {
 	}
 }
 
+// The keygen Job on HA OpenBao behind a spread Service (UAT HA run
+// 42448281672): each keypair it creates reads back 404 twice, as from a
+// standby that hasn't applied the write, and the mount first answers
+// that it is still upgrading. One version of each, all published.
+func TestControlPlaneKeygenJob_HAStandby(t *testing.T) {
+	srv := setupTenantBoxOpenBao(t)
+	InvalidatePlatformBoxKeys()
+	t.Cleanup(InvalidatePlatformBoxKeys)
+	t.Setenv(EnvCPBoxOpenBaoAddr, srv.URL)
+	t.Setenv(EnvCPBoxOpenBaoAllowInsecure, "true")
+	t.Setenv(EnvCPBoxOpenBaoAuthMethod, "token")
+	t.Setenv(EnvCPBoxOpenBaoToken, tenantboxtest.Token)
+	t.Setenv(EnvCPBoxOpenBaoKVPath, tenantboxtest.BasePath)
+	srv.StaleReadsAfterWrite = 2
+	srv.Upgrading = 3
+	var stderr bytes.Buffer
+	if code := RunControlPlaneBoxKeys(nil, &stderr); code != 0 {
+		t.Fatalf("keygen job exit %d: %s", code, stderr.String())
+	}
+	for _, p := range []string{"platform", "saasapi-box", "controlplane-pub"} {
+		if n := len(srv.Versions(tenantboxtest.BasePath + "/" + p)); n != 1 {
+			t.Errorf("%s: %d versions, want 1", p, n)
+		}
+	}
+}
+
 func TestPlatformBoxNotProvisioned(t *testing.T) {
 	setupTenantBoxOpenBao(t)
 	InvalidatePlatformBoxKeys()
