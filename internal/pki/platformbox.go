@@ -106,6 +106,11 @@ func (c *obKVClient) writeFields(ctx context.Context, path string, data map[stri
 		}
 		return true, nil
 	case 400, 409:
+		// A mount still upgrading is a failed write, not a refusal
+		// (openbao.IsKVUpgrading).
+		if openbao.IsKVUpgrading(err) {
+			return false, fmt.Errorf("%w: %w", ErrTenantBoxWriteFailed, err)
+		}
 		return false, nil
 	default:
 		return false, fmt.Errorf("%w: %w", ErrTenantBoxWriteFailed, err)

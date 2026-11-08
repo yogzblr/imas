@@ -358,6 +358,11 @@ func (c *obKVClient) writeKeypair(ctx context.Context, path string, pub, priv *[
 		}
 		return true, nil
 	case http.StatusBadRequest, http.StatusConflict:
+		// Not a check-and-set refusal: the mount was still upgrading
+		// when the client stopped retrying (openbao.IsKVUpgrading).
+		if openbao.IsKVUpgrading(err) {
+			return false, fmt.Errorf("%w: %w", ErrTenantBoxWriteFailed, err)
+		}
 		// The check-and-set guard rejected this write, almost always
 		// because a concurrent create or rotation got there first. Not an
 		// error: the caller re-reads and uses whichever keypair won.
@@ -426,7 +431,13 @@ func (c *obKVClient) ensureTenantKeySet(ctx context.Context, tenantID string) (*
 	}
 	// Written or lost the create race, re-read whichever won rather
 	// than trusting the local copy.
-	set, found, err = c.readKeySet(ctx, path)
+	// An HA standby can answer 404 right after the write it forwarded
+	// (openbao.AwaitReadBack): read again for a few seconds first.
+	found, err = openbao.AwaitReadBack(ctx, func(ctx context.Context) (bool, error) {
+		var found bool
+		set, found, err = c.readKeySet(ctx, path)
+		return found, err
+	})
 	if err != nil {
 		return nil, err
 	}

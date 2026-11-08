@@ -361,6 +361,22 @@ helm_pull_chart() {
 kc() { kubectl --kubeconfig "$KUBECONFIG_PATH" "$@"; }
 hc() { helm --kubeconfig "$KUBECONFIG_PATH" "$@"; }
 
+# hook_job_logs <namespace> <job>: the last 50 lines of every container, init
+# containers included, of every pod of the Job (one pod per try). `kubectl
+# logs job/<job> --all-containers` reads one pod only and stops at the
+# first container that never started, so the three retries of the failed
+# OpenBao bootstrap in UAT HA run 42448281672 went unseen.
+hook_job_logs() {
+	local ns=$1 job=$2 pod c
+	for pod in $(kc -n "$ns" get pods -l "job-name=$job" -o name 2>/dev/null); do
+		log "pod $pod: $(kc -n "$ns" get "$pod" -o jsonpath='{.status.phase}, started {.status.startTime}' 2>/dev/null || true)"
+		for c in $(kc -n "$ns" get "$pod" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}' 2>/dev/null); do
+			log "logs of $pod, container $c"
+			kc -n "$ns" logs "$pod" -c "$c" --tail=50 >&2 2>&1 || true
+		done
+	done
+}
+
 # gen_secret_file <path> [hex bytes]: writes a random hex string (mode 0600)
 # unless the file already exists, so a re-run keeps what the cluster has.
 gen_secret_file() {

@@ -41,7 +41,33 @@ func newStore(t *testing.T, f *natskeystest.Fake, mod func(*Config)) *TransitKey
 	}
 	s.backoff = []time.Duration{time.Millisecond, time.Millisecond}
 	t.Cleanup(func() { s.Close() })
+	// A key that never appears waits out the read-back window: keep it
+	// short here.
+	old := openbao.ReadBackWindow
+	openbao.ReadBackWindow = 500 * time.Millisecond
+	t.Cleanup(func() { openbao.ReadBackWindow = old })
 	return s
+}
+
+// An HA standby answers 404 to a read straight after the create it
+// forwarded (UAT HA run 42448281672): EnsureKeyPair reads again rather
+// than fail, and creates once.
+func TestEnsureKeyPairStandbyLag(t *testing.T) {
+	f := natskeystest.New(t)
+	s := newStore(t, f, nil)
+	// The first 404 is the genuine miss; the next two are the lag.
+	f.FailNext(natskeystest.OpReadKey, 404, 3)
+	kp, err := s.EnsureKeyPair(t.Context(), "nats-operator", nkeys.PrefixByteOperator)
+	if err != nil {
+		t.Fatalf("EnsureKeyPair: %v", err)
+	}
+	if got := f.Count(natskeystest.OpCreateKey); got != 1 {
+		t.Fatalf("creates = %d, want 1", got)
+	}
+	want, _ := nkeys.Encode(nkeys.PrefixByteOperator, f.PrivateKey("nats-operator", 1).Public().(ed25519.PublicKey))
+	if got, _ := kp.PublicKey(); got != string(want) {
+		t.Fatalf("got %s, want %s", got, want)
+	}
 }
 
 func mustPair(t *testing.T, s *TransitKeyStore, name string, prefix Prefix) nkeys.KeyPair {

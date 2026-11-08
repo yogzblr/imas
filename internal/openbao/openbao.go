@@ -16,7 +16,11 @@
 //     with the pod's service account JWT), re-logging in once less than
 //     20% of the login's lease remains;
 //   - the optional CA bundle that verifies OpenBao's own TLS;
-//   - a 30 second timeout and no retries, as before the migration;
+//   - a 30 second timeout and no retries, as before the migration, with
+//     one exception: a KV v2 mount's "upgrading from non-versioned data"
+//     400, which refuses a request before handling it, is retried for up
+//     to a minute (standby.go). AwaitReadBack is there for callers that
+//     read back their own write, which an HA standby can answer 404;
 //   - the X-Vault-Namespace header, when <prefix>NAMESPACE is set;
 //   - the configured host only: every request, a followed redirect
 //     included, goes to the scheme, host and port of <prefix>ADDR or is
@@ -393,7 +397,11 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	if err != nil {
 		return nil, err
 	}
-	return do(ctx, c.api, token, method, path, query, body)
+	// The one retry: a KV v2 mount still upgrading (standby.go) refused
+	// the request before handling it.
+	return retryKVUpgrade(ctx, func() (*api.Secret, error) {
+		return do(ctx, c.api, token, method, path, query, body)
+	})
 }
 
 // ReadRaw is GET /v1/<path> for endpoints that answer with something

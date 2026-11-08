@@ -253,7 +253,11 @@ file; it is never an environment variable, a Helm value or a ConfigMap.
   install and upgrade: 32 random bytes, base64 without padding, written only
   when the property is absent, with check-and-set (`kv put -cas=0` for a new
   path, `kv patch -cas=<current version>` next to the seeds), so it never
-  overwrites a password or touches a seed. The Job runs only with the
+  overwrites a password or touches a seed. On HA OpenBao it waits out a
+  mount that still answers "upgrading from non-versioned data" and re-reads
+  after a check-and-set refusal (another writer, or a standby a moment
+  behind), for up to 120 s; any other error it prints as OpenBao gave it,
+  and a failed Job is kept with every pod's logs. The Job runs only with the
   bundled OpenBao and a bootstrap token. With an external OpenBao, ops
   writes it once, the same way:
 

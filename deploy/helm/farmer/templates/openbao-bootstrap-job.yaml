@@ -74,14 +74,16 @@ metadata:
     # Before the publish Job (weight 10), which logs in with a role made here.
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "0"
+    # A failed run is kept, every pod and its logs, until the next one
+    # replaces it: no ttlSecondsAfterFinished, which deleted the only
+    # record of UAT HA run 42448281672's failed retries an hour later.
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     argocd.argoproj.io/hook: PostSync
     argocd.argoproj.io/sync-wave: "0"
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
   activeDeadlineSeconds: {{ $bs.activeDeadlineSeconds }}
-  ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
@@ -127,20 +129,83 @@ spec:
               # run re-applies policies and roles. Never writes NATS
               # seeds: there are none to write (only Valkey's password,
               # next to them, when absent; below).
-              until bao status >/dev/null 2>&1; do echo "waiting for OpenBao at $BAO_ADDR"; sleep 3; done
+
+              # kv-helpers: begin
+              # HA OpenBao behind this Service (UAT HA run 42448281672): a
+              # standby answers some requests itself. Nothing is written
+              # until a node is active; a KV v2 mount enabled moments ago
+              # answers "Waiting for the primary to upgrade from
+              # non-versioned to versioned data" on a standby for a second
+              # or two; a read right after a write can miss it. These wait
+              # those out, up to kv_wait seconds, and print any other error
+              # as OpenBao gave it.
+              kv_wait=120
+              err="$(mktemp)"
+              # kv_upgrading: the last command's stderr ($err) is KV v2's
+              # "upgrading from non-versioned data" answer.
+              kv_upgrading() { grep -q 'non-versioned to versioned data' "$err"; }
+              past() { [ "$(date +%s)" -ge "$1" ]; }
+              # kv-helpers: end
+              # OpenBao answers unsealed and, when HA, has an active node.
+              bao_ready() {
+                bao status >/dev/null 2>&1 || return 1
+                [ "$(bao read -field=ha_enabled sys/leader 2>/dev/null)" = false ] && return 0
+                [ -n "$(bao read -field=leader_address sys/leader 2>/dev/null)" ]
+              }
+              until bao_ready; do echo "waiting for OpenBao at $BAO_ADDR (unsealed, with an active node)"; sleep 3; done
               if ! bao token lookup >/dev/null 2>&1; then
                 echo "the bootstrap token in Secret {{ default $jobName $bs.tokenSecretName }} is not valid (revoked by an earlier run?): delete the Secret, or put a fresh root token from the recovery quorum in it (README.md, \"OpenBao bootstrap token\")" >&2
                 exit 1
               fi
 
               has_mount() { bao secrets list | grep -q "^$1/ "; }
-              has_mount transit || bao secrets enable -path=transit transit
+              # enable_mount PATH ARGS...: `bao secrets enable -path=PATH
+              # ARGS...` unless PATH is mounted. "path is already in use"
+              # (another writer, or a standby's mount list a moment behind)
+              # is success.
+              enable_mount() {
+                p=$1
+                shift
+                has_mount "$p" && return 0
+                bao secrets enable -path="$p" "$@" 2>"$err" && return 0
+                if grep -q 'path is already in use' "$err"; then
+                  echo "$p/ is already enabled"
+                  return 0
+                fi
+                cat "$err" >&2
+                echo "could not enable the secrets engine at $p/ (above)" >&2
+                return 1
+              }
+              # enable_kv PATH: KV version 2 at PATH, then waits (up to
+              # kv_wait) until it no longer answers that it is upgrading.
+              # Through a Service spread over HA nodes one clean answer
+              # doesn't prove every standby is done, so the KV calls below
+              # wait out the same answer too.
+              enable_kv() {
+                enable_mount "$1" -version=2 kv || return 1
+                if ! bao read -field=options "sys/mounts/$1" 2>"$err" | grep -q 'version:2'; then
+                  cat "$err" >&2
+                  echo "$1/ is mounted, but not as KV version 2: fix or remove that mount (docs/OPENBAO-RUNBOOK.md)" >&2
+                  return 1
+                fi
+                kdeadline=$(($(date +%s) + kv_wait))
+                until bao kv list "$1/" >/dev/null 2>"$err" || ! kv_upgrading; do
+                  if past "$kdeadline"; then
+                    cat "$err" >&2
+                    echo "KV mount $1/ still answers that it is upgrading after ${kv_wait}s" >&2
+                    return 1
+                  fi
+                  echo "KV mount $1/ is still upgrading; waiting"
+                  sleep 1
+                done
+              }
+              enable_mount transit transit
               # Gateway JWT key (farmer signs). The NATS keys are created by
               # nats-trust (platform) and farmer (tenants), hardened.
               bao read transit/keys/{{ $ob.gateway.keyName }} >/dev/null 2>&1 \
                 || bao write -f transit/keys/{{ $ob.gateway.keyName }} type=ed25519
               {{- range $kvMounts }}
-              has_mount {{ . }} || bao secrets enable -path={{ . }} -version=2 kv
+              enable_kv {{ . }}
               {{- end }}
               {{- if .Values.valkey.auth.enabled }}
 
@@ -152,29 +217,70 @@ spec:
               # kept and a concurrent writer wins. The value goes over stdin
               # and is never printed. ESO (or the operator) copies it into
               # Secret {{ .Values.valkey.auth.secretName }}.
+              # Every answer is told apart: absent (add it), still
+              # upgrading (wait), a check-and-set refusal (re-read: a
+              # concurrent writer, an earlier try whose answer was lost, or
+              # a read that missed a write, so whatever is there now
+              # decides), anything else (fail, with OpenBao's error). The
+              # waits end after kv_wait seconds.
               vkv={{ printf "%s/%s" $es.seedMount (trimAll "/" $es.seedPath) | quote }}
               vmeta={{ printf "%s/metadata/%s" $es.seedMount (trimAll "/" $es.seedPath) | quote }}
-              if bao kv get -field=valkey_password "$vkv" >/dev/null 2>&1; then
-                echo "valkey_password exists in $vkv: kept"
-              else
-                if vver="$(bao read -field=current_version "$vmeta" 2>/dev/null)"; then
-                  vop="patch -cas=$vver"
-                else
-                  vop="put -cas=0"
+              vdeadline=$(($(date +%s) + kv_wait))
+              while :; do
+                if bao kv get -field=valkey_password "$vkv" >/dev/null 2>"$err"; then
+                  echo "valkey_password exists in $vkv: kept"
+                  break
                 fi
-                # $vop is two words on purpose.
-                # shellcheck disable=SC2086
-                if ! head -c 32 /dev/urandom | base64 | tr -d '=\n' | bao kv $vop "$vkv" valkey_password=- >/dev/null; then
-                  echo "could not add valkey_password to $vkv (another writer, or its latest version deleted?): nothing was overwritten; see docs/OPENBAO-RUNBOOK.md, 5.6" >&2
+                if kv_upgrading; then
+                  vwhy="$vkv answers that its mount is still upgrading"
+                elif grep -qE '^No value found at|not present in secret' "$err"; then
+                  vop=""
+                  if vver="$(bao read -field=current_version "$vmeta" 2>"$err")"; then
+                    vop="patch -cas=$vver"
+                  elif grep -q '^No value found at' "$err"; then
+                    vop="put -cas=0"
+                  elif kv_upgrading; then
+                    vwhy="$vmeta answers that its mount is still upgrading"
+                  else
+                    cat "$err" >&2
+                    echo "could not read $vmeta (above): valkey_password not added, nothing was written" >&2
+                    exit 1
+                  fi
+                  if [ -n "$vop" ]; then
+                    # $vop is two words on purpose.
+                    # shellcheck disable=SC2086
+                    if head -c 32 /dev/urandom | base64 | tr -d '=\n' | bao kv $vop "$vkv" valkey_password=- >/dev/null 2>"$err"; then
+                      echo "valkey_password generated in $vkv"
+                      break
+                    fi
+                    if kv_upgrading; then
+                      vwhy="$vkv answers that its mount is still upgrading"
+                    elif grep -q 'check-and-set parameter did not match' "$err"; then
+                      vwhy="check-and-set refused 'kv $vop' (another writer, or a read that missed a write); re-reading"
+                    else
+                      cat "$err" >&2
+                      echo "could not write valkey_password to $vkv with 'kv $vop' (above; its latest version deleted?): nothing was overwritten; see docs/OPENBAO-RUNBOOK.md, 5.6" >&2
+                      exit 1
+                    fi
+                  fi
+                else
+                  cat "$err" >&2
+                  echo "could not read $vkv (above): valkey_password not added, nothing was written" >&2
                   exit 1
                 fi
-                echo "valkey_password generated in $vkv"
-              fi
+                if past "$vdeadline"; then
+                  cat "$err" >&2
+                  echo "valkey_password not added to $vkv after ${kv_wait}s; last: $vwhy. Nothing was overwritten; see docs/OPENBAO-RUNBOOK.md, 5.6" >&2
+                  exit 1
+                fi
+                echo "valkey_password: $vwhy; trying again"
+                sleep 1
+              done
               # valkey-password: end
               {{- end }}
               {{- if $needPKI }}
 
-              has_mount {{ $pki }} || bao secrets enable -path={{ $pki }} pki
+              enable_mount {{ $pki }} pki
               bao secrets tune -max-lease-ttl=87600h {{ $pki }}
               if ! bao read -field=certificate {{ $pki }}/cert/ca 2>/dev/null | grep -q 'BEGIN CERTIFICATE'; then
                 bao write -field=certificate {{ $pki }}/root/generate/internal \
@@ -182,8 +288,17 @@ spec:
               fi
               {{- end }}
 
-              bao auth list | grep -q "^{{ .Values.openbaoClient.k8sMount }}/ " \
-                || bao auth enable -path={{ .Values.openbaoClient.k8sMount }} kubernetes
+              if ! bao auth list | grep -q "^{{ .Values.openbaoClient.k8sMount }}/ "; then
+                if ! bao auth enable -path={{ .Values.openbaoClient.k8sMount }} kubernetes 2>"$err"; then
+                  if grep -q 'path is already in use' "$err"; then
+                    echo "auth method {{ .Values.openbaoClient.k8sMount }}/ is already enabled"
+                  else
+                    cat "$err" >&2
+                    echo "could not enable the kubernetes auth method at {{ .Values.openbaoClient.k8sMount }}/ (above)" >&2
+                    exit 1
+                  fi
+                fi
+              fi
               bao write auth/{{ .Values.openbaoClient.k8sMount }}/config kubernetes_host=https://kubernetes.default.svc
 
               # Every policy, the ephemeral imas-nats-bootstrap included
@@ -307,7 +422,13 @@ spec:
                 echo "no bootstrap token: roles not written; the trust ConfigMap was checked"
                 exit 0
               fi
-              until bao status >/dev/null 2>&1; do echo "waiting for OpenBao at $BAO_ADDR"; sleep 3; done
+              # As in prepare: unsealed and, when HA, with an active node.
+              bao_ready() {
+                bao status >/dev/null 2>&1 || return 1
+                [ "$(bao read -field=ha_enabled sys/leader 2>/dev/null)" = false ] && return 0
+                [ -n "$(bao read -field=leader_address sys/leader 2>/dev/null)" ]
+              }
+              until bao_ready; do echo "waiting for OpenBao at $BAO_ADDR (unsealed, with an active node)"; sleep 3; done
 
               {{- if $needPKI }}
               {{- if eq .Values.tls.mode "openbao" }}
