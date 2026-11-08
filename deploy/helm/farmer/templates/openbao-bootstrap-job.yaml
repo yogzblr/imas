@@ -233,7 +233,9 @@ spec:
                 fi
                 if kv_upgrading; then
                   vwhy="$vkv answers that its mount is still upgrading"
-                elif grep -qE '^No value found at|not present in secret' "$err"; then
+                # Absent: no path, or a path without the field ("not
+                # present in map" from the 2.7 CLI, "in secret" from 2.6).
+                elif grep -qE '^No value found at|^Field "valkey_password" not present in' "$err"; then
                   vop=""
                   if vver="$(bao read -field=current_version "$vmeta" 2>"$err")"; then
                     vop="patch -cas=$vver"
@@ -263,6 +265,11 @@ spec:
                       exit 1
                     fi
                   fi
+                elif grep -q '^No data found at' "$err"; then
+                  # The path's latest version is (soft) deleted: writing
+                  # next to it could drop the seeds, so stop and say so.
+                  echo "the latest version of $vkv is deleted: undelete it (bao kv undelete) or write the seeds again, then re-run; valkey_password not added, nothing was overwritten; see docs/OPENBAO-RUNBOOK.md, 5.6" >&2
+                  exit 1
                 else
                   cat "$err" >&2
                   echo "could not read $vkv (above): valkey_password not added, nothing was written" >&2

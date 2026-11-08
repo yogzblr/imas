@@ -375,6 +375,16 @@ func TestValkeyPasswordBootstrap(t *testing.T) {
 			t.Errorf("err %v, output:\n%s", err, out)
 		}
 	})
+	t.Run("latest version deleted", func(t *testing.T) {
+		store := t.TempDir()
+		set(t, store, map[string]string{"exists": "", "version": "2", "deleted": "", "prop_sys_user": "SUSEED"})
+		out, err := try(t, store)
+		if err == nil || !strings.Contains(out, "latest version of secret/platform/imas/nats-seeds is deleted") ||
+			!strings.Contains(out, "nothing was overwritten") || strings.Contains(read(t, store, "calls"), "patch") ||
+			strings.Contains(read(t, store, "calls"), "put") {
+			t.Errorf("err %v, output:\n%s\ncalls:\n%s", err, out, read(t, store, "calls"))
+		}
+	})
 	t.Run("still upgrading at the deadline", func(t *testing.T) {
 		store := t.TempDir()
 		set(t, store, map[string]string{"upgrading": "1000"})
@@ -432,15 +442,18 @@ func kvHelpersSnippet(t *testing.T, docs []obj) string {
 
 // fakeBao is a KV v2 path in a directory ($FAKE_KV): "exists", "version"
 // and one prop_<name> file per property. It implements the calls the
-// bootstrap makes, with OpenBao 2.6.3's CLI messages and exit codes (kv
-// get, kv put and kv patch with check-and-set on $FAKE_PATH, read of its
-// metadata at $FAKE_META), and logs every call to "calls". Its modes,
+// bootstrap makes (kv get, kv put and kv patch with check-and-set on
+// $FAKE_PATH, read of its metadata at $FAKE_META) with the messages and exit
+// codes of the OpenBao 2.7.1 CLI, the Job's image (2.6.3's CLI says "not
+// present in secret" for a missing field), and logs every call to "calls". Its modes,
 // each a file in $FAKE_KV:
 //   - "upgrading" holds N: the next N calls answer what a KV v2 mount
 //     enabled moments ago answers on an HA standby;
 //   - "race": just before the first write, another writer adds
 //     valkey_password=theirs, so that write's check-and-set is refused;
-//   - "deny": every write is refused (403).
+//   - "deny": every write is refused (403);
+//   - "deleted": the latest version is soft-deleted (kv get answers "No
+//     data found at").
 const fakeBao = `#!/bin/sh
 set -eu
 kv=$FAKE_KV
@@ -464,7 +477,8 @@ get)
 	field=${2#-field=}
 	[ "$3" = "$FAKE_PATH" ] || exit 65
 	[ -f "$kv/exists" ] || { echo "No value found at ${FAKE_PATH%%/*}/data/${FAKE_PATH#*/}" >&2; exit 2; }
-	[ -f "$kv/prop_$field" ] || { echo "Field \"$field\" not present in secret" >&2; exit 1; }
+	[ ! -f "$kv/deleted" ] || { echo "No data found at ${FAKE_PATH%%/*}/data/${FAKE_PATH#*/}" >&2; exit 2; }
+	[ -f "$kv/prop_$field" ] || { echo "Field \"$field\" not present in map" >&2; exit 1; }
 	cat "$kv/prop_$field"
 	;;
 metadata)
@@ -587,7 +601,10 @@ func TestOpenBaoValkeyPassword(t *testing.T) {
 	admin.Must(http.MethodPost, "sys/mounts/"+mount, map[string]any{"type": "kv", "options": map[string]any{"version": "2"}})
 	t.Cleanup(func() { admin.Delete("sys/mounts/" + mount) })
 
-	script := valkeyBootstrapSnippet(t, mustRender(t, "--set", "externalSecrets.seedMount="+mount))
+	// The kv helpers the block uses, then the block, as in the prepare
+	// script.
+	docs := mustRender(t, "--set", "externalSecrets.seedMount="+mount)
+	script := kvHelpersSnippet(t, docs) + valkeyBootstrapSnippet(t, docs)
 	run := func() string {
 		t.Helper()
 		cmd := exec.Command("sh", "-ec", script)
