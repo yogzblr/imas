@@ -1,0 +1,5 @@
+change: W16: HA5 (lost event) compares the repaired bus loader with the other loaders' index as it is when checked, not as it was before the block lifted. Run 3 on v0.1.0-rc.23 (run 42542177384) failed HA5 with the loader repaired: 6 of 6 accounts, 2 pushes, and the following step passed (every bus node refused the revoked sprout and accepted the new tenant's); only its index token differed from the stored one. Every index write is a fresh random token, and a loader that applies a change by its event moves its token only at its next timer pass (30 s ±20%). HA5's two writes (the new account at 02:41:15, the revocation at 02:41:36) came 21 s apart, so the other loaders could agree on the first while the repaired loader went straight to the second. No product code changed; checked by vet and a compile of the uat tests (they run only against a UAT environment).
+item: P24
+action: update
+next-append: **W16 (2026-11-09):** HA5's repair check no longer compares with a token stored before the block lifted (a race with the index's second write); it compares with the other loaders' current index.
+pr: 331

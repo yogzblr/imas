@@ -562,19 +562,13 @@ func TestHAHA5_LostEvent(t *testing.T) {
 	sc.NoErr(err, "waiting for offboarded")
 
 	sc.Step("the other loaders take the change; %s's does not", victim.Name)
-	var token string
-	var target int
 	err = retryFor(ctx, 2*time.Minute, 2*time.Second, func() error {
-		token, target = "", 0
-		for _, p := range others {
-			st, err := h.LoaderStatusOf(ctx, p)
-			if err != nil {
-				return err
-			}
-			if st.LastIndexToken == base.LastIndexToken || (token != "" && st.LastIndexToken != token) || st.Applied != st.Target {
-				return fmt.Errorf("%s: index %q, %d of %d", p.Name, st.LastIndexToken, st.Applied, st.Target)
-			}
-			token, target = st.LastIndexToken, st.Target
+		token, _, err := agreedIndex(ctx, h, others)
+		if err != nil {
+			return err
+		}
+		if token == base.LastIndexToken {
+			return fmt.Errorf("the other loaders still hold index %q", token)
 		}
 		return nil
 	})
@@ -592,13 +586,24 @@ func TestHAHA5_LostEvent(t *testing.T) {
 	lifted := time.Now()
 	bound := interval*6/5 + 30*time.Second
 	err = retryFor(ctx, bound, time.Second, func() error {
+		// Compare with the others' index as it is now, not as it was before
+		// the block lifted. Every index write is a fresh random token, and a
+		// loader that applies a change by its event moves its token only at
+		// its next timer pass, so the others can agree on a token the index
+		// has already moved past (Run 3 on rc.23: the new account and the
+		// revocation wrote the index 21 s apart, under one 30 s period),
+		// and the repaired loader goes straight to the latest one.
+		want, wantTarget, err := agreedIndex(ctx, h, others)
+		if err != nil {
+			return err
+		}
 		st, err := h.LoaderStatusOf(ctx, victim)
 		if err != nil {
 			return err
 		}
-		if st.LastIndexToken != token || st.Applied != st.Target || st.Target != target || st.Pushes() < base.Pushes()+2 {
-			return fmt.Errorf("index %q (want %q), %d of %d accounts (want %d), %d pushes since the block",
-				st.LastIndexToken, token, st.Applied, st.Target, target, st.Pushes()-base.Pushes())
+		if st.LastIndexToken != want || st.Applied != st.Target || st.Target != wantTarget || st.Pushes() < base.Pushes()+2 {
+			return fmt.Errorf("index %q (the others agree on %q), %d of %d accounts (the others hold %d), %d pushes since the block",
+				st.LastIndexToken, want, st.Applied, st.Target, wantTarget, st.Pushes()-base.Pushes())
 		}
 		return nil
 	})
@@ -611,6 +616,25 @@ func TestHAHA5_LostEvent(t *testing.T) {
 	sc.Step("every bus node refuses the revoked sprout and accepts the new tenant's")
 	expectBus(t, sc, h, revoked, harness.ErrBusRefused)
 	expectBus(t, sc, h, fresh, nil)
+}
+
+// agreedIndex reads every loader in pods and returns the index token they
+// all hold and their target account count, or an error naming the first
+// one that disagrees or has not applied its whole target.
+func agreedIndex(ctx context.Context, h *harness.HA, pods []harness.Pod) (string, int, error) {
+	token, target := "", 0
+	for i, p := range pods {
+		st, err := h.LoaderStatusOf(ctx, p)
+		if err != nil {
+			return "", 0, err
+		}
+		if st.Applied != st.Target || (i > 0 && (st.LastIndexToken != token || st.Target != target)) {
+			return "", 0, fmt.Errorf("%s: index %q, %d of %d accounts (the loaders before it: index %q, %d accounts)",
+				p.Name, st.LastIndexToken, st.Applied, st.Target, token, target)
+		}
+		token, target = st.LastIndexToken, st.Target
+	}
+	return token, target, nil
 }
 
 // enrolIn mints a key in a scratch tenant and enrols a sprout in it.
