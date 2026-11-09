@@ -2,3 +2,4 @@ change: W17: the UAT harness holds a kube tunnel's shared lock (W11) for every s
 item: P24
 action: update
 next-append: **W17 (2026-11-09):** HA6 on rc.23 failed on the test channel, not the product: the supervisor reopened the core kube tunnel under bind-tenant.sh, which held no tunnel lock. Fixed in the harness.
+pr: 332
