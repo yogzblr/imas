@@ -1,1 +1,2 @@
 change: W19: main's Test job failed from 2026-11-09 07:37Z (run 42580518154, on a docs-only merge) when GitHub's ubuntu-latest moved from ubuntu-24.04 to ubuntu-26.04. uat/k0s/tests/test-k0s.sh matched the UAT CA's subject in `openssl x509 -text` output as "CN = imas UAT CA ...", a spelling the newer OpenSSL does not print. It now reads the subject with `-subject -nameopt RFC2253` ("CN=..."), the same in every OpenSSL version. Test only; no other UAT or packaging script depends on that spelling (checked: the others match CA:TRUE or a bare substring).
+pr: 334
