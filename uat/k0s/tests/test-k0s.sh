@@ -472,7 +472,11 @@ cmp -s "$CA" "$CASE/state/core-secret.crt" && pass || fail "core Secret holds an
 ext=$(openssl x509 -in "$CA" -noout -text 2>/dev/null)
 [[ $ext == *"CA:TRUE"* ]] && pass || fail "CA cert is not a CA"
 [[ $ext == *"Certificate Sign"* ]] && pass || fail "CA cert lacks keyCertSign"
-[[ $ext == *"CN = imas UAT CA ab12cd34"* ]] && pass || fail "CA subject lacks the run id"
+# The subject in RFC 2253 form: -text spells it "CN = x" up to OpenSSL 3.0
+# (ubuntu-24.04) and differently in later releases (ubuntu-26.04, CI from
+# 2026-11-09), so match a form every version prints the same.
+subj=$(openssl x509 -in "$CA" -noout -subject -nameopt RFC2253 2>/dev/null)
+[[ $subj == *"CN=imas UAT CA ab12cd34"* ]] && pass || fail "CA subject lacks the run id ($subj)"
 [[ $ext == *"prime256v1"* || $ext == *"P-256"* ]] && pass || fail "CA key is not P-256"
 openssl verify -CAfile "$CA" "$CA" >/dev/null 2>&1 && pass || fail "CA cert does not verify as self-signed"
 [[ $(stat -c %a "$CA") == 644 ]] && pass || fail "uat-ca.crt mode"
