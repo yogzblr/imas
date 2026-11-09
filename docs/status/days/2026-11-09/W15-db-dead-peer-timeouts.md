@@ -2,3 +2,4 @@ change: W15: farmer and saasapi bound every wait on a database peer that died wi
 item: P24
 action: update
 next-append: **W15 (2026-11-09):** Run 3 on rc.23 passed setup and HA1, HA3 and HA4; HA2 core failed its 60 s window (cmd.run 2m17s) because farmer's and saasapi's DB connections had no dial, read or write timeout, so connections to the stopped node's HAProxy pod hung. Fixed: driver timeouts and pool idle and lifetime limits on both. HA5 failed on a test race (W16). Re-dispatch Run 3 on the next rc.
+pr: 330
