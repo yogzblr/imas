@@ -2,3 +2,4 @@ change: W16: HA5 (lost event) compares the repaired bus loader with the other lo
 item: P24
 action: update
 next-append: **W16 (2026-11-09):** HA5's repair check no longer compares with a token stored before the block lifted (a race with the index's second write); it compares with the other loaders' current index.
+pr: 331
