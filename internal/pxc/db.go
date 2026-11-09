@@ -38,12 +38,23 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 	if err := mysqldsn.RequireUTC("pxc: IMAS_PXC_DSN (pxcdsn)", dsn); err != nil {
 		return nil, err
 	}
+	// Bound every wait on a database peer that died without closing its
+	// connections (mysqldsn.WithIOTimeouts, ConfigurePool; UAT HA2).
+	dsn, err := mysqldsn.WithIOTimeouts("pxc: IMAS_PXC_DSN (pxcdsn)", dsn)
+	if err != nil {
+		return nil, err
+	}
 	d, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pxc: opening farmer schema: %w", err)
 	}
+	sqlDB, err := d.DB()
+	if err != nil {
+		return nil, fmt.Errorf("pxc: the farmer schema's connection pool: %w", err)
+	}
+	mysqldsn.ConfigurePool(sqlDB)
 	return d, nil
 }
 
