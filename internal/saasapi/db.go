@@ -31,12 +31,23 @@ func OpenDB(dsn string) (*gorm.DB, error) {
 	if err := checkDSN(dsn); err != nil {
 		return nil, err
 	}
+	// Bound every wait on a database peer that died without closing its
+	// connections (mysqldsn.WithIOTimeouts, ConfigurePool; UAT HA2).
+	dsn, err := mysqldsn.WithIOTimeouts("saasapi: SAASAPI_DSN", dsn)
+	if err != nil {
+		return nil, err
+	}
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("saasapi: opening saas schema: %w", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("saasapi: the saas schema's connection pool: %w", err)
+	}
+	mysqldsn.ConfigurePool(sqlDB)
 	return db, nil
 }
 
