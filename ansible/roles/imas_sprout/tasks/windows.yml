@@ -63,7 +63,18 @@
     path: "{{ _imas_sprout_installer_dir }}"
     state: directory
 
-# Downloaded once per version: an existing file is kept.
+# Downloaded once per version: an existing file is kept. win_get_url with
+# force: false still sends a HEAD for the file's Last-Modified when the file
+# exists, and Buildkite's NuGet flat container answers HEAD with 404 (GET
+# works), so a second run of the role failed (UAT, 2026-11-09). Skip the
+# download when the file is there; with a checksum given, win_get_url still
+# checks the file against it.
+- name: Check for the downloaded imas-sprout installer
+  ansible.windows.win_stat:
+    path: "{{ _imas_sprout_download_file }}"
+    get_checksum: false
+  register: _imas_sprout_download_stat
+
 - name: Download the imas-sprout installer
   ansible.windows.win_get_url:
     url: "{{ _imas_sprout_download_url }}"
@@ -71,6 +82,7 @@
     force: false
     checksum: "{{ imas_sprout_windows_checksum if imas_sprout_windows_checksum | length > 0 else omit }}"
     checksum_algorithm: sha256
+  when: not _imas_sprout_download_stat.stat.exists or imas_sprout_windows_checksum | length > 0
 
 - name: Extract the MSI from the NuGet package
   ansible.windows.win_powershell:
