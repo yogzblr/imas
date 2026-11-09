@@ -2,3 +2,4 @@ change: W18: the imas_sprout role's Windows install can run a second time. The i
 item: P24
 action: update
 next-append: **W18 (2026-11-09):** a second run of the imas_sprout role on Windows failed on Buildkite's 404 answer to HEAD for the nupkg; it now skips a download it already has.
+pr: 333
