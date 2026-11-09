@@ -695,8 +695,10 @@ func (h *HA) HelmUpgrade(ctx context.Context, hub string, sets ...string) error 
 		out, err = h.Helm(ctx, args)
 	} else {
 		// A 20-minute call on one node's kube tunnel: on one that answers
-		// (W12).
-		preSelect(ctx, hub, kubeconfig)
+		// (W12), holding its shared lock so it is not reopened under the
+		// upgrade (W11).
+		release := onKubeTunnel(ctx, hub, kubeconfig, true)
+		defer release()
 		cmd := exec.CommandContext(ctx, "helm", args...)
 		cmd.WaitDelay = time.Second
 		out, err = cmd.CombinedOutput()
@@ -719,7 +721,8 @@ func (h *HA) RunCoreCheck(ctx context.Context) ([]byte, error) {
 	if h.Script != nil {
 		return h.Script(ctx, h.Cfg.CoreCheck, args)
 	}
-	preSelect(ctx, "core", h.Cfg.CoreKubeconfig)
+	release := onKubeTunnel(ctx, "core", h.Cfg.CoreKubeconfig, true)
+	defer release()
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, h.Cfg.CoreCheck, args...)
 	cmd.Stdout, cmd.Stderr = &out, &out

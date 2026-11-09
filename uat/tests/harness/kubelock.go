@@ -15,8 +15,10 @@ import (
 // the reopen, got "connection refused" at 06:55:41Z. Now each kube tunnel
 // has a reader/writer lock, <access dir>/locks/kube-<port>.lock (flock): a
 // reopen takes it exclusively (uat/access/channel.sh ch_kube_lock), and
-// every kubectl and acceptance.sh call of the harness takes it shared for
-// its whole run, so a reopen waits for the calls in flight and a call
+// every kubectl call of the harness, and every script or helm call that
+// runs kubectl (acceptance.sh, bind-tenant.sh, operator-release.sh, the
+// core check, HA3's helm upgrade; onKubeTunnel), takes it shared for its
+// whole run, so a reopen waits for the calls in flight and a call
 // waits for a reopen in progress. While a reopen runs, the channel also
 // writes <access dir>/reopening/<vm>-kube; a single kubectl call that
 // still gets "connection refused" on a tunnel being reopened is tried
@@ -76,6 +78,22 @@ func holdKubeTunnel(ctx context.Context, kubeconfig string) func() {
 		return func() {}
 	}
 	return release
+}
+
+// onKubeTunnel readies a script or helm call that runs kubectl on a hub's
+// kube tunnel and is not retried: on an HA hub it first points kubeconfig
+// at a node that answers (preSelect, W12), then holds that tunnel's shared
+// lock (W11) until the returned release is called, so the supervisor
+// cannot reopen the tunnel under the call. In that order: kube-select may
+// reopen a tunnel itself, which needs the lock exclusively. UAT Run 3 on
+// rc.23: HA6's bind-tenant.sh, which held no lock, got "connection
+// refused" on uat-core-2's kube tunnel at 02:47:11Z, two seconds into the
+// supervisor's reopen of it.
+func onKubeTunnel(ctx context.Context, hub, kubeconfig string, ha bool) func() {
+	if ha {
+		preSelect(ctx, hub, kubeconfig)
+	}
+	return holdKubeTunnel(ctx, kubeconfig)
 }
 
 // kubeReopening reports whether a kube tunnel is being reopened (a marker
