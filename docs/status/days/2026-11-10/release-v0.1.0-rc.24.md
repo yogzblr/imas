@@ -2,3 +2,4 @@ change: Release v0.1.0-rc.24 (tag on b99e2952: PR 330's DB dead-peer timeouts, 3
 item: P24
 action: update
 next-append: **rc.24 (2026-11-10):** Azure HA UAT (Run 3, tier ha, hub_nodes 3) passed on v0.1.0-rc.24: HA1 to HA6, 6 pass 0 fail (run 42750029562).
+pr: 337
