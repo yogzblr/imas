@@ -55,6 +55,10 @@ func (f *Fleet) PostAlteredRelease(ctx context.Context, version string) (Operato
 	if f.OperatorExec != nil {
 		stdout, stderr, runErr = f.OperatorExec(cctx, args)
 	} else {
+		// Its kubectl calls hold the core kube tunnel's shared lock, on a
+		// node that answers (as CoreProbe).
+		release := onKubeTunnel(cctx, "core", b.Kubeconfig, f.Env.UAT.Core.HA())
+		defer release()
 		var so, se bytes.Buffer
 		cmd := exec.CommandContext(cctx, filepath.Join(filepath.Dir(b.Script), OperatorScriptName), args...)
 		cmd.Stdout, cmd.Stderr = &so, &se

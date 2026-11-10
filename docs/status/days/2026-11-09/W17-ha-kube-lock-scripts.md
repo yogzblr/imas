@@ -1,0 +1,5 @@
+change: W17: the UAT harness holds a kube tunnel's shared lock (W11) for every script and helm call that runs kubectl on it, not only for its own kubectl and acceptance.sh. Run 3 on v0.1.0-rc.23 (run 42542177384) failed HA6 when bind-tenant.sh --scratch-user, which held no lock, got "connection refused" on uat-core-2's kube tunnel (127.0.0.1:20109) at 02:47:11Z, two seconds into the supervisor's reopen of that tunnel (02:47:09Z to 02:47:19Z, diagnostics/channel/supervisor.log). bind-tenant.sh, operator-release.sh, the core check and HA3's helm upgrade now go through one helper that, on an HA hub, first points the kubeconfig at a node that answers (kube-select, W12) and then holds the lock for the call. A new test runs each through a stub that takes the lock exclusively as a reopen does: four of the five calls failed it before the change. Test harness only; the next HA run is the end-to-end check.
+item: P24
+action: update
+next-append: **W17 (2026-11-09):** HA6 on rc.23 failed on the test channel, not the product: the supervisor reopened the core kube tunnel under bind-tenant.sh, which held no tunnel lock. Fixed in the harness.
+pr: 332

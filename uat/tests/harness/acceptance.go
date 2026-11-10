@@ -62,10 +62,7 @@ func (f *Fleet) CoreProbe(ctx context.Context, stdin []byte, verb string, args .
 		// UAT Run 2's D1 lost its connection to a reopen).
 		// An HA core hub: on a node that answers first (W12); acceptance.sh
 		// is not retried, its verbs may have run.
-		if f.Env.UAT.Core.HA() {
-			preSelect(cctx, "core", b.Kubeconfig)
-		}
-		release := holdKubeTunnel(cctx, b.Kubeconfig)
+		release := onKubeTunnel(cctx, "core", b.Kubeconfig, f.Env.UAT.Core.HA())
 		defer release()
 		var so, se bytes.Buffer
 		cmd := exec.CommandContext(cctx, filepath.Join(filepath.Dir(b.Script), AcceptanceScriptName), full...)

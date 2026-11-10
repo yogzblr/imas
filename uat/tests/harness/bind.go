@@ -81,6 +81,10 @@ func (f *Fleet) bindScratchUser(ctx context.Context, name, role, tenantID string
 	if f.BindExec != nil {
 		stdout, stderr, err = f.BindExec(cctx, args)
 	} else {
+		// Its kubectl calls (Keycloak through the core API) hold the core
+		// kube tunnel's shared lock, on a node that answers (HA6, Run 3).
+		release := onKubeTunnel(cctx, "core", b.Kubeconfig, f.Env.UAT.Core.HA())
+		defer release()
 		var so, se bytes.Buffer
 		cmd := exec.CommandContext(cctx, b.Script, args...)
 		cmd.Stdout, cmd.Stderr = &so, &se
