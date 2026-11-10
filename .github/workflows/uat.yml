@@ -125,7 +125,10 @@ jobs:
   uat:
     if: github.repository == 'yogzblr/imas'
     environment: uat
-    runs-on: ubuntu-latest
+    # Pinned (owner, 2026-11-10): ubuntu-latest moved to ubuntu-26.04 on
+    # 2026-11-09, and the gate's scripts were last proven on ubuntu-24.04's
+    # tools (OpenSSL, curl, Python). Move it on purpose, with a UAT run.
+    runs-on: ubuntu-24.04
     # GitHub hosted jobs stop at 6 hours. The run's expires_at is set past
     # that (check-inputs.sh, run_budget_hours), so the janitor never deletes a
     # live run.
