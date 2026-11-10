@@ -2,3 +2,4 @@ change: W20: the UAT gate workflow (uat.yml) runs on ubuntu-24.04 instead of ubu
 item: P24
 action: update
 next-append: **W20 (2026-11-10):** uat.yml pinned to ubuntu-24.04.
+pr: 336
